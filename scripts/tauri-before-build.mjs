@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const useShell = process.platform === "win32";
 
 const env = {
   ...process.env,
@@ -13,11 +14,13 @@ const env = {
 execFileSync(pnpm, ["copy-proxy-binary"], {
   cwd: repoRoot,
   env,
+  shell: useShell,
   stdio: "inherit",
 });
 
 execFileSync(pnpm, ["exec", "next", "build"], {
   cwd: repoRoot,
   env,
+  shell: useShell,
   stdio: "inherit",
 });
