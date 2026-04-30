@@ -34,6 +34,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -198,9 +199,13 @@ export function CreateProfileDialog({
   const {
     isBrowserDownloading,
     downloadBrowser,
+    cancelBrowserDownload,
     loadDownloadedVersions,
     isVersionDownloaded,
     downloadedVersionsMap,
+    downloadProgress,
+    formatBytes,
+    formatTime,
   } = useBrowserDownload();
 
   const loadSupportedBrowsers = useCallback(async () => {
@@ -262,9 +267,7 @@ export function CreateProfileDialog({
             setReleaseTypesError(null);
           } else if (loadingBrowserRef.current === browser) {
             // No downloaded versions and API failed - show error
-            setReleaseTypesError(
-              "Failed to fetch browser versions. Please check your internet connection and try again.",
-            );
+            setReleaseTypesError(t("createProfile.version.fetchError"));
           }
         } catch (e) {
           console.error(
@@ -272,9 +275,7 @@ export function CreateProfileDialog({
             e,
           );
           if (loadingBrowserRef.current === browser) {
-            setReleaseTypesError(
-              "Failed to fetch browser versions. Please check your internet connection and try again.",
-            );
+            setReleaseTypesError(t("createProfile.version.fetchError"));
           }
         }
       } finally {
@@ -285,7 +286,7 @@ export function CreateProfileDialog({
         }
       }
     },
-    [loadDownloadedVersions],
+    [loadDownloadedVersions, t],
   );
 
   // Load data when dialog opens
@@ -514,6 +515,126 @@ export function CreateProfileDialog({
       return isBrowserDownloading(browserStr);
     },
     [isBrowserDownloading],
+  );
+
+  const getInstalledVersion = useCallback(
+    (browserStr: string) => downloadedVersionsMap[browserStr]?.[0],
+    [downloadedVersionsMap],
+  );
+
+  const isBrowserUpdateAvailable = useCallback(
+    (browserStr: string) => {
+      const latest = getBestAvailableVersion(browserStr)?.version;
+      const installed = downloadedVersionsMap[browserStr] ?? [];
+      return Boolean(
+        latest && installed.length > 0 && !installed.includes(latest),
+      );
+    },
+    [downloadedVersionsMap, getBestAvailableVersion],
+  );
+
+  const getDownloadStageLabel = useCallback(
+    (stage?: string) => {
+      switch (stage) {
+        case "extracting":
+          return t("browserDownload.toast.extracting");
+        case "verifying":
+          return t("browserDownload.toast.verifying");
+        case "cancelled":
+          return t("createProfile.version.cancelled");
+        default:
+          return t("common.buttons.downloading");
+      }
+    },
+    [t],
+  );
+
+  const handleCancelDownload = useCallback(
+    async (browserStr: string) => {
+      const version =
+        downloadProgress?.browser === browserStr
+          ? downloadProgress.version
+          : getBestAvailableVersion(browserStr)?.version;
+      if (!version) return;
+
+      try {
+        await cancelBrowserDownload(browserStr, version);
+      } catch (error) {
+        console.error("Failed to cancel browser download:", error);
+      }
+    },
+    [cancelBrowserDownload, downloadProgress, getBestAvailableVersion],
+  );
+
+  const renderDownloadProgress = useCallback(
+    (browserStr: string, browserLabel: string) => {
+      const progress =
+        downloadProgress?.browser === browserStr ? downloadProgress : null;
+      const version =
+        progress?.version ?? getBestAvailableVersion(browserStr)?.version;
+      const percentage = progress?.percentage ?? 0;
+      const canPause = progress?.stage === "downloading";
+
+      return (
+        <div className="space-y-3 p-3 rounded-md border text-muted-foreground">
+          <div className="flex gap-3 justify-between items-center">
+            <div className="min-w-0 space-y-1">
+              <p className="text-sm font-medium text-foreground">
+                {t("createProfile.version.downloadProgress", {
+                  browser: browserLabel,
+                  version,
+                  percent: Math.round(percentage),
+                })}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {progress
+                  ? getDownloadStageLabel(progress.stage)
+                  : t("createProfile.version.preparingDownload")}
+              </p>
+            </div>
+            {canPause && (
+              <RippleButton
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  void handleCancelDownload(browserStr);
+                }}
+              >
+                {t("createProfile.version.pauseDownload")}
+              </RippleButton>
+            )}
+          </div>
+          <Progress value={percentage} />
+          {progress && (
+            <p className="text-xs text-muted-foreground">
+              {progress.total_bytes
+                ? t("createProfile.version.downloadDetails", {
+                    downloaded: formatBytes(progress.downloaded_bytes),
+                    total: formatBytes(progress.total_bytes),
+                    speed: formatBytes(progress.speed_bytes_per_sec),
+                    eta: progress.eta_seconds
+                      ? formatTime(progress.eta_seconds)
+                      : t("browserDownload.toast.calculating"),
+                  })
+                : t("createProfile.version.downloadDetailsNoTotal", {
+                    downloaded: formatBytes(progress.downloaded_bytes),
+                    speed: formatBytes(progress.speed_bytes_per_sec),
+                  })}
+            </p>
+          )}
+        </div>
+      );
+    },
+    [
+      downloadProgress,
+      formatBytes,
+      formatTime,
+      getBestAvailableVersion,
+      getDownloadStageLabel,
+      handleCancelDownload,
+      t,
+    ],
   );
 
   const isCreateDisabled = useMemo(() => {
@@ -761,6 +882,7 @@ export function CreateProfileDialog({
                             {!isLoadingReleaseTypes &&
                               !releaseTypesError &&
                               !isBrowserCurrentlyDownloading("wayfern") &&
+                              !getInstalledVersion("wayfern") &&
                               !isBrowserVersionAvailable("wayfern") &&
                               getBestAvailableVersion("wayfern") && (
                                 <div className="flex gap-3 items-center p-3 rounded-md border">
@@ -793,6 +915,38 @@ export function CreateProfileDialog({
                             {!isLoadingReleaseTypes &&
                               !releaseTypesError &&
                               !isBrowserCurrentlyDownloading("wayfern") &&
+                              isBrowserUpdateAvailable("wayfern") && (
+                                <div className="flex gap-3 items-center p-3 rounded-md border border-warning/50 bg-warning/10">
+                                  <p className="flex-1 text-sm text-warning">
+                                    {t(
+                                      "createProfile.version.updateAvailable",
+                                      {
+                                        browser: "Wayfern",
+                                        current:
+                                          getInstalledVersion("wayfern") ??
+                                          t("common.labels.unknown"),
+                                        latest:
+                                          getBestAvailableVersion("wayfern")
+                                            ?.version,
+                                      },
+                                    )}
+                                  </p>
+                                  <LoadingButton
+                                    onClick={() => {
+                                      void handleDownload("wayfern");
+                                    }}
+                                    isLoading={isBrowserCurrentlyDownloading(
+                                      "wayfern",
+                                    )}
+                                    size="sm"
+                                  >
+                                    {t("common.buttons.download")}
+                                  </LoadingButton>
+                                </div>
+                              )}
+                            {!isLoadingReleaseTypes &&
+                              !releaseTypesError &&
+                              !isBrowserCurrentlyDownloading("wayfern") &&
                               isBrowserVersionAvailable("wayfern") && (
                                 <div className="p-3 text-sm rounded-md border text-muted-foreground">
                                   ✓{" "}
@@ -804,22 +958,15 @@ export function CreateProfileDialog({
                                   })}
                                 </div>
                               )}
-                            {isBrowserCurrentlyDownloading("wayfern") && (
-                              <div className="p-3 text-sm rounded-md border text-muted-foreground">
-                                {t("createProfile.version.downloading", {
-                                  browser: "Wayfern",
-                                  version:
-                                    getBestAvailableVersion("wayfern")?.version,
-                                })}
-                              </div>
-                            )}
+                            {isBrowserCurrentlyDownloading("wayfern") &&
+                              renderDownloadProgress("wayfern", "Wayfern")}
 
                             <WayfernConfigForm
                               config={wayfernConfig}
                               onConfigChange={updateWayfernConfig}
                               isCreating
                               crossOsUnlocked={crossOsUnlocked}
-                              limitedMode={!crossOsUnlocked}
+                              limitedMode={false}
                               profileVersion={
                                 getBestAvailableVersion("wayfern")?.version
                               }
@@ -869,6 +1016,7 @@ export function CreateProfileDialog({
                             {!isLoadingReleaseTypes &&
                               !releaseTypesError &&
                               !isBrowserCurrentlyDownloading("camoufox") &&
+                              !getInstalledVersion("camoufox") &&
                               !isBrowserVersionAvailable("camoufox") &&
                               getBestAvailableVersion("camoufox") && (
                                 <div className="flex gap-3 items-center p-3 rounded-md border">
@@ -901,6 +1049,38 @@ export function CreateProfileDialog({
                             {!isLoadingReleaseTypes &&
                               !releaseTypesError &&
                               !isBrowserCurrentlyDownloading("camoufox") &&
+                              isBrowserUpdateAvailable("camoufox") && (
+                                <div className="flex gap-3 items-center p-3 rounded-md border border-warning/50 bg-warning/10">
+                                  <p className="flex-1 text-sm text-warning">
+                                    {t(
+                                      "createProfile.version.updateAvailable",
+                                      {
+                                        browser: "Camoufox",
+                                        current:
+                                          getInstalledVersion("camoufox") ??
+                                          t("common.labels.unknown"),
+                                        latest:
+                                          getBestAvailableVersion("camoufox")
+                                            ?.version,
+                                      },
+                                    )}
+                                  </p>
+                                  <LoadingButton
+                                    onClick={() => {
+                                      void handleDownload("camoufox");
+                                    }}
+                                    isLoading={isBrowserCurrentlyDownloading(
+                                      "camoufox",
+                                    )}
+                                    size="sm"
+                                  >
+                                    {t("common.buttons.download")}
+                                  </LoadingButton>
+                                </div>
+                              )}
+                            {!isLoadingReleaseTypes &&
+                              !releaseTypesError &&
+                              !isBrowserCurrentlyDownloading("camoufox") &&
                               isBrowserVersionAvailable("camoufox") && (
                                 <div className="p-3 text-sm rounded-md border text-muted-foreground">
                                   ✓{" "}
@@ -912,24 +1092,14 @@ export function CreateProfileDialog({
                                   })}
                                 </div>
                               )}
-                            {isBrowserCurrentlyDownloading("camoufox") && (
-                              <div className="p-3 text-sm rounded-md border text-muted-foreground">
-                                {t("createProfile.version.downloading", {
-                                  browser: "Camoufox",
-                                  version:
-                                    getBestAvailableVersion("camoufox")
-                                      ?.version,
-                                })}
-                              </div>
-                            )}
+                            {isBrowserCurrentlyDownloading("camoufox") &&
+                              renderDownloadProgress("camoufox", "Camoufox")}
 
-                            {crossOsUnlocked && (
-                              <Alert className="border-warning/50 bg-warning/10">
-                                <AlertDescription className="text-sm">
-                                  {t("createProfile.camoufoxWarning")}
-                                </AlertDescription>
-                              </Alert>
-                            )}
+                            <Alert className="border-warning/50 bg-warning/10">
+                              <AlertDescription className="text-sm">
+                                {t("createProfile.camoufoxWarning")}
+                              </AlertDescription>
+                            </Alert>
 
                             <SharedCamoufoxConfigForm
                               config={camoufoxConfig}
@@ -937,7 +1107,7 @@ export function CreateProfileDialog({
                               isCreating
                               browserType="camoufox"
                               crossOsUnlocked={crossOsUnlocked}
-                              limitedMode={!crossOsUnlocked}
+                              limitedMode={false}
                               profileVersion={
                                 getBestAvailableVersion("camoufox")?.version
                               }
@@ -980,6 +1150,7 @@ export function CreateProfileDialog({
                                   !isBrowserCurrentlyDownloading(
                                     selectedBrowser,
                                   ) &&
+                                  !getInstalledVersion(selectedBrowser) &&
                                   !isBrowserVersionAvailable(selectedBrowser) &&
                                   getBestAvailableVersion(selectedBrowser) && (
                                     <div className="flex gap-3 items-center">
@@ -1016,6 +1187,45 @@ export function CreateProfileDialog({
                                   !isBrowserCurrentlyDownloading(
                                     selectedBrowser,
                                   ) &&
+                                  isBrowserUpdateAvailable(selectedBrowser) && (
+                                    <div className="flex gap-3 items-center p-3 rounded-md border border-warning/50 bg-warning/10">
+                                      <p className="flex-1 text-sm text-warning">
+                                        {t(
+                                          "createProfile.version.updateAvailable",
+                                          {
+                                            browser:
+                                              selectedBrowser === "wayfern"
+                                                ? "Wayfern"
+                                                : "Camoufox",
+                                            current:
+                                              getInstalledVersion(
+                                                selectedBrowser,
+                                              ) ?? t("common.labels.unknown"),
+                                            latest:
+                                              getBestAvailableVersion(
+                                                selectedBrowser,
+                                              )?.version,
+                                          },
+                                        )}
+                                      </p>
+                                      <LoadingButton
+                                        onClick={() => {
+                                          void handleDownload(selectedBrowser);
+                                        }}
+                                        isLoading={isBrowserCurrentlyDownloading(
+                                          selectedBrowser,
+                                        )}
+                                        size="sm"
+                                      >
+                                        {t("common.buttons.download")}
+                                      </LoadingButton>
+                                    </div>
+                                  )}
+                                {!isLoadingReleaseTypes &&
+                                  !releaseTypesError &&
+                                  !isBrowserCurrentlyDownloading(
+                                    selectedBrowser,
+                                  ) &&
                                   isBrowserVersionAvailable(
                                     selectedBrowser,
                                   ) && (
@@ -1034,19 +1244,13 @@ export function CreateProfileDialog({
                                   )}
                                 {isBrowserCurrentlyDownloading(
                                   selectedBrowser,
-                                ) && (
-                                  <div className="text-sm text-muted-foreground">
-                                    {t(
-                                      "createProfile.version.latestDownloading",
-                                      {
-                                        version:
-                                          getBestAvailableVersion(
-                                            selectedBrowser,
-                                          )?.version,
-                                      },
-                                    )}
-                                  </div>
-                                )}
+                                ) &&
+                                  renderDownloadProgress(
+                                    selectedBrowser,
+                                    selectedBrowser === "wayfern"
+                                      ? "Wayfern"
+                                      : "Camoufox",
+                                  )}
                               </div>
                             )}
                           </div>
@@ -1157,7 +1361,9 @@ export function CreateProfileDialog({
                                       ))}
                                     </CommandGroup>
                                     {vpnConfigs.length > 0 && (
-                                      <CommandGroup heading="VPNs">
+                                      <CommandGroup
+                                        heading={t("profileTable.vpnsHeading")}
+                                      >
                                         {vpnConfigs.map((vpn) => (
                                           <CommandItem
                                             key={vpn.id}
@@ -1324,7 +1530,7 @@ export function CreateProfileDialog({
                                 <div className="flex gap-3 items-center">
                                   <div className="w-4 h-4 rounded-full border-2 animate-spin border-muted/40 border-t-primary" />
                                   <p className="text-sm text-muted-foreground">
-                                    Fetching available versions...
+                                    {t("createProfile.version.fetching")}
                                   </p>
                                 </div>
                               )}
@@ -1350,6 +1556,7 @@ export function CreateProfileDialog({
                                 !isBrowserCurrentlyDownloading(
                                   selectedBrowser,
                                 ) &&
+                                !getInstalledVersion(selectedBrowser) &&
                                 !isBrowserVersionAvailable(selectedBrowser) &&
                                 getBestAvailableVersion(selectedBrowser) && (
                                   <div className="flex gap-3 items-center">
@@ -1386,6 +1593,45 @@ export function CreateProfileDialog({
                                 !isBrowserCurrentlyDownloading(
                                   selectedBrowser,
                                 ) &&
+                                isBrowserUpdateAvailable(selectedBrowser) && (
+                                  <div className="flex gap-3 items-center p-3 rounded-md border border-warning/50 bg-warning/10">
+                                    <p className="flex-1 text-sm text-warning">
+                                      {t(
+                                        "createProfile.version.updateAvailable",
+                                        {
+                                          browser:
+                                            selectedBrowser === "wayfern"
+                                              ? "Wayfern"
+                                              : "Camoufox",
+                                          current:
+                                            getInstalledVersion(
+                                              selectedBrowser,
+                                            ) ?? t("common.labels.unknown"),
+                                          latest:
+                                            getBestAvailableVersion(
+                                              selectedBrowser,
+                                            )?.version,
+                                        },
+                                      )}
+                                    </p>
+                                    <LoadingButton
+                                      onClick={() => {
+                                        void handleDownload(selectedBrowser);
+                                      }}
+                                      isLoading={isBrowserCurrentlyDownloading(
+                                        selectedBrowser,
+                                      )}
+                                      size="sm"
+                                    >
+                                      {t("common.buttons.download")}
+                                    </LoadingButton>
+                                  </div>
+                                )}
+                              {!isLoadingReleaseTypes &&
+                                !releaseTypesError &&
+                                !isBrowserCurrentlyDownloading(
+                                  selectedBrowser,
+                                ) &&
                                 isBrowserVersionAvailable(selectedBrowser) && (
                                   <div className="text-sm text-muted-foreground">
                                     ✓{" "}
@@ -1400,20 +1646,13 @@ export function CreateProfileDialog({
                                     )}
                                   </div>
                                 )}
-                              {isBrowserCurrentlyDownloading(
-                                selectedBrowser,
-                              ) && (
-                                <div className="text-sm text-muted-foreground">
-                                  {t(
-                                    "createProfile.version.latestDownloading",
-                                    {
-                                      version:
-                                        getBestAvailableVersion(selectedBrowser)
-                                          ?.version,
-                                    },
-                                  )}
-                                </div>
-                              )}
+                              {isBrowserCurrentlyDownloading(selectedBrowser) &&
+                                renderDownloadProgress(
+                                  selectedBrowser,
+                                  selectedBrowser === "wayfern"
+                                    ? "Wayfern"
+                                    : "Camoufox",
+                                )}
                             </div>
                           )}
                         </div>
@@ -1523,7 +1762,9 @@ export function CreateProfileDialog({
                                       ))}
                                     </CommandGroup>
                                     {vpnConfigs.length > 0 && (
-                                      <CommandGroup heading="VPNs">
+                                      <CommandGroup
+                                        heading={t("profileTable.vpnsHeading")}
+                                      >
                                         {vpnConfigs.map((vpn) => (
                                           <CommandItem
                                             key={vpn.id}

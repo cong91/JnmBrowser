@@ -1703,10 +1703,19 @@ rm "{}"
   }
 }
 
+fn app_auto_updates_enabled() -> bool {
+  false
+}
+
 // Tauri commands
 
 #[tauri::command]
 pub async fn check_for_app_updates() -> Result<Option<AppUpdateInfo>, String> {
+  if !app_auto_updates_enabled() {
+    log::info!("App auto-update checks are disabled");
+    return Ok(None);
+  }
+
   if crate::app_dirs::is_portable() {
     log::info!("App auto-updates disabled in portable mode");
     return Ok(None);
@@ -1733,6 +1742,11 @@ pub async fn download_and_prepare_app_update(
   app_handle: tauri::AppHandle,
   update_info: AppUpdateInfo,
 ) -> Result<(), String> {
+  if !app_auto_updates_enabled() {
+    log::info!("App auto-update download is disabled");
+    return Err("App auto-updates are disabled".to_string());
+  }
+
   let updater = AppAutoUpdater::instance();
   updater
     .download_and_prepare_update(&app_handle, &update_info)
@@ -1751,6 +1765,11 @@ pub async fn restart_application() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn check_for_app_updates_manual() -> Result<Option<AppUpdateInfo>, String> {
+  if !app_auto_updates_enabled() {
+    log::info!("Manual app update checks are disabled");
+    return Ok(None);
+  }
+
   log::info!("Manual app update check triggered");
   let updater = AppAutoUpdater::instance();
   updater

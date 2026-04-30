@@ -6,6 +6,11 @@ use crate::events;
 use crate::settings_manager::SettingsManager;
 
 const TRIAL_DURATION_SECONDS: u64 = 14 * 24 * 60 * 60; // 2 weeks
+const DISABLED_TRIAL_REMAINING_SECONDS: u64 = 100 * 365 * 24 * 60 * 60;
+
+fn commercial_trial_enabled() -> bool {
+  false
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -34,6 +39,15 @@ impl CommercialLicenseManager {
   }
 
   pub async fn get_trial_status(&self, app_handle: &AppHandle) -> Result<TrialStatus, String> {
+    if !commercial_trial_enabled() {
+      return Ok(TrialStatus::Active {
+        remaining_seconds: DISABLED_TRIAL_REMAINING_SECONDS,
+        days_remaining: DISABLED_TRIAL_REMAINING_SECONDS / (24 * 60 * 60),
+        hours_remaining: 0,
+        minutes_remaining: 0,
+      });
+    }
+
     let first_launch = self.get_or_set_first_launch(app_handle).await?;
     let now = Self::get_current_timestamp();
 
@@ -89,6 +103,10 @@ impl CommercialLicenseManager {
   }
 
   pub async fn acknowledge_expiration(&self, _app_handle: &AppHandle) -> Result<(), String> {
+    if !commercial_trial_enabled() {
+      return Ok(());
+    }
+
     let settings_manager = SettingsManager::instance();
     let mut settings = settings_manager
       .load_settings()
@@ -104,6 +122,10 @@ impl CommercialLicenseManager {
   }
 
   pub fn has_acknowledged(&self, _app_handle: &AppHandle) -> Result<bool, String> {
+    if !commercial_trial_enabled() {
+      return Ok(true);
+    }
+
     let settings_manager = SettingsManager::instance();
     let settings = settings_manager
       .load_settings()

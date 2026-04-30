@@ -119,7 +119,6 @@ export function ProfileInfoDialog({
   onCloneProfile,
   onDeleteProfile,
   onLaunchWithSync,
-  crossOsUnlocked = false,
   isRunning = false,
   isDisabled = false,
   isCrossOs = false,
@@ -282,8 +281,7 @@ export function ProfileInfoDialog({
       onClick: () => {
         handleAction(() => onLaunchWithSync?.(profile));
       },
-      disabled: isDisabled || isRunning || !crossOsUnlocked,
-      proBadge: !crossOsUnlocked,
+      disabled: isDisabled || isRunning,
       hidden: profile.browser !== "wayfern" || !onLaunchWithSync,
     },
     {

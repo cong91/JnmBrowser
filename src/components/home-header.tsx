@@ -236,7 +236,7 @@ const HomeHeader = ({
         ) : (
           <div className="p-1 w-10 h-10" />
         )}
-        <CardTitle>Donut</CardTitle>
+        <CardTitle>{t("header.appName")}</CardTitle>
       </div>
       <div className="flex gap-2 items-center">
         <div className="relative">

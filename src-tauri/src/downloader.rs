@@ -1,4 +1,4 @@
-use reqwest::Client;
+use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -43,6 +43,10 @@ impl Downloader {
   fn new() -> Self {
     Self {
       client: Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_else(|_| Client::new()),
@@ -330,6 +334,7 @@ impl Downloader {
       let mut request = self
         .client
         .get(&download_url)
+        .header(header::ACCEPT_ENCODING, "identity")
         .header(
           "User-Agent",
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
@@ -474,8 +479,7 @@ impl Downloader {
       if let Some(token) = cancel_token {
         if token.is_cancelled() {
           drop(file);
-          let _ = std::fs::remove_file(&file_path);
-          return Err("Download cancelled".into());
+          return Err("Download paused".into());
         }
       }
       let chunk = chunk?;
@@ -545,6 +549,25 @@ impl Downloader {
       return Err("Please accept Wayfern Terms and Conditions before downloading browsers".into());
     }
 
+    let browser_type =
+      BrowserType::from_str(&browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
+
+    // Register cancellation before any slow version-resolution network calls so the UI can pause
+    // while the downloader is still preparing the real asset URL.
+    let requested_download_key = format!("{browser_str}-{version}");
+    let cancel_token = {
+      let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
+      if downloading.contains(&requested_download_key) {
+        return Err(format!("Browser '{browser_str}' version '{version}' is already being downloaded. Please wait for the current download to complete.").into());
+      }
+      downloading.insert(requested_download_key.clone());
+
+      let token = CancellationToken::new();
+      let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
+      tokens.insert(requested_download_key.clone(), token.clone());
+      token
+    };
+
     // For Wayfern/Camoufox, resolve the actual available version from the API
     let version = if browser_str == "wayfern" {
       match self
@@ -580,24 +603,38 @@ impl Downloader {
       version
     };
 
-    // Check if this browser-version pair is already being downloaded
-    let download_key = format!("{browser_str}-{version}");
-    let cancel_token = {
+    if cancel_token.is_cancelled() {
       let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
-      if downloading.contains(&download_key) {
+      downloading.remove(&requested_download_key);
+      drop(downloading);
+      let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
+      tokens.remove(&requested_download_key);
+      return Err("Download paused".into());
+    }
+
+    // If version resolution changed the version string, move the active lock/token to the
+    // resolved key used by all subsequent cleanup and progress events.
+    let mut download_key = requested_download_key.clone();
+    let resolved_download_key = format!("{browser_str}-{version}");
+    if resolved_download_key != requested_download_key {
+      let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
+      if downloading.contains(&resolved_download_key) {
+        downloading.remove(&requested_download_key);
+        drop(downloading);
+        let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
+        tokens.remove(&requested_download_key);
         return Err(format!("Browser '{browser_str}' version '{version}' is already being downloaded. Please wait for the current download to complete.").into());
       }
-      // Mark this browser-version pair as being downloaded
-      downloading.insert(download_key.clone());
-
-      let token = CancellationToken::new();
+      downloading.remove(&requested_download_key);
+      downloading.insert(resolved_download_key.clone());
+      drop(downloading);
       let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
-      tokens.insert(download_key.clone(), token.clone());
-      token
-    };
+      if let Some(token) = tokens.remove(&requested_download_key) {
+        tokens.insert(resolved_download_key.clone(), token);
+      }
+      download_key = resolved_download_key;
+    }
 
-    let browser_type =
-      BrowserType::from_str(&browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
     let browser = create_browser(browser_type.clone());
 
     // Use injected registry instance
@@ -709,7 +746,7 @@ impl Downloader {
           let _ = events::emit("download-progress", &progress);
         }
 
-        return Err(format!("Failed to download browser: {e}").into());
+        return Err(e);
       }
     };
 

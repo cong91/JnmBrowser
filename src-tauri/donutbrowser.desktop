@@ -1,10 +1,10 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Donut
-Name[en]=Donut
+Name=JnmBrowser
+Name[en]=JnmBrowser
 GenericName=Web Browser
-X-GNOME-FullName=Donut
+X-GNOME-FullName=JnmBrowser
 Comment=Simple Yet Powerful Anti-Detect Browser
 Exec=donutbrowser %u
 Icon=donutbrowser

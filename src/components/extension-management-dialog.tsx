@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ProBadge } from "@/components/ui/pro-badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -95,13 +94,11 @@ function getSyncStatusDot(
 interface ExtensionManagementDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  limitedMode: boolean;
 }
 
 export function ExtensionManagementDialog({
   isOpen,
   onClose,
-  limitedMode,
 }: ExtensionManagementDialogProps) {
   const { t } = useTranslation();
   const [extensions, setExtensions] = useState<Extension[]>([]);
@@ -167,7 +164,6 @@ export function ExtensionManagementDialog({
   );
 
   const loadData = useCallback(async () => {
-    if (limitedMode) return;
     setIsLoading(true);
     try {
       const [exts, groups] = await Promise.all([
@@ -177,13 +173,12 @@ export function ExtensionManagementDialog({
       setExtensions(exts);
       setExtensionGroups(groups);
     } catch {
-      // User may not have pro subscription
       setExtensions([]);
       setExtensionGroups([]);
     } finally {
       setIsLoading(false);
     }
-  }, [limitedMode]);
+  }, []);
 
   const loadIcons = useCallback(async (exts: Extension[]) => {
     const icons: Record<string, string> = {};
@@ -532,31 +527,12 @@ export function ExtensionManagementDialog({
             <DialogTitle className="flex items-center gap-2">
               <LuPuzzle className="w-5 h-5" />
               {t("extensions.title")}
-              {limitedMode && <ProBadge />}
             </DialogTitle>
             <DialogDescription>{t("extensions.description")}</DialogDescription>
           </DialogHeader>
 
           <ScrollArea className="overflow-y-auto flex-1">
             <div className="relative">
-              {limitedMode && (
-                <>
-                  <div className="absolute inset-0 backdrop-blur-[6px] bg-background/30 z-[1]" />
-                  <div className="absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-background to-transparent z-[2]" />
-                  <div className="absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-background to-transparent z-[2]" />
-                  <div className="absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-background to-transparent z-[2]" />
-                  <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-background to-transparent z-[2]" />
-                  <div className="absolute inset-0 flex items-center justify-center z-[3]">
-                    <div className="flex items-center gap-2 rounded-md bg-background/80 px-3 py-1.5">
-                      <ProBadge />
-                      <span className="text-sm font-medium text-muted-foreground">
-                        {t("extensions.proRequired")}
-                      </span>
-                    </div>
-                  </div>
-                </>
-              )}
-
               <div className="space-y-4">
                 {/* Tab selector */}
                 <div className="flex gap-2 border-b">
@@ -570,7 +546,6 @@ export function ExtensionManagementDialog({
                     onClick={() => {
                       setActiveTab("extensions");
                     }}
-                    disabled={limitedMode}
                   >
                     {t("extensions.extensionsTab")}
                   </button>
@@ -584,7 +559,6 @@ export function ExtensionManagementDialog({
                     onClick={() => {
                       setActiveTab("groups");
                     }}
-                    disabled={limitedMode}
                   >
                     {t("extensions.groupsTab")}
                   </button>
@@ -604,7 +578,6 @@ export function ExtensionManagementDialog({
                           <RippleButton
                             size="sm"
                             className="flex gap-2 items-center"
-                            disabled={limitedMode}
                             onClick={() =>
                               document.getElementById("ext-file-input")?.click()
                             }
@@ -619,7 +592,6 @@ export function ExtensionManagementDialog({
                           accept=".xpi,.crx,.zip"
                           className="hidden"
                           onChange={handleFileSelect}
-                          disabled={limitedMode}
                         />
                       </div>
                     </div>
@@ -787,7 +759,6 @@ export function ExtensionManagementDialog({
                           setShowCreateGroup(true);
                         }}
                         className="flex gap-2 items-center"
-                        disabled={limitedMode}
                       >
                         <GoPlus className="w-4 h-4" />
                         {t("extensions.createGroup")}

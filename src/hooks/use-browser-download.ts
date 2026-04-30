@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Event as TauriEvent } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "@/i18n";
 import { getBrowserDisplayName } from "@/lib/browser-utils";
 import {
@@ -46,6 +46,19 @@ interface BrowserVersionsResult {
   total_versions_count: number;
 }
 
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error && typeof error === "object" && "message" in error) {
+    return String(error.message);
+  }
+  return "";
+};
+
 export function useBrowserDownload() {
   const [availableVersions, setAvailableVersions] = useState<GithubRelease[]>(
     [],
@@ -58,6 +71,7 @@ export function useBrowserDownload() {
   );
   const [downloadProgress, setDownloadProgress] =
     useState<DownloadProgress | null>(null);
+  const activeDownloadRequestsRef = useRef<Set<string>>(new Set());
 
   const formatTime = useCallback((seconds: number): string => {
     if (seconds < 60) {
@@ -79,6 +93,23 @@ export function useBrowserDownload() {
     const sizes = ["B", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return `${Number.parseFloat((bytes / k ** i).toFixed(1))} ${sizes[i]}`;
+  }, []);
+
+  const isUserCancelledDownload = useCallback((error: unknown): boolean => {
+    const normalized = getErrorMessage(error).toLowerCase();
+    return normalized.includes("cancelled") || normalized.includes("paused");
+  }, []);
+
+  const isDuplicateDownload = useCallback((error: unknown): boolean => {
+    return getErrorMessage(error)
+      .toLowerCase()
+      .includes("already being downloaded");
+  }, []);
+
+  const isNoActiveDownload = useCallback((error: unknown): boolean => {
+    return getErrorMessage(error)
+      .toLowerCase()
+      .includes("no active download found");
   }, []);
 
   const loadVersions = useCallback(async (browserStr: string) => {
@@ -208,6 +239,10 @@ export function useBrowserDownload() {
       suppressNotifications = false,
     ) => {
       const browserName = getBrowserDisplayName(browserStr);
+      if (activeDownloadRequestsRef.current.has(browserStr)) {
+        return;
+      }
+      activeDownloadRequestsRef.current.add(browserStr);
       setDownloadingBrowsers((prev) => new Set(prev).add(browserStr));
 
       try {
@@ -230,20 +265,21 @@ export function useBrowserDownload() {
         await invoke("download_browser", { browserStr, version });
         await loadDownloadedVersions(browserStr);
       } catch (error) {
+        if (isUserCancelledDownload(error) || isDuplicateDownload(error)) {
+          return;
+        }
+
         console.error("Failed to download browser:", error);
 
         if (!suppressNotifications) {
           // Dismiss any existing download toast and show error
           dismissToast(`download-${browserStr}-${version}`);
+          setDownloadProgress((prev) =>
+            prev?.browser === browserStr ? null : prev,
+          );
 
-          let errorMessage = i18n.t("common.errors.unknown");
-          if (error instanceof Error) {
-            errorMessage = error.message;
-          } else if (typeof error === "string") {
-            errorMessage = error;
-          } else if (error && typeof error === "object" && "message" in error) {
-            errorMessage = String(error.message);
-          }
+          const errorMessage =
+            getErrorMessage(error) || i18n.t("common.errors.unknown");
 
           // Ensure the long-running download toast is dismissed, and show a finite error toast
           dismissToast(`download-${browserStr}-${version}`);
@@ -265,9 +301,34 @@ export function useBrowserDownload() {
           next.delete(browserStr);
           return next;
         });
+        activeDownloadRequestsRef.current.delete(browserStr);
       }
     },
-    [loadDownloadedVersions],
+    [isDuplicateDownload, isUserCancelledDownload, loadDownloadedVersions],
+  );
+
+  const cancelBrowserDownload = useCallback(
+    async (browserStr: string, version: string) => {
+      const browserName = getBrowserDisplayName(browserStr);
+      try {
+        await invoke("cancel_download", { browserStr, version });
+      } catch (error) {
+        if (!isNoActiveDownload(error)) {
+          throw error;
+        }
+      }
+      dismissToast(`download-${browserName.toLowerCase()}-${version}`);
+      setDownloadingBrowsers((prev) => {
+        const next = new Set(prev);
+        next.delete(browserStr);
+        return next;
+      });
+      activeDownloadRequestsRef.current.delete(browserStr);
+      setDownloadProgress((prev) =>
+        prev?.browser === browserStr && prev.version === version ? null : prev,
+      );
+    },
+    [isNoActiveDownload],
   );
 
   const isVersionDownloaded = useCallback(
@@ -326,7 +387,6 @@ export function useBrowserDownload() {
                 ? formatTime(progress.eta_seconds)
                 : i18n.t("browserDownload.toast.calculating");
 
-              const toastId = `download-${browserName.toLowerCase()}-${progress.version}`;
               showDownloadToast(
                 browserName,
                 progress.version,
@@ -338,13 +398,12 @@ export function useBrowserDownload() {
                 },
                 {
                   onCancel: () => {
-                    invoke("cancel_download", {
-                      browserStr: progress.browser,
-                      version: progress.version,
-                    }).catch((err) => {
+                    cancelBrowserDownload(
+                      progress.browser,
+                      progress.version,
+                    ).catch((err) => {
                       console.error("Failed to cancel download:", err);
                     });
-                    dismissToast(toastId);
                   },
                 },
               );
@@ -484,7 +543,7 @@ export function useBrowserDownload() {
         }
       }
     };
-  }, [formatTime, loadDownloadedVersions]);
+  }, [cancelBrowserDownload, formatTime, loadDownloadedVersions]);
 
   return {
     availableVersions,
@@ -497,6 +556,7 @@ export function useBrowserDownload() {
     loadVersionsWithNewCount,
     loadDownloadedVersions,
     downloadBrowser,
+    cancelBrowserDownload,
     isVersionDownloaded,
     formatBytes,
     formatTime,

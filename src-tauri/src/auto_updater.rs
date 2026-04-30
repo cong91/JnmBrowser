@@ -6,6 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
+fn browser_auto_updates_enabled() -> bool {
+  false
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UpdateNotification {
   pub id: String,
@@ -49,6 +53,11 @@ impl AutoUpdater {
   pub async fn check_for_updates(
     &self,
   ) -> Result<Vec<UpdateNotification>, Box<dyn std::error::Error + Send + Sync>> {
+    if !browser_auto_updates_enabled() {
+      log::info!("Browser auto-update checks are disabled");
+      return Ok(Vec::new());
+    }
+
     let mut notifications = Vec::new();
     let mut browser_versions: HashMap<String, Vec<BrowserVersionInfo>> = HashMap::new();
 
@@ -115,6 +124,11 @@ impl AutoUpdater {
   }
 
   pub async fn check_for_updates_with_progress(&self, app_handle: &tauri::AppHandle) {
+    if !browser_auto_updates_enabled() {
+      log::info!("Browser auto-update check with progress is disabled");
+      return;
+    }
+
     log::info!("Starting auto-update check with progress...");
 
     // Browser auto-updates are always enabled — the disable_auto_updates setting
@@ -308,6 +322,11 @@ impl AutoUpdater {
     browser: &str,
     new_version: &str,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    if !browser_auto_updates_enabled() {
+      log::info!("Skipping browser profile auto-update for {browser} {new_version}: disabled");
+      return Ok(Vec::new());
+    }
+
     let profiles = self
       .profile_manager
       .list_profiles()
@@ -385,6 +404,18 @@ impl AutoUpdater {
     browser: &str,
     new_version: &str,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    if !browser_auto_updates_enabled() {
+      log::info!(
+        "Completing browser update without profile auto-update for {browser} {new_version}"
+      );
+      let mut state = self.load_auto_update_state().unwrap_or_default();
+      state.disabled_browsers.remove(browser);
+      let download_key = format!("{browser}-{new_version}");
+      state.auto_update_downloads.remove(&download_key);
+      let _ = self.save_auto_update_state(&state);
+      return Ok(Vec::new());
+    }
+
     // Auto-update profile versions first
     let updated_profiles = self
       .auto_update_profile_versions(app_handle, browser, new_version)
@@ -460,6 +491,10 @@ impl AutoUpdater {
     &self,
   ) -> Result<std::collections::HashSet<(String, String)>, Box<dyn std::error::Error + Send + Sync>>
   {
+    if !browser_auto_updates_enabled() {
+      return Ok(std::collections::HashSet::new());
+    }
+
     let state = self.load_auto_update_state()?;
     let mut pending_versions = std::collections::HashSet::new();
 
@@ -476,6 +511,10 @@ impl AutoUpdater {
     browser: &str,
     current_version: &str,
   ) -> Result<Option<UpdateNotification>, Box<dyn std::error::Error + Send + Sync>> {
+    if !browser_auto_updates_enabled() {
+      return Ok(None);
+    }
+
     let state = self.load_auto_update_state()?;
 
     for update in &state.pending_updates {
@@ -504,6 +543,10 @@ impl AutoUpdater {
     app_handle: &tauri::AppHandle,
     profile: &crate::profile::BrowserProfile,
   ) -> Option<crate::profile::BrowserProfile> {
+    if !browser_auto_updates_enabled() {
+      return None;
+    }
+
     let latest = self.get_latest_installed_version(&profile.browser)?;
 
     if !self.is_version_newer(&latest, &profile.version) {
@@ -549,6 +592,11 @@ impl AutoUpdater {
     &self,
     app_handle: &tauri::AppHandle,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    if !browser_auto_updates_enabled() {
+      log::info!("Skipping update of profiles to latest installed browser versions: disabled");
+      return Ok(Vec::new());
+    }
+
     let registry = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
     let profiles = self
       .profile_manager
@@ -662,12 +710,6 @@ pub async fn complete_browser_update_with_auto_update(
     .complete_browser_update_with_auto_update(&app_handle, &browser, &new_version)
     .await
     .map_err(|e| format!("Failed to complete browser update: {e}"))
-}
-
-#[tauri::command]
-pub async fn check_for_updates_with_progress(app_handle: tauri::AppHandle) {
-  let updater = AutoUpdater::instance();
-  updater.check_for_updates_with_progress(&app_handle).await;
 }
 
 #[cfg(test)]

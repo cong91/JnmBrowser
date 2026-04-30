@@ -27,11 +27,7 @@ pub fn is_portable() -> bool {
 }
 
 pub fn app_name() -> &'static str {
-  if cfg!(debug_assertions) {
-    "DonutBrowserDev"
-  } else {
-    "DonutBrowser"
-  }
+  "JnmBrowser"
 }
 
 pub fn data_dir() -> PathBuf {
@@ -42,7 +38,9 @@ pub fn data_dir() -> PathBuf {
     }
   }
 
-  if let Ok(dir) = std::env::var("DONUTBROWSER_DATA_DIR") {
+  if let Ok(dir) =
+    std::env::var("JNMBROWSER_DATA_DIR").or_else(|_| std::env::var("DONUTBROWSER_DATA_DIR"))
+  {
     return PathBuf::from(dir);
   }
 
@@ -61,7 +59,9 @@ pub fn cache_dir() -> PathBuf {
     }
   }
 
-  if let Ok(dir) = std::env::var("DONUTBROWSER_CACHE_DIR") {
+  if let Ok(dir) =
+    std::env::var("JNMBROWSER_CACHE_DIR").or_else(|_| std::env::var("DONUTBROWSER_CACHE_DIR"))
+  {
     return PathBuf::from(dir);
   }
 
@@ -159,8 +159,8 @@ mod tests {
   fn test_app_name() {
     let name = app_name();
     assert!(
-      name == "DonutBrowser" || name == "DonutBrowserDev",
-      "app_name should be DonutBrowser or DonutBrowserDev, got: {name}"
+      name == "JnmBrowser",
+      "app_name should be JnmBrowser, got: {name}"
     );
   }
 

@@ -11,6 +11,11 @@ use crate::auto_updater::AutoUpdater;
 use crate::browser_version_manager::BrowserVersionManager;
 use crate::events;
 
+#[allow(dead_code)]
+fn background_version_updates_enabled() -> bool {
+  false
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct VersionUpdateProgress {
   pub current_browser: String,
@@ -46,12 +51,14 @@ impl Default for BackgroundUpdateState {
 }
 
 /// Extension of auto_updater.rs for background updates
+#[allow(dead_code)]
 pub struct VersionUpdater {
   browser_version_manager: &'static BrowserVersionManager,
   auto_updater: &'static AutoUpdater,
   app_handle: Option<tauri::AppHandle>,
 }
 
+#[allow(dead_code)]
 impl VersionUpdater {
   pub fn new() -> Self {
     Self {
@@ -143,6 +150,11 @@ impl VersionUpdater {
   pub async fn check_and_run_startup_update(
     &self,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !background_version_updates_enabled() {
+      log::info!("Startup browser version update is disabled");
+      return Ok(());
+    }
+
     // Always check for updates on launch
     if let Some(ref app_handle) = self.app_handle {
       log::info!("Running startup version update...");
@@ -176,6 +188,11 @@ impl VersionUpdater {
   pub async fn start_background_updates(
     &self,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !background_version_updates_enabled() {
+      log::info!("Background browser version update service is disabled");
+      return Ok(());
+    }
+
     println!(
       "Starting background version update service (checking every 5 minutes for 3-hour intervals)"
     );
@@ -189,6 +206,11 @@ impl VersionUpdater {
   }
 
   pub async fn run_background_task() {
+    if !background_version_updates_enabled() {
+      log::info!("Background browser version update task is disabled");
+      return;
+    }
+
     let mut update_interval = interval(Duration::from_secs(5 * 60)); // Check every 5 minutes
     update_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

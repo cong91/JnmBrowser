@@ -7,7 +7,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { CamoufoxConfigDialog } from "@/components/camoufox-config-dialog";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
-import { CommercialTrialModal } from "@/components/commercial-trial-modal";
 import { CookieCopyDialog } from "@/components/cookie-copy-dialog";
 import { CookieManagementDialog } from "@/components/cookie-management-dialog";
 import { CreateProfileDialog } from "@/components/create-profile-dialog";
@@ -33,17 +32,13 @@ import { SyncConfigDialog } from "@/components/sync-config-dialog";
 import { SyncFollowerDialog } from "@/components/sync-follower-dialog";
 import { WayfernTermsDialog } from "@/components/wayfern-terms-dialog";
 import { WindowResizeWarningDialog } from "@/components/window-resize-warning-dialog";
-import { useAppUpdateNotifications } from "@/hooks/use-app-update-notifications";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
-import { useCommercialTrial } from "@/hooks/use-commercial-trial";
 import { useGroupEvents } from "@/hooks/use-group-events";
 import type { PermissionType } from "@/hooks/use-permissions";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useProfileEvents } from "@/hooks/use-profile-events";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { useSyncSessions } from "@/hooks/use-sync-session";
-import { useUpdateNotifications } from "@/hooks/use-update-notifications";
-import { useVersionUpdater } from "@/hooks/use-version-updater";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { useWayfernTerms } from "@/hooks/use-wayfern-terms";
 import {
@@ -69,8 +64,6 @@ interface PendingUrl {
 
 export default function Home() {
   const { t } = useTranslation();
-  // Mount global version update listener/toasts
-  useVersionUpdater();
 
   // Use the new profile events hook for centralized profile management
   const {
@@ -99,17 +92,12 @@ export default function Home() {
   const [syncLeaderProfile, setSyncLeaderProfile] =
     useState<BrowserProfile | null>(null);
 
-  // Wayfern terms and commercial trial hooks
+  // Wayfern terms hook
   const {
     termsAccepted,
     isLoading: termsLoading,
     checkTerms,
   } = useWayfernTerms();
-  const {
-    trialStatus,
-    hasAcknowledged: trialAcknowledged,
-    checkTrialStatus,
-  } = useCommercialTrial();
 
   // Cloud auth for cross-OS unlock
   const { user: cloudUser } = useCloudAuth();
@@ -127,13 +115,13 @@ export default function Home() {
       const hasConfig = Boolean(
         settings.sync_server_url && settings.sync_token,
       );
-      setSelfHostedSyncConfigured(hasConfig && !cloudUser);
+      setSelfHostedSyncConfigured(hasConfig);
     } catch {
       setSelfHostedSyncConfigured(false);
     }
-  }, [cloudUser]);
+  }, []);
 
-  const syncUnlocked = crossOsUnlocked || selfHostedSyncConfigured;
+  const syncUnlocked = selfHostedSyncConfigured;
 
   const [createProfileDialogOpen, setCreateProfileDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -209,76 +197,6 @@ export default function Home() {
     setSelectedProfiles([]);
   }, []);
 
-  // Check for missing binaries and offer to download them
-  const checkMissingBinaries = useCallback(async () => {
-    try {
-      const missingBinaries = await invoke<[string, string, string][]>(
-        "check_missing_binaries",
-      );
-
-      // Also check for missing GeoIP database
-      const missingGeoIP = await invoke<boolean>(
-        "check_missing_geoip_database",
-      );
-
-      if (missingBinaries.length > 0 || missingGeoIP) {
-        if (missingBinaries.length > 0) {
-          console.log("Found missing binaries:", missingBinaries);
-        }
-        if (missingGeoIP) {
-          console.log("Found missing GeoIP database for Camoufox");
-        }
-
-        // Group missing binaries by browser type to avoid concurrent downloads
-        const browserMap = new Map<string, string[]>();
-        for (const [profileName, browser, version] of missingBinaries) {
-          if (!browserMap.has(browser)) {
-            browserMap.set(browser, []);
-          }
-          const versions = browserMap.get(browser);
-          if (versions) {
-            versions.push(`${version} (for ${profileName})`);
-          }
-        }
-
-        // Show a toast notification about missing binaries and auto-download them
-        let missingList = Array.from(browserMap.entries())
-          .map(([browser, versions]) => `${browser}: ${versions.join(", ")}`)
-          .join(", ");
-
-        if (missingGeoIP) {
-          if (missingList) {
-            missingList += ", GeoIP database for Camoufox";
-          } else {
-            missingList = "GeoIP database for Camoufox";
-          }
-        }
-
-        console.log(`Downloading missing components: ${missingList}`);
-
-        try {
-          // Download missing binaries and GeoIP database sequentially to prevent conflicts
-          const downloaded = await invoke<string[]>(
-            "ensure_all_binaries_exist",
-          );
-          if (downloaded.length > 0) {
-            console.log(
-              "Successfully downloaded missing components:",
-              downloaded,
-            );
-          }
-        } catch (downloadError) {
-          console.error(
-            "Failed to download missing components:",
-            downloadError,
-          );
-        }
-      }
-    } catch (err: unknown) {
-      console.error("Failed to check missing components:", err);
-    }
-  }, []);
-
   const [processingUrls, setProcessingUrls] = useState<Set<string>>(new Set());
 
   const handleUrlOpen = useCallback(
@@ -311,11 +229,7 @@ export default function Home() {
     [processingUrls],
   );
 
-  // Auto-update functionality - use the existing hook for compatibility
-  const updateNotifications = useUpdateNotifications();
-  const { checkForUpdates, isUpdating } = updateNotifications;
-
-  useAppUpdateNotifications();
+  const isUpdating = useCallback(() => false, []);
 
   // Check for startup URLs but only process them once
   const [hasCheckedStartupUrl, setHasCheckedStartupUrl] = useState(false);
@@ -932,41 +846,12 @@ export default function Home() {
     // Check for startup URLs (when app was launched as default browser)
     void checkCurrentUrl();
 
-    // Set up periodic update checks (every 30 minutes)
-    const updateInterval = setInterval(
-      () => {
-        void checkForUpdates();
-      },
-      30 * 60 * 1000,
-    );
-
-    // Check for missing binaries after initial profile load
-    if (!profilesLoading && profiles.length > 0) {
-      void checkMissingBinaries();
-    }
-
-    // Proactively download Wayfern and Camoufox if not already available
-    if (!profilesLoading) {
-      void invoke("ensure_active_browsers_downloaded").catch((err: unknown) => {
-        console.error("Failed to auto-download browsers:", err);
-      });
-    }
-
     return () => {
-      clearInterval(updateInterval);
       if (cleanup) {
         cleanup();
       }
     };
-  }, [
-    checkForUpdates,
-    checkStartupPrompt,
-    listenForUrlEvents,
-    checkCurrentUrl,
-    checkMissingBinaries,
-    profilesLoading,
-    profiles.length,
-  ]);
+  }, [checkStartupPrompt, listenForUrlEvents, checkCurrentUrl]);
 
   // Show warning for non-wayfern/camoufox profiles (support ending March 15, 2026)
   useEffect(() => {
@@ -1026,7 +911,7 @@ export default function Home() {
     }
   }, [isInitialized, checkAllPermissions]);
 
-  // Check self-hosted sync config on mount and when cloud user changes
+  // Check self-hosted sync config on mount
   useEffect(() => {
     void checkSelfHostedSync();
   }, [checkSelfHostedSync]);
@@ -1231,7 +1116,6 @@ export default function Home() {
         onClose={() => {
           setExtensionManagementDialogOpen(false);
         }}
-        limitedMode={!crossOsUnlocked}
       />
 
       <GroupAssignmentDialog
@@ -1341,18 +1225,6 @@ export default function Home() {
       <WayfernTermsDialog
         isOpen={!termsLoading && termsAccepted === false}
         onAccepted={checkTerms}
-      />
-
-      {/* Commercial Trial Modal - shown once when trial expires (skip for paid users) */}
-      <CommercialTrialModal
-        isOpen={
-          !termsLoading &&
-          termsAccepted === true &&
-          trialStatus?.type === "Expired" &&
-          !trialAcknowledged &&
-          !crossOsUnlocked
-        }
-        onClose={checkTrialStatus}
       />
 
       {/* Launch on Login Dialog - shown on every startup until enabled or declined */}

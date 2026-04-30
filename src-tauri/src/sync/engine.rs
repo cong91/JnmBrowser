@@ -250,16 +250,35 @@ impl SyncProgressTracker {
   }
 }
 
-/// Check if sync is configured (cloud or self-hosted)
+/// Check if self-hosted sync is configured.
 pub fn is_sync_configured() -> bool {
-  if crate::cloud_auth::CLOUD_AUTH.has_active_paid_subscription_sync() {
-    return true;
-  }
   let manager = SettingsManager::instance();
   if let Ok(settings) = manager.load_settings() {
     return settings.sync_server_url.is_some();
   }
   false
+}
+
+async fn ensure_self_hosted_sync_configured(app_handle: &tauri::AppHandle) -> Result<(), String> {
+  let manager = SettingsManager::instance();
+  let settings = manager
+    .load_settings()
+    .map_err(|e| format!("Failed to load settings: {e}"))?;
+
+  if settings
+    .sync_server_url
+    .as_deref()
+    .is_none_or(|url| url.trim().is_empty())
+  {
+    return Err("Sync server not configured. Please configure sync settings first.".to_string());
+  }
+
+  let token = manager.get_sync_token(app_handle).await.ok().flatten();
+  if token.as_deref().is_none_or(|token| token.trim().is_empty()) {
+    return Err("Sync token not configured. Please configure sync settings first.".to_string());
+  }
+
+  Ok(())
 }
 
 pub struct SyncEngine {
@@ -274,18 +293,6 @@ impl SyncEngine {
   }
 
   pub async fn create_from_settings(app_handle: &tauri::AppHandle) -> Result<Self, String> {
-    // Cloud auth takes priority
-    if crate::cloud_auth::CLOUD_AUTH.is_logged_in().await {
-      let url = crate::cloud_auth::CLOUD_SYNC_URL.to_string();
-      let token = crate::cloud_auth::CLOUD_AUTH
-        .get_or_refresh_sync_token()
-        .await
-        .map_err(|e| format!("Failed to get cloud sync token: {e}"))?
-        .ok_or_else(|| "Cloud sync token not available".to_string())?;
-      return Ok(Self::new(url, token));
-    }
-
-    // Fall back to self-hosted settings
     let manager = SettingsManager::instance();
     let settings = manager
       .load_settings()
@@ -304,21 +311,15 @@ impl SyncEngine {
     Ok(Self::new(server_url, token))
   }
 
-  /// Get the key prefix for team profiles. Returns empty string for personal profiles.
-  async fn get_team_key_prefix(profile: &BrowserProfile) -> String {
-    if profile.created_by_id.is_some() {
-      if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
-        if let Some(team_id) = &auth.user.team_id {
-          return format!("teams/{}/", team_id);
-        }
-      }
-    }
+  /// Self-hosted sync stores all profiles in the personal keyspace.
+  fn get_team_key_prefix(profile: &BrowserProfile) -> String {
+    let _ = profile;
     String::new()
   }
 
-  /// Check if this is a self-hosted sync (no cloud login).
-  async fn is_self_hosted_sync() -> bool {
-    !crate::cloud_auth::CLOUD_AUTH.is_logged_in().await
+  /// Self-hosted sync is the only sync backend exposed by the app.
+  fn is_self_hosted_sync() -> bool {
+    true
   }
 
   pub async fn sync_profile(
@@ -336,7 +337,7 @@ impl SyncEngine {
     }
 
     // Skip team profiles for self-hosted sync
-    if Self::is_self_hosted_sync().await && profile.created_by_id.is_some() {
+    if Self::is_self_hosted_sync() && profile.created_by_id.is_some() {
       log::info!(
         "Skipping team profile for self-hosted sync: {} ({})",
         profile.name,
@@ -392,7 +393,7 @@ impl SyncEngine {
     let profile_id = profile.id.to_string();
 
     // Determine team key prefix for team profiles
-    let key_prefix = Self::get_team_key_prefix(profile).await;
+    let key_prefix = Self::get_team_key_prefix(profile);
 
     log::info!(
       "Starting delta sync for profile: {} ({}){}",
@@ -731,7 +732,7 @@ impl SyncEngine {
     profile: &BrowserProfile,
   ) -> SyncResult<()> {
     let profile_id = profile.id.to_string();
-    let key_prefix = Self::get_team_key_prefix(profile).await;
+    let key_prefix = Self::get_team_key_prefix(profile);
     let profile_manager = ProfileManager::instance();
 
     // Upload our metadata
@@ -1638,25 +1639,6 @@ impl SyncEngine {
       result.deleted_count
     );
 
-    // Also delete from team path if user is on a team
-    if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
-      if let Some(team_id) = &auth.user.team_id {
-        let team_prefix = format!("teams/{}/profiles/{}/", team_id, profile_id);
-        let team_tombstone = format!("teams/{}/tombstones/profiles/{}.json", team_id, profile_id);
-        let team_result = self
-          .client
-          .delete_prefix(&team_prefix, Some(&team_tombstone))
-          .await?;
-        if team_result.deleted_count > 0 {
-          log::info!(
-            "Profile {} deleted from team sync ({} objects removed)",
-            profile_id,
-            team_result.deleted_count
-          );
-        }
-      }
-    }
-
     Ok(())
   }
 
@@ -2444,27 +2426,6 @@ impl SyncEngine {
       }
     }
 
-    // Also list team profiles if user is on a team
-    if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
-      if let Some(team_id) = &auth.user.team_id {
-        let team_prefix = format!("teams/{}/", team_id);
-        let team_list_key = format!("{}profiles/", team_prefix);
-        if let Ok(team_objects) = self.client.list_all(&team_list_key).await {
-          for obj in team_objects {
-            if obj.key.starts_with("profiles/") && obj.key.ends_with("/manifest.json") {
-              if let Some(profile_id) = obj
-                .key
-                .strip_prefix("profiles/")
-                .and_then(|s| s.strip_suffix("/manifest.json"))
-              {
-                profiles_to_check.insert(profile_id.to_string(), team_prefix.clone());
-              }
-            }
-          }
-        }
-      }
-    }
-
     log::info!(
       "Found {} profiles in remote storage, checking for missing ones...",
       profiles_to_check.len()
@@ -2501,21 +2462,15 @@ impl SyncEngine {
     // Delete local synced profiles that have a remote tombstone (deleted on another device)
     {
       let profile_manager = ProfileManager::instance();
-      let local_synced: Vec<(String, Option<String>)> = profile_manager
+      let local_synced: Vec<String> = profile_manager
         .list_profiles()
         .unwrap_or_default()
         .iter()
         .filter(|p| p.is_sync_enabled())
-        .map(|p| (p.id.to_string(), p.created_by_id.clone()))
+        .map(|p| p.id.to_string())
         .collect();
 
-      let team_prefix = if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
-        auth.user.team_id.map(|tid| format!("teams/{}/", tid))
-      } else {
-        None
-      };
-
-      for (pid, created_by_id) in &local_synced {
+      for pid in &local_synced {
         // Check personal tombstone
         let personal_tombstone = format!("tombstones/profiles/{}.json", pid);
         let has_personal_tombstone = matches!(
@@ -2523,18 +2478,7 @@ impl SyncEngine {
           Ok(stat) if stat.exists
         );
 
-        // Check team tombstone
-        let has_team_tombstone = if let (Some(tp), Some(_)) = (&team_prefix, created_by_id) {
-          let team_tombstone = format!("{}tombstones/profiles/{}.json", tp, pid);
-          matches!(
-            self.client.stat(&team_tombstone).await,
-            Ok(stat) if stat.exists
-          )
-        } else {
-          false
-        };
-
-        if has_personal_tombstone || has_team_tombstone {
+        if has_personal_tombstone {
           log::info!(
             "Profile {} has remote tombstone, deleting locally (deleted on another device)",
             pid
@@ -2549,28 +2493,17 @@ impl SyncEngine {
     // Refresh metadata for local cross-OS profiles (propagate renames, tags, notes from originating device)
     let profile_manager = ProfileManager::instance();
     // Collect cross-OS profiles before async operations to avoid holding non-Send Result across await
-    let cross_os_profiles: Vec<(String, SyncMode, Option<String>)> = profile_manager
+    let cross_os_profiles: Vec<(String, SyncMode)> = profile_manager
       .list_profiles()
       .unwrap_or_default()
       .iter()
       .filter(|p| p.is_cross_os() && p.is_sync_enabled())
-      .map(|p| (p.id.to_string(), p.sync_mode, p.created_by_id.clone()))
+      .map(|p| (p.id.to_string(), p.sync_mode))
       .collect();
 
     if !cross_os_profiles.is_empty() {
-      let team_prefix = if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
-        auth.user.team_id.map(|tid| format!("teams/{}/", tid))
-      } else {
-        None
-      };
-
-      for (pid, sync_mode, created_by_id) in &cross_os_profiles {
-        let kp = if created_by_id.is_some() {
-          team_prefix.as_deref().unwrap_or("")
-        } else {
-          ""
-        };
-        let metadata_key = format!("{}profiles/{}/metadata.json", kp, pid);
+      for (pid, sync_mode) in &cross_os_profiles {
+        let metadata_key = format!("profiles/{}/metadata.json", pid);
         match self.client.stat(&metadata_key).await {
           Ok(stat) if stat.exists => match self.client.presign_download(&metadata_key).await {
             Ok(presign) => match self.client.download_bytes(&presign.url).await {
@@ -2877,42 +2810,17 @@ pub async fn set_profile_sync_mode(
   let enabling = new_mode != SyncMode::Disabled;
 
   if enabling {
-    let cloud_logged_in = crate::cloud_auth::CLOUD_AUTH.is_logged_in().await;
-
-    if !cloud_logged_in {
-      let manager = SettingsManager::instance();
-      let settings = manager
-        .load_settings()
-        .map_err(|e| format!("Failed to load settings: {e}"))?;
-
-      if settings.sync_server_url.is_none() {
-        let _ = events::emit(
-          "profile-sync-status",
-          serde_json::json!({
-            "profile_id": profile_id,
-            "profile_name": profile.name,
-            "status": "error",
-            "error": "Sync server not configured. Please configure sync settings first."
-          }),
-        );
-        return Err(
-          "Sync server not configured. Please configure sync settings first.".to_string(),
-        );
-      }
-
-      let token = manager.get_sync_token(&app_handle).await.ok().flatten();
-      if token.is_none() {
-        let _ = events::emit(
-          "profile-sync-status",
-          serde_json::json!({
-            "profile_id": profile_id,
-            "profile_name": profile.name,
-            "status": "error",
-            "error": "Sync token not configured. Please configure sync settings first."
-          }),
-        );
-        return Err("Sync token not configured. Please configure sync settings first.".to_string());
-      }
+    if let Err(e) = ensure_self_hosted_sync_configured(&app_handle).await {
+      let _ = events::emit(
+        "profile-sync-status",
+        serde_json::json!({
+          "profile_id": profile_id,
+          "profile_name": profile.name,
+          "status": "error",
+          "error": e
+        }),
+      );
+      return Err(e);
     }
   }
 
@@ -2930,7 +2838,7 @@ pub async fn set_profile_sync_mode(
   let mode_switched = old_mode != SyncMode::Disabled && enabling && old_mode != new_mode;
   if mode_switched {
     if let Ok(engine) = SyncEngine::create_from_settings(&app_handle).await {
-      let key_prefix = SyncEngine::get_team_key_prefix(&profile).await;
+      let key_prefix = SyncEngine::get_team_key_prefix(&profile);
       let manifest_key = format!("{}profiles/{}/manifest.json", key_prefix, profile_id);
       let _ = engine.client.delete(&manifest_key, None).await;
       log::info!(
@@ -3024,22 +2932,6 @@ pub async fn set_profile_sync_mode(
         "status": "disabled"
       }),
     );
-  }
-
-  if crate::cloud_auth::CLOUD_AUTH.is_logged_in().await {
-    let sync_count = profile_manager
-      .list_profiles()
-      .map(|profiles| profiles.iter().filter(|p| p.is_sync_enabled()).count())
-      .unwrap_or(0);
-
-    tokio::spawn(async move {
-      if let Err(e) = crate::cloud_auth::CLOUD_AUTH
-        .report_sync_profile_count(sync_count as i64)
-        .await
-      {
-        log::warn!("Failed to report sync profile count: {e}");
-      }
-    });
   }
 
   Ok(())
@@ -3144,25 +3036,7 @@ pub async fn set_proxy_sync_enabled(
 
   // If enabling, check that sync settings are configured
   if enabled {
-    let cloud_logged_in = crate::cloud_auth::CLOUD_AUTH.is_logged_in().await;
-
-    if !cloud_logged_in {
-      let manager = SettingsManager::instance();
-      let settings = manager
-        .load_settings()
-        .map_err(|e| format!("Failed to load settings: {e}"))?;
-
-      if settings.sync_server_url.is_none() {
-        return Err(
-          "Sync server not configured. Please configure sync settings first.".to_string(),
-        );
-      }
-
-      let token = manager.get_sync_token(&app_handle).await.ok().flatten();
-      if token.is_none() {
-        return Err("Sync token not configured. Please configure sync settings first.".to_string());
-      }
-    }
+    ensure_self_hosted_sync_configured(&app_handle).await?;
   }
 
   let mut updated_proxy = proxy.clone();
@@ -3228,25 +3102,7 @@ pub async fn set_group_sync_enabled(
 
   // If enabling, check that sync settings are configured
   if enabled {
-    let cloud_logged_in = crate::cloud_auth::CLOUD_AUTH.is_logged_in().await;
-
-    if !cloud_logged_in {
-      let manager = SettingsManager::instance();
-      let settings = manager
-        .load_settings()
-        .map_err(|e| format!("Failed to load settings: {e}"))?;
-
-      if settings.sync_server_url.is_none() {
-        return Err(
-          "Sync server not configured. Please configure sync settings first.".to_string(),
-        );
-      }
-
-      let token = manager.get_sync_token(&app_handle).await.ok().flatten();
-      if token.is_none() {
-        return Err("Sync token not configured. Please configure sync settings first.".to_string());
-      }
-    }
+    ensure_self_hosted_sync_configured(&app_handle).await?;
   }
 
   let mut updated_group = group.clone();
@@ -3320,25 +3176,7 @@ pub async fn set_vpn_sync_enabled(
 
   // If enabling, check that sync settings are configured
   if enabled {
-    let cloud_logged_in = crate::cloud_auth::CLOUD_AUTH.is_logged_in().await;
-
-    if !cloud_logged_in {
-      let manager = SettingsManager::instance();
-      let settings = manager
-        .load_settings()
-        .map_err(|e| format!("Failed to load settings: {e}"))?;
-
-      if settings.sync_server_url.is_none() {
-        return Err(
-          "Sync server not configured. Please configure sync settings first.".to_string(),
-        );
-      }
-
-      let token = manager.get_sync_token(&app_handle).await.ok().flatten();
-      if token.is_none() {
-        return Err("Sync token not configured. Please configure sync settings first.".to_string());
-      }
-    }
+    ensure_self_hosted_sync_configured(&app_handle).await?;
   }
 
   let last_sync = if enabled { vpn.last_sync } else { None };
@@ -3543,22 +3381,7 @@ pub async fn set_extension_sync_enabled(
   };
 
   if enabled {
-    let cloud_logged_in = crate::cloud_auth::CLOUD_AUTH.is_logged_in().await;
-    if !cloud_logged_in {
-      let manager = SettingsManager::instance();
-      let settings = manager
-        .load_settings()
-        .map_err(|e| format!("Failed to load settings: {e}"))?;
-      if settings.sync_server_url.is_none() {
-        return Err(
-          "Sync server not configured. Please configure sync settings first.".to_string(),
-        );
-      }
-      let token = manager.get_sync_token(&app_handle).await.ok().flatten();
-      if token.is_none() {
-        return Err("Sync token not configured. Please configure sync settings first.".to_string());
-      }
-    }
+    ensure_self_hosted_sync_configured(&app_handle).await?;
   }
 
   let mut updated_ext = ext;
@@ -3599,22 +3422,7 @@ pub async fn set_extension_group_sync_enabled(
   };
 
   if enabled {
-    let cloud_logged_in = crate::cloud_auth::CLOUD_AUTH.is_logged_in().await;
-    if !cloud_logged_in {
-      let manager = SettingsManager::instance();
-      let settings = manager
-        .load_settings()
-        .map_err(|e| format!("Failed to load settings: {e}"))?;
-      if settings.sync_server_url.is_none() {
-        return Err(
-          "Sync server not configured. Please configure sync settings first.".to_string(),
-        );
-      }
-      let token = manager.get_sync_token(&app_handle).await.ok().flatten();
-      if token.is_none() {
-        return Err("Sync token not configured. Please configure sync settings first.".to_string());
-      }
-    }
+    ensure_self_hosted_sync_configured(&app_handle).await?;
   }
 
   let mut updated_group = group;

@@ -1,12 +1,10 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri_plugin_shell::ShellExt;
 
 use crate::browser::ProxySettings;
 use crate::events;
@@ -1237,7 +1235,7 @@ impl ProxyManager {
       version: "1.0".to_string(),
       proxies,
       exported_at: Utc::now().to_rfc3339(),
-      source: "DonutBrowser".to_string(),
+      source: "JnmBrowser".to_string(),
     };
 
     serde_json::to_string_pretty(&export_data).map_err(|e| format!("Failed to serialize: {e}"))
@@ -1552,7 +1550,7 @@ impl ProxyManager {
   // If proxy_settings is None, starts a direct proxy for traffic monitoring
   pub async fn start_proxy(
     &self,
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     proxy_settings: Option<&ProxySettings>,
     browser_pid: u32,
     profile_id: Option<&str>,
@@ -1646,82 +1644,25 @@ impl ProxyManager {
       }
     }
 
-    // Start a new proxy using the donut-proxy binary with the correct CLI interface
-    let mut proxy_cmd = app_handle
-      .shell()
-      .sidecar("donut-proxy")
-      .map_err(|e| format!("Failed to create sidecar: {e}"))?
-      .arg("proxy")
-      .arg("start");
+    let upstream_url = proxy_settings.map(Self::build_proxy_url);
+    let proxy_config = crate::proxy_runner::start_proxy_process_with_profile(
+      upstream_url,
+      None,
+      profile_id.map(str::to_string),
+      bypass_rules,
+      blocklist_file.clone(),
+    )
+    .await
+    .map_err(|e| format!("Failed to start donut-proxy worker: {e}"))?;
 
-    // Add upstream proxy settings if provided, otherwise create direct proxy
-    if let Some(proxy_settings) = proxy_settings {
-      proxy_cmd = proxy_cmd
-        .arg("--host")
-        .arg(&proxy_settings.host)
-        .arg("--proxy-port")
-        .arg(proxy_settings.port.to_string())
-        .arg("--type")
-        .arg(&proxy_settings.proxy_type);
-
-      // Add credentials if provided
-      if let Some(username) = &proxy_settings.username {
-        proxy_cmd = proxy_cmd.arg("--username").arg(username);
-      }
-      if let Some(password) = &proxy_settings.password {
-        proxy_cmd = proxy_cmd.arg("--password").arg(password);
-      }
-    }
-
-    // Add profile ID if provided for traffic tracking
-    if let Some(id) = profile_id {
-      proxy_cmd = proxy_cmd.arg("--profile-id").arg(id);
-    }
-
-    // Add bypass rules if any
-    if !bypass_rules.is_empty() {
-      let rules_json = serde_json::to_string(&bypass_rules)
-        .map_err(|e| format!("Failed to serialize bypass rules: {e}"))?;
-      proxy_cmd = proxy_cmd.arg("--bypass-rules").arg(rules_json);
-    }
-
-    // Add blocklist file path if provided
-    if let Some(ref path) = blocklist_file {
-      proxy_cmd = proxy_cmd.arg("--blocklist-file").arg(path);
-    }
-
-    // Execute the command and wait for it to complete
-    // The donut-proxy binary should start the worker and then exit
-    let output = proxy_cmd
-      .output()
-      .await
-      .map_err(|e| format!("Failed to execute donut-proxy: {e}"))?;
-
-    if !output.status.success() {
-      let stderr = String::from_utf8_lossy(&output.stderr);
-      let stdout = String::from_utf8_lossy(&output.stdout);
-      return Err(format!(
-        "Proxy start failed - stdout: {stdout}, stderr: {stderr}"
-      ));
-    }
-
-    let json_string =
-      String::from_utf8(output.stdout).map_err(|e| format!("Failed to parse proxy output: {e}"))?;
-
-    // Parse the JSON output
-    let json: Value = serde_json::from_str(json_string.trim())
-      .map_err(|e| format!("Failed to parse JSON: {e}. Output was: {}", json_string))?;
-
-    // Extract proxy information
-    let id = json["id"].as_str().ok_or("Missing proxy ID")?;
-    let local_port = json["localPort"]
-      .as_u64()
-      .ok_or_else(|| format!("Missing local port in JSON: {}", json_string))?
-      as u16;
-    let local_url = json["localUrl"]
-      .as_str()
-      .ok_or_else(|| format!("Missing local URL in JSON: {}", json_string))?
-      .to_string();
+    let id = proxy_config.id.as_str();
+    let local_port = proxy_config
+      .local_port
+      .ok_or_else(|| format!("Missing local port for proxy {}", proxy_config.id))?;
+    let local_url = proxy_config
+      .local_url
+      .clone()
+      .ok_or_else(|| format!("Missing local URL for proxy {}", proxy_config.id))?;
 
     let proxy_info = ProxyInfo {
       id: id.to_string(),
@@ -1792,7 +1733,7 @@ impl ProxyManager {
   // Stop the proxy associated with a browser process ID
   pub async fn stop_proxy(
     &self,
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     browser_pid: u32,
   ) -> Result<(), String> {
     let (proxy_id, profile_id): (String, Option<String>) = {
@@ -1803,22 +1744,8 @@ impl ProxyManager {
       }
     };
 
-    // Stop the proxy using the donut-proxy binary
-    let proxy_cmd = app_handle
-      .shell()
-      .sidecar("donut-proxy")
-      .map_err(|e| format!("Failed to create sidecar: {e}"))?
-      .arg("proxy")
-      .arg("stop")
-      .arg("--id")
-      .arg(&proxy_id);
-
-    let output = proxy_cmd.output().await.unwrap();
-
-    if !output.status.success() {
-      let stderr = String::from_utf8_lossy(&output.stderr);
-      log::warn!("Proxy stop error: {stderr}");
-      // We still return Ok since we've already removed the proxy from our tracking
+    if let Err(e) = crate::proxy_runner::stop_proxy_process(&proxy_id).await {
+      log::warn!("Proxy stop error: {e}");
     }
 
     // Clear profile-to-proxy mapping if it references this proxy
@@ -1869,20 +1796,8 @@ impl ProxyManager {
         self.stop_proxy(app_handle, pid).await
       } else {
         // Proxy not found in active_proxies, try to stop it directly by ID
-        let proxy_cmd = app_handle
-          .shell()
-          .sidecar("donut-proxy")
-          .map_err(|e| format!("Failed to create sidecar: {e}"))?
-          .arg("proxy")
-          .arg("stop")
-          .arg("--id")
-          .arg(&proxy_id);
-
-        let output = proxy_cmd.output().await.unwrap();
-
-        if !output.status.success() {
-          let stderr = String::from_utf8_lossy(&output.stderr);
-          log::warn!("Proxy stop error: {stderr}");
+        if let Err(e) = crate::proxy_runner::stop_proxy_process(&proxy_id).await {
+          log::warn!("Proxy stop error: {e}");
         }
 
         // Clear profile-to-proxy mapping

@@ -951,9 +951,8 @@ impl McpServer {
       },
       McpTool {
         name: "update_profile_fingerprint".to_string(),
-        description:
-          "Update the fingerprint configuration for a Wayfern or Camoufox profile. Requires an active Pro subscription."
-            .to_string(),
+        description: "Update the fingerprint configuration for a Wayfern or Camoufox profile."
+          .to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {
@@ -1031,7 +1030,7 @@ impl McpServer {
       },
       McpTool {
         name: "list_extensions".to_string(),
-        description: "List all managed browser extensions. Requires Pro subscription.".to_string(),
+        description: "List all managed browser extensions.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {},
@@ -1040,7 +1039,7 @@ impl McpServer {
       },
       McpTool {
         name: "list_extension_groups".to_string(),
-        description: "List all extension groups. Requires Pro subscription.".to_string(),
+        description: "List all extension groups.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {},
@@ -1049,7 +1048,7 @@ impl McpServer {
       },
       McpTool {
         name: "create_extension_group".to_string(),
-        description: "Create a new extension group. Requires Pro subscription.".to_string(),
+        description: "Create a new extension group.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {
@@ -1060,7 +1059,7 @@ impl McpServer {
       },
       McpTool {
         name: "delete_extension".to_string(),
-        description: "Delete a managed extension. Requires Pro subscription.".to_string(),
+        description: "Delete a managed extension.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {
@@ -1071,7 +1070,7 @@ impl McpServer {
       },
       McpTool {
         name: "delete_extension_group".to_string(),
-        description: "Delete an extension group. Requires Pro subscription.".to_string(),
+        description: "Delete an extension group.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {
@@ -1082,7 +1081,7 @@ impl McpServer {
       },
       McpTool {
         name: "assign_extension_group_to_profile".to_string(),
-        description: "Assign an extension group to a profile, or remove the assignment. Requires Pro subscription.".to_string(),
+        description: "Assign an extension group to a profile, or remove the assignment.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {
@@ -1119,7 +1118,7 @@ impl McpServer {
       // Synchronizer tools
       McpTool {
         name: "start_sync_session".to_string(),
-        description: "Start a synchronizer session. Launches a leader profile and follower profiles, then mirrors all actions from the leader to the followers in real time. Only Wayfern profiles are supported. Requires paid subscription.".to_string(),
+        description: "Start a synchronizer session. Launches a leader profile and follower profiles, then mirrors all actions from the leader to the followers in real time. Only Wayfern profiles are supported.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {
@@ -1382,7 +1381,7 @@ impl McpServer {
         "name": SERVER_NAME,
         "version": SERVER_VERSION,
       },
-      "instructions": "Donut Browser MCP server. Use tools/list to discover available browser automation tools."
+      "instructions": "JnmBrowser MCP server. Use tools/list to discover available browser automation tools."
     });
 
     log::info!("[mcp] New session initialized: {}", session_id);
@@ -1520,10 +1519,7 @@ impl McpServer {
       "get_team_locks" => self.handle_get_team_locks().await,
       "get_team_lock_status" => self.handle_get_team_lock_status(&arguments).await,
       // Synchronizer tools
-      "start_sync_session" => {
-        Self::require_paid_subscription("Synchronizer").await?;
-        self.handle_start_sync_session(&arguments).await
-      }
+      "start_sync_session" => self.handle_start_sync_session(&arguments).await,
       "stop_sync_session" => self.handle_stop_sync_session(&arguments).await,
       "get_sync_sessions" => self.handle_get_sync_sessions().await,
       "remove_sync_follower" => self.handle_remove_sync_follower(&arguments).await,
@@ -2970,13 +2966,6 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
-      return Err(McpError {
-        code: -32000,
-        message: "Fingerprint editing requires an active Pro subscription".to_string(),
-      });
-    }
-
     let profile_id = arguments
       .get("profile_id")
       .and_then(|v| v.as_str())
@@ -2990,18 +2979,6 @@ impl McpServer {
     let randomize = arguments
       .get("randomize_fingerprint_on_launch")
       .and_then(|v| v.as_bool());
-
-    if let Some(os_val) = os {
-      if !CLOUD_AUTH.is_fingerprint_os_allowed(Some(os_val)).await {
-        return Err(McpError {
-          code: -32000,
-          message: format!(
-            "OS spoofing to '{}' requires an active Pro subscription",
-            os_val
-          ),
-        });
-      }
-    }
 
     let profiles = ProfileManager::instance()
       .list_profiles()
@@ -3187,12 +3164,6 @@ impl McpServer {
   }
 
   async fn handle_list_extensions(&self) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
-      return Err(McpError {
-        code: -32000,
-        message: "Extension management requires an active Pro subscription".to_string(),
-      });
-    }
     let mgr = crate::extension_manager::EXTENSION_MANAGER.lock().unwrap();
     let extensions = mgr.list_extensions().map_err(|e| McpError {
       code: -32000,
@@ -3202,12 +3173,6 @@ impl McpServer {
   }
 
   async fn handle_list_extension_groups(&self) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
-      return Err(McpError {
-        code: -32000,
-        message: "Extension management requires an active Pro subscription".to_string(),
-      });
-    }
     let mgr = crate::extension_manager::EXTENSION_MANAGER.lock().unwrap();
     let groups = mgr.list_groups().map_err(|e| McpError {
       code: -32000,
@@ -3220,12 +3185,6 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
-      return Err(McpError {
-        code: -32000,
-        message: "Extension management requires an active Pro subscription".to_string(),
-      });
-    }
     let name = arguments
       .get("name")
       .and_then(|v| v.as_str())
@@ -3245,12 +3204,6 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
-      return Err(McpError {
-        code: -32000,
-        message: "Extension management requires an active Pro subscription".to_string(),
-      });
-    }
     let extension_id = arguments
       .get("extension_id")
       .and_then(|v| v.as_str())
@@ -3272,12 +3225,6 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
-      return Err(McpError {
-        code: -32000,
-        message: "Extension management requires an active Pro subscription".to_string(),
-      });
-    }
     let group_id = arguments
       .get("group_id")
       .and_then(|v| v.as_str())
@@ -3302,12 +3249,6 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
-      return Err(McpError {
-        code: -32000,
-        message: "Extension management requires an active Pro subscription".to_string(),
-      });
-    }
     let profile_id = arguments
       .get("profile_id")
       .and_then(|v| v.as_str())

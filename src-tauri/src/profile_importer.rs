@@ -792,18 +792,6 @@ pub async fn import_browser_profile(
   camoufox_config: Option<CamoufoxConfig>,
   wayfern_config: Option<WayfernConfig>,
 ) -> Result<(), String> {
-  let fingerprint_os = camoufox_config
-    .as_ref()
-    .and_then(|c| c.os.as_deref())
-    .or_else(|| wayfern_config.as_ref().and_then(|c| c.os.as_deref()));
-
-  if !crate::cloud_auth::CLOUD_AUTH
-    .is_fingerprint_os_allowed(fingerprint_os)
-    .await
-  {
-    return Err("Fingerprint OS spoofing requires an active Pro subscription".to_string());
-  }
-
   let importer = ProfileImporter::instance();
   importer
     .import_profile(

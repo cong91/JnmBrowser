@@ -124,12 +124,12 @@
       "title": "Navigateur par défaut",
       "setAsDefault": "Définir comme navigateur par défaut",
       "alreadyDefault": "Déjà le navigateur par défaut",
-      "description": "Lorsqu'il est défini par défaut, Donut Browser gérera les liens web et vous permettra de choisir quel profil utiliser."
+      "description": "Lorsqu'il est défini par défaut, JnmBrowser gérera les liens web et vous permettra de choisir quel profil utiliser."
     },
     "permissions": {
       "title": "Permissions système",
       "loading": "Chargement des permissions...",
-      "description": "Ces permissions permettent aux navigateurs lancés depuis Donut Browser d'accéder aux ressources système. Chaque site web demandera toujours votre permission individuellement.",
+      "description": "Ces permissions permettent aux navigateurs lancés depuis JnmBrowser d'accéder aux ressources système. Chaque site web demandera toujours votre permission individuellement.",
       "microphone": "Microphone",
       "microphoneDescription": "Accès au microphone pour les applications du navigateur",
       "camera": "Caméra",
@@ -172,7 +172,7 @@
       "clearCacheFailed": "Échec de la suppression du cache"
     },
     "disableAutoUpdates": "Désactiver les mises à jour automatiques de l'app",
-    "disableAutoUpdatesDescription": "Empêche l'application de vérifier et d'installer automatiquement les mises à jour de Donut Browser. Les mises à jour des navigateurs ne sont pas affectées."
+    "disableAutoUpdatesDescription": "Empêche l'application de vérifier et d'installer automatiquement les mises à jour de JnmBrowser. Les mises à jour des navigateurs ne sont pas affectées."
   },
   "header": {
     "searchPlaceholder": "Rechercher des profils...",
@@ -187,7 +187,8 @@
       "integrations": "Intégrations",
       "importProfile": "Importer un profil",
       "extensions": "Extensions"
-    }
+    },
+    "appName": "JnmBrowser"
   },
   "profiles": {
     "title": "Profils",
@@ -228,7 +229,6 @@
       "stopLeader": "Arrêter ce profil et tous ses suiveurs",
       "stopFollower": "Suit les actions de {{leaderName}}",
       "desyncedTooltip": "La synchronisation a échoué à {{url}}",
-      "paidFeature": "Le synchroniseur est une fonctionnalité payante",
       "wayfernOnly": "Seuls les profils Wayfern peuvent être synchronisés",
       "selectFollowers": "Sélectionner les profils suiveurs",
       "selectFollowersDesc": "Choisissez les profils qui reproduiront les actions du profil leader. Seuls les profils Wayfern arrêtés peuvent être sélectionnés.",
@@ -305,7 +305,14 @@
       "downloading": "Téléchargement de la version de {{browser}} ({{version}})...",
       "latestNeedsDownload": "La dernière version ({{version}}) doit être téléchargée",
       "latestAvailable": "La dernière version ({{version}}) est disponible",
-      "latestDownloading": "Téléchargement de la version ({{version}})..."
+      "latestDownloading": "Téléchargement de la version ({{version}})...",
+      "updateAvailable": "New {{browser}} kernel {{latest}} is available. Installed {{current}} can still be used; download manually when you want to update.",
+      "downloadProgress": "{{browser}} {{version}} download: {{percent}}%",
+      "downloadDetails": "{{downloaded}} / {{total}} · {{speed}}/s · ETA {{eta}}",
+      "downloadDetailsNoTotal": "{{downloaded}} downloaded · {{speed}}/s",
+      "cancelled": "Téléchargement suspendu",
+      "pauseDownload": "Suspendre le téléchargement",
+      "preparingDownload": "Préparation du téléchargement..."
     },
     "chromiumLabel": "Chromium",
     "chromiumSubtitle": "Propulsé par Wayfern",
@@ -530,7 +537,10 @@
       "settingsSaved": "Paramètres de synchronisation enregistrés",
       "saveFailed": "Échec de l’enregistrement des paramètres",
       "disconnected": "Synchronisation déconnectée",
-      "disconnectFailed": "Échec de la déconnexion"
+      "disconnectFailed": "Échec de la déconnexion",
+      "disconnect": "Déconnecter",
+      "testConnection": "Tester la connexion",
+      "testingConnection": "Test en cours..."
     },
     "serverUrl": "URL du serveur",
     "serverUrlPlaceholder": "https://sync.exemple.com",
@@ -1070,7 +1080,7 @@
     "launchHook": {
       "title": "URL du hook de lancement",
       "label": "URL du hook de lancement",
-      "description": "Donut Browser enverra une requête POST à cette URL chaque fois que le profil est lancé.",
+      "description": "JnmBrowser enverra une requête POST à cette URL chaque fois que le profil est lancé.",
       "placeholder": "https://example.com/hooks/profile-launch"
     },
     "actions": {
@@ -1412,7 +1422,7 @@
   },
   "wayfernTerms": {
     "title": "Conditions générales de Wayfern",
-    "description": "Avant d'utiliser Donut Browser, vous devez lire et accepter les Conditions Générales de Wayfern.",
+    "description": "Avant d'utiliser JnmBrowser, vous devez lire et accepter les Conditions Générales de Wayfern.",
     "reviewLabel": "Veuillez consulter les Conditions Générales sur :",
     "agreeNotice": "En cliquant sur « J'accepte », vous acceptez ces conditions.",
     "acceptButton": "J'accepte",
@@ -1423,7 +1433,7 @@
   "commercialTrial": {
     "title": "Période d'essai commerciale expirée",
     "description": "Votre période d'essai commercial de 2 semaines est terminée.",
-    "body": "Si vous utilisez Donut Browser à des fins professionnelles, vous devez acheter une licence commerciale pour continuer. Vous pouvez toujours l'utiliser gratuitement à des fins personnelles.",
+    "body": "Si vous utilisez JnmBrowser à des fins professionnelles, vous devez acheter une licence commerciale pour continuer. Vous pouvez toujours l'utiliser gratuitement à des fins personnelles.",
     "understandButton": "J'ai compris",
     "failed": "Échec de l'enregistrement de la confirmation",
     "tryAgain": "Veuillez réessayer"
@@ -1431,10 +1441,10 @@
   "permissionDialog": {
     "titleMicrophone": "Accès au microphone requis",
     "titleCamera": "Accès à la caméra requis",
-    "descMicrophone": "Donut Browser a besoin d'accéder à votre microphone pour activer la fonctionnalité microphone dans les navigateurs. Chaque site web qui voudra utiliser votre microphone vous demandera quand même votre permission individuellement.",
-    "descCamera": "Donut Browser a besoin d'accéder à votre caméra pour activer la fonctionnalité caméra dans les navigateurs. Chaque site web qui voudra utiliser votre caméra vous demandera quand même votre permission individuellement.",
-    "grantedMicrophone": "Permission accordée ! Les navigateurs lancés depuis Donut Browser peuvent maintenant accéder à votre microphone.",
-    "grantedCamera": "Permission accordée ! Les navigateurs lancés depuis Donut Browser peuvent maintenant accéder à votre caméra.",
+    "descMicrophone": "JnmBrowser a besoin d'accéder à votre microphone pour activer la fonctionnalité microphone dans les navigateurs. Chaque site web qui voudra utiliser votre microphone vous demandera quand même votre permission individuellement.",
+    "descCamera": "JnmBrowser a besoin d'accéder à votre caméra pour activer la fonctionnalité caméra dans les navigateurs. Chaque site web qui voudra utiliser votre caméra vous demandera quand même votre permission individuellement.",
+    "grantedMicrophone": "Permission accordée ! Les navigateurs lancés depuis JnmBrowser peuvent maintenant accéder à votre microphone.",
+    "grantedCamera": "Permission accordée ! Les navigateurs lancés depuis JnmBrowser peuvent maintenant accéder à votre caméra.",
     "notGrantedMicrophone": "Permission non accordée. Cliquez sur le bouton pour demander l'accès à votre microphone.",
     "notGrantedCamera": "Permission non accordée. Cliquez sur le bouton pour demander l'accès à votre caméra.",
     "doneButton": "Terminé",
@@ -1543,7 +1553,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "Échec de la mise à jour de Donut Browser",
+      "updateFailed": "Échec de la mise à jour de JnmBrowser",
       "restartFailed": "Échec du redémarrage",
       "updateReady": "Mise à jour prête, redémarrer pour appliquer",
       "manualDownloadRequired": "Téléchargement manuel requis",

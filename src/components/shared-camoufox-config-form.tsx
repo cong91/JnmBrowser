@@ -33,7 +33,7 @@ interface SharedCamoufoxConfigFormProps {
   forceAdvanced?: boolean; // Force advanced mode (for editing)
   readOnly?: boolean; // Flag to indicate if the form should be read-only
   browserType?: "camoufox" | "wayfern"; // Browser type to customize form options
-  crossOsUnlocked?: boolean; // Allow selecting non-current OS (paid feature)
+  crossOsUnlocked?: boolean;
   limitedMode?: boolean; // Blur and disable advanced fields while keeping basic options accessible
   profileVersion?: string;
   profileBrowser?: string;
@@ -129,7 +129,6 @@ export function SharedCamoufoxConfigForm({
   forceAdvanced = false,
   readOnly = false,
   browserType = "camoufox",
-  crossOsUnlocked = false,
   limitedMode = false,
   profileVersion,
   profileBrowser,
@@ -254,7 +253,7 @@ export function SharedCamoufoxConfigForm({
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <Label>{t("fingerprint.osLabel")}</Label>
-          {profileVersion && (!isCreating || crossOsUnlocked) && (
+          {profileVersion && (
             <LoadingButton
               isLoading={isGeneratingFingerprint}
               onClick={handleGenerateFingerprint}
@@ -280,19 +279,17 @@ export function SharedCamoufoxConfigForm({
           </SelectTrigger>
           <SelectContent>
             {(["windows", "macos", "linux"] as CamoufoxOS[]).map((os) => {
-              const isDisabled = os !== currentOS && !crossOsUnlocked;
               return (
-                <SelectItem key={os} value={os} disabled={isDisabled}>
+                <SelectItem key={os} value={os}>
                   <span className="flex items-center gap-2">
                     {osLabels[os]}
-                    {isDisabled && <ProBadge />}
                   </span>
                 </SelectItem>
               );
             })}
           </SelectContent>
         </Select>
-        {selectedOS !== currentOS && crossOsUnlocked && (
+        {selectedOS !== currentOS && (
           <Alert className="mt-2">
             <AlertDescription>
               {t("fingerprint.crossOsWarning")}
@@ -1153,19 +1150,17 @@ export function SharedCamoufoxConfigForm({
                 </SelectTrigger>
                 <SelectContent>
                   {(["windows", "macos", "linux"] as CamoufoxOS[]).map((os) => {
-                    const isDisabled = os !== currentOS && !crossOsUnlocked;
                     return (
-                      <SelectItem key={os} value={os} disabled={isDisabled}>
+                      <SelectItem key={os} value={os}>
                         <span className="flex items-center gap-2">
                           {osLabels[os]}
-                          {isDisabled && <ProBadge />}
                         </span>
                       </SelectItem>
                     );
                   })}
                 </SelectContent>
               </Select>
-              {selectedOS !== currentOS && crossOsUnlocked && (
+              {selectedOS !== currentOS && (
                 <Alert className="mt-2">
                   <AlertDescription>
                     {t("fingerprint.crossOsLimitations")}

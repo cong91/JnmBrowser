@@ -64,7 +64,6 @@ export function WayfernConfigForm({
   isCreating = false,
   forceAdvanced = false,
   readOnly = false,
-  crossOsUnlocked = false,
   limitedMode = false,
   profileVersion,
   profileBrowser,
@@ -177,7 +176,7 @@ export function WayfernConfigForm({
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <Label>{t("fingerprint.osLabel")}</Label>
-          {profileVersion && (!isCreating || crossOsUnlocked) && (
+          {profileVersion && (
             <LoadingButton
               isLoading={isGeneratingFingerprint}
               onClick={handleGenerateFingerprint}
@@ -205,19 +204,17 @@ export function WayfernConfigForm({
             {(
               ["windows", "macos", "linux", "android", "ios"] as WayfernOS[]
             ).map((os) => {
-              const isDisabled = os !== currentOS && !crossOsUnlocked;
               return (
-                <SelectItem key={os} value={os} disabled={isDisabled}>
+                <SelectItem key={os} value={os}>
                   <span className="flex items-center gap-2">
                     {osLabels[os]}
-                    {isDisabled && <ProBadge />}
                   </span>
                 </SelectItem>
               );
             })}
           </SelectContent>
         </Select>
-        {selectedOS !== currentOS && crossOsUnlocked && (
+        {selectedOS !== currentOS && (
           <Alert className="mt-2">
             <AlertDescription>
               {t("fingerprint.crossOsWarning")}
@@ -1110,19 +1107,17 @@ export function WayfernConfigForm({
                       "ios",
                     ] as WayfernOS[]
                   ).map((os) => {
-                    const isDisabled = os !== currentOS && !crossOsUnlocked;
                     return (
-                      <SelectItem key={os} value={os} disabled={isDisabled}>
+                      <SelectItem key={os} value={os}>
                         <span className="flex items-center gap-2">
                           {osLabels[os]}
-                          {isDisabled && <ProBadge />}
                         </span>
                       </SelectItem>
                     );
                   })}
                 </SelectContent>
               </Select>
-              {selectedOS !== currentOS && crossOsUnlocked && (
+              {selectedOS !== currentOS && (
                 <Alert className="mt-2">
                   <AlertDescription>
                     {t("fingerprint.crossOsLimitations")}

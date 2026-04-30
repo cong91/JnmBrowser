@@ -124,12 +124,12 @@
       "title": "默认浏览器",
       "setAsDefault": "设为默认浏览器",
       "alreadyDefault": "已是默认浏览器",
-      "description": "设为默认后，Donut Browser 将处理网页链接并允许您选择使用哪个配置文件。"
+      "description": "设为默认后，JnmBrowser 将处理网页链接并允许您选择使用哪个配置文件。"
     },
     "permissions": {
       "title": "系统权限",
       "loading": "加载权限中...",
-      "description": "这些权限允许从 Donut Browser 启动的浏览器访问系统资源。每个网站仍会单独请求您的权限。",
+      "description": "这些权限允许从 JnmBrowser 启动的浏览器访问系统资源。每个网站仍会单独请求您的权限。",
       "microphone": "麦克风",
       "microphoneDescription": "浏览器应用程序的麦克风访问权限",
       "camera": "摄像头",
@@ -172,7 +172,7 @@
       "clearCacheFailed": "清除缓存失败"
     },
     "disableAutoUpdates": "禁用应用自动更新",
-    "disableAutoUpdatesDescription": "阻止应用程序自动检查和安装 Donut Browser 更新。浏览器更新不受影响。"
+    "disableAutoUpdatesDescription": "阻止应用程序自动检查和安装 JnmBrowser 更新。浏览器更新不受影响。"
   },
   "header": {
     "searchPlaceholder": "搜索配置文件...",
@@ -187,7 +187,8 @@
       "integrations": "集成",
       "importProfile": "导入配置文件",
       "extensions": "扩展程序"
-    }
+    },
+    "appName": "JnmBrowser"
   },
   "profiles": {
     "title": "配置文件",
@@ -228,7 +229,6 @@
       "stopLeader": "停止此配置文件及其所有跟随者",
       "stopFollower": "正在跟随 {{leaderName}} 的操作",
       "desyncedTooltip": "在 {{url}} 同步失败",
-      "paidFeature": "同步器是付费功能",
       "wayfernOnly": "只有 Wayfern 配置文件可以同步",
       "selectFollowers": "选择跟随者配置文件",
       "selectFollowersDesc": "选择将复制领导者配置文件操作的配置文件。只能选择已停止的 Wayfern 配置文件。",
@@ -305,7 +305,14 @@
       "downloading": "正在下载 {{browser}} 版本 ({{version}})...",
       "latestNeedsDownload": "最新版本 ({{version}}) 需要下载",
       "latestAvailable": "最新版本 ({{version}}) 可用",
-      "latestDownloading": "正在下载版本 ({{version}})..."
+      "latestDownloading": "正在下载版本 ({{version}})...",
+      "updateAvailable": "发现新的 {{browser}} 内核 {{latest}}。当前已安装 {{current}} 仍可使用；需要更新时请手动下载。",
+      "downloadProgress": "正在下载 {{browser}} {{version}}：{{percent}}%",
+      "downloadDetails": "{{downloaded}} / {{total}} · {{speed}}/秒 · 预计剩余 {{eta}}",
+      "downloadDetailsNoTotal": "已下载 {{downloaded}} · {{speed}}/秒",
+      "cancelled": "下载已暂停",
+      "pauseDownload": "暂停下载",
+      "preparingDownload": "正在准备下载..."
     },
     "chromiumLabel": "Chromium",
     "chromiumSubtitle": "由 Wayfern 驱动",
@@ -530,7 +537,10 @@
       "settingsSaved": "同步设置已保存",
       "saveFailed": "保存设置失败",
       "disconnected": "已断开同步",
-      "disconnectFailed": "断开连接失败"
+      "disconnectFailed": "断开连接失败",
+      "disconnect": "断开连接",
+      "testConnection": "测试连接",
+      "testingConnection": "测试中..."
     },
     "serverUrl": "服务器 URL",
     "serverUrlPlaceholder": "https://sync.example.com",
@@ -1070,7 +1080,7 @@
     "launchHook": {
       "title": "启动钩子 URL",
       "label": "启动钩子 URL",
-      "description": "每次启动配置文件时，Donut Browser 都会向此 URL 发送 POST 请求。",
+      "description": "每次启动配置文件时，JnmBrowser 都会向此 URL 发送 POST 请求。",
       "placeholder": "https://example.com/hooks/profile-launch"
     },
     "actions": {
@@ -1412,7 +1422,7 @@
   },
   "wayfernTerms": {
     "title": "Wayfern 条款和条件",
-    "description": "在使用 Donut Browser 之前,你必须阅读并同意 Wayfern 的条款和条件。",
+    "description": "在使用 JnmBrowser 之前,你必须阅读并同意 Wayfern 的条款和条件。",
     "reviewLabel": "请查看以下条款和条件:",
     "agreeNotice": "点击「我接受」即表示你同意受这些条款约束。",
     "acceptButton": "我接受",
@@ -1423,7 +1433,7 @@
   "commercialTrial": {
     "title": "商业试用期已过期",
     "description": "你的 2 周商业试用期已结束。",
-    "body": "如果你将 Donut Browser 用于商业目的,需要购买商业许可证才能继续。你仍然可以免费用于个人用途。",
+    "body": "如果你将 JnmBrowser 用于商业目的,需要购买商业许可证才能继续。你仍然可以免费用于个人用途。",
     "understandButton": "我明白了",
     "failed": "保存确认失败",
     "tryAgain": "请重试"
@@ -1431,10 +1441,10 @@
   "permissionDialog": {
     "titleMicrophone": "需要麦克风访问权限",
     "titleCamera": "需要摄像头访问权限",
-    "descMicrophone": "Donut Browser 需要访问你的麦克风以在浏览器中启用麦克风功能。每个想使用麦克风的网站仍会单独请求你的许可。",
-    "descCamera": "Donut Browser 需要访问你的摄像头以在浏览器中启用摄像头功能。每个想使用摄像头的网站仍会单独请求你的许可。",
-    "grantedMicrophone": "权限已授予!从 Donut Browser 启动的浏览器现在可以访问你的麦克风。",
-    "grantedCamera": "权限已授予!从 Donut Browser 启动的浏览器现在可以访问你的摄像头。",
+    "descMicrophone": "JnmBrowser 需要访问你的麦克风以在浏览器中启用麦克风功能。每个想使用麦克风的网站仍会单独请求你的许可。",
+    "descCamera": "JnmBrowser 需要访问你的摄像头以在浏览器中启用摄像头功能。每个想使用摄像头的网站仍会单独请求你的许可。",
+    "grantedMicrophone": "权限已授予!从 JnmBrowser 启动的浏览器现在可以访问你的麦克风。",
+    "grantedCamera": "权限已授予!从 JnmBrowser 启动的浏览器现在可以访问你的摄像头。",
     "notGrantedMicrophone": "未授予权限。点击下方按钮请求访问你的麦克风。",
     "notGrantedCamera": "未授予权限。点击下方按钮请求访问你的摄像头。",
     "doneButton": "完成",
@@ -1543,7 +1553,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "更新 Donut Browser 失败",
+      "updateFailed": "更新 JnmBrowser 失败",
       "restartFailed": "重启失败",
       "updateReady": "更新就绪，请重启以应用",
       "manualDownloadRequired": "需要手动下载",

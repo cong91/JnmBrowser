@@ -100,9 +100,9 @@ fn get_daemon_path() -> Option<PathBuf> {
 
   // Try common installation paths
   let paths = [
-    PathBuf::from("/Applications/Donut Browser.app/Contents/MacOS/donut-daemon"),
+    PathBuf::from("/Applications/JnmBrowser.app/Contents/MacOS/donut-daemon"),
     dirs::home_dir()
-      .map(|h| h.join("Applications/Donut Browser.app/Contents/MacOS/donut-daemon"))
+      .map(|h| h.join("Applications/JnmBrowser.app/Contents/MacOS/donut-daemon"))
       .unwrap_or_default(),
   ];
   paths.into_iter().find(|path| path.exists())

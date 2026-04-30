@@ -105,8 +105,7 @@ use tag_manager::get_all_tags;
 use default_browser::{is_default_browser, set_as_default_browser};
 
 use version_updater::{
-  clear_all_version_cache_and_refetch, get_version_update_status, get_version_updater,
-  trigger_manual_version_update,
+  clear_all_version_cache_and_refetch, get_version_update_status, trigger_manual_version_update,
 };
 
 use auto_updater::{
@@ -513,10 +512,10 @@ async fn add_mcp_to_claude_desktop(app_handle: tauri::AppHandle) -> Result<(), S
   let manifest = serde_json::json!({
     "manifest_version": "0.3",
     "name": "donut-browser",
-    "display_name": "Donut Browser",
+    "display_name": "JnmBrowser",
     "version": env!("CARGO_PKG_VERSION"),
-    "description": "Control Donut Browser profiles, proxies, and automation via MCP",
-    "author": { "name": "Donut Browser" },
+    "description": "Control JnmBrowser profiles, proxies, and automation via MCP",
+    "author": { "name": "JnmBrowser" },
     "tools_generated": true,
     "server": {
       "type": "node",
@@ -1231,7 +1230,7 @@ pub fn run() {
       // Create the main window programmatically
       #[allow(unused_variables)]
       let win_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-        .title("Donut Browser")
+        .title("JnmBrowser")
         .inner_size(840.0, 500.0)
         .resizable(false)
         .fullscreen(false)
@@ -1313,30 +1312,7 @@ pub fn run() {
         });
       }
 
-      // Initialize and start background version updater
-      let app_handle = app.handle().clone();
-      tauri::async_runtime::spawn(async move {
-        let version_updater = get_version_updater();
-
-        // Set the app handle
-        {
-          let mut updater_guard = version_updater.lock().await;
-          updater_guard.set_app_handle(app_handle);
-        }
-
-        // Run startup check without holding the lock
-        {
-          let updater_guard = version_updater.lock().await;
-          if let Err(e) = updater_guard.start_background_updates().await {
-            log::error!("Failed to start background updates: {e}");
-          }
-        }
-      });
-
-      // Start the background update task separately
-      tauri::async_runtime::spawn(async move {
-        version_updater::VersionUpdater::run_background_task().await;
-      });
+      log::info!("Background browser version update service is disabled");
 
       // Auto-start MCP server if it was previously enabled
       {
@@ -1462,34 +1438,7 @@ pub fn run() {
         }
       });
 
-      // Immediately bump non-running profiles to the latest installed browser version.
-      // This runs synchronously before any network calls so profiles are updated on launch.
-      {
-        let app_handle_bump = app.handle().clone();
-        match auto_updater::AutoUpdater::instance()
-          .update_profiles_to_latest_installed(&app_handle_bump)
-        {
-          Ok(updated) => {
-            if !updated.is_empty() {
-              log::info!(
-                "Startup: bumped {} profiles to latest installed versions: {:?}",
-                updated.len(),
-                updated
-              );
-            }
-          }
-          Err(e) => {
-            log::error!("Startup: failed to bump profiles to latest installed versions: {e}");
-          }
-        }
-      }
-
-      let app_handle_auto_updater = app.handle().clone();
-
-      // Start the auto-update check task separately
-      tauri::async_runtime::spawn(async move {
-        auto_updater::check_for_updates_with_progress(app_handle_auto_updater).await;
-      });
+      log::info!("Startup browser auto-update check is disabled");
 
       // Handle any pending URLs that were received before the window was ready
       let handle_pending = handle.clone();
@@ -1550,34 +1499,7 @@ pub fn run() {
         }
       });
 
-      tauri::async_runtime::spawn(async move {
-        let updater = app_auto_updater::AppAutoUpdater::instance();
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3 * 60 * 60));
-
-        loop {
-          interval.tick().await;
-
-          log::info!("Checking for app updates...");
-          match updater.check_for_updates().await {
-            Ok(Some(update_info)) => {
-              log::info!(
-                "App update available: {} -> {}",
-                update_info.current_version,
-                update_info.new_version
-              );
-              if let Err(e) = events::emit("app-update-available", &update_info) {
-                log::error!("Failed to emit app update event: {e}");
-              }
-            }
-            Ok(None) => {
-              log::debug!("No app updates available");
-            }
-            Err(e) => {
-              log::error!("Failed to check for app updates: {e}");
-            }
-          }
-        }
-      });
+      log::info!("Background app auto-update service is disabled");
 
       // Start Camoufox cleanup task
       let _app_handle_cleanup = app.handle().clone();
@@ -2122,6 +2044,12 @@ mod tests {
       "generate_sample_fingerprint",
       "cloud_get_wayfern_token",
       "cloud_refresh_wayfern_token",
+      "check_missing_binaries",
+      "check_missing_geoip_database",
+      "ensure_all_binaries_exist",
+      "ensure_active_browsers_downloaded",
+      "handle_url_open",
+      "cloud_get_proxy_usage",
     ];
 
     // Extract command names from the generate_handler! macro in this file

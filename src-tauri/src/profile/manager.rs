@@ -1879,8 +1879,8 @@ mod tests {
     let profiles_dir = manager.get_profiles_dir();
 
     assert!(
-      profiles_dir.to_string_lossy().contains("DonutBrowser"),
-      "Profiles dir should contain DonutBrowser"
+      profiles_dir.to_string_lossy().contains("JnmBrowser"),
+      "Profiles dir should contain JnmBrowser"
     );
     assert!(
       profiles_dir.to_string_lossy().contains("profiles"),
@@ -1915,8 +1915,8 @@ mod tests {
     let path_str = binaries_dir.to_string_lossy();
 
     assert!(
-      path_str.contains("DonutBrowser"),
-      "Binaries dir should contain DonutBrowser"
+      path_str.contains("JnmBrowser"),
+      "Binaries dir should contain JnmBrowser"
     );
     assert!(
       path_str.contains("binaries"),
@@ -2230,18 +2230,6 @@ pub async fn create_browser_profile_new(
   dns_blocklist: Option<String>,
   launch_hook: Option<String>,
 ) -> Result<BrowserProfile, String> {
-  let fingerprint_os = camoufox_config
-    .as_ref()
-    .and_then(|c| c.os.as_deref())
-    .or_else(|| wayfern_config.as_ref().and_then(|c| c.os.as_deref()));
-
-  if !crate::cloud_auth::CLOUD_AUTH
-    .is_fingerprint_os_allowed(fingerprint_os)
-    .await
-  {
-    return Err("Fingerprint OS spoofing requires an active Pro subscription".to_string());
-  }
-
   let browser_type =
     BrowserType::from_str(&browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
   create_browser_profile_with_group(
@@ -2268,21 +2256,6 @@ pub async fn update_camoufox_config(
   profile_id: String,
   config: CamoufoxConfig,
 ) -> Result<(), String> {
-  if config.fingerprint.is_some()
-    && !crate::cloud_auth::CLOUD_AUTH
-      .has_active_paid_subscription()
-      .await
-  {
-    return Err("Fingerprint editing requires an active Pro subscription".to_string());
-  }
-
-  if !crate::cloud_auth::CLOUD_AUTH
-    .is_fingerprint_os_allowed(config.os.as_deref())
-    .await
-  {
-    return Err("Fingerprint OS spoofing requires an active Pro subscription".to_string());
-  }
-
   let profile_manager = ProfileManager::instance();
   profile_manager
     .update_camoufox_config(app_handle, &profile_id, config)
@@ -2296,21 +2269,6 @@ pub async fn update_wayfern_config(
   profile_id: String,
   config: WayfernConfig,
 ) -> Result<(), String> {
-  if config.fingerprint.is_some()
-    && !crate::cloud_auth::CLOUD_AUTH
-      .has_active_paid_subscription()
-      .await
-  {
-    return Err("Fingerprint editing requires an active Pro subscription".to_string());
-  }
-
-  if !crate::cloud_auth::CLOUD_AUTH
-    .is_fingerprint_os_allowed(config.os.as_deref())
-    .await
-  {
-    return Err("Fingerprint OS spoofing requires an active Pro subscription".to_string());
-  }
-
   let profile_manager = ProfileManager::instance();
   profile_manager
     .update_wayfern_config(app_handle, &profile_id, config)

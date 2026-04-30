@@ -17,8 +17,8 @@ fn get_daemon_path() -> Option<PathBuf> {
   #[cfg(target_os = "macos")]
   {
     let paths = [
-      PathBuf::from("/Applications/Donut Browser.app/Contents/MacOS/donut-daemon"),
-      dirs::home_dir()?.join("Applications/Donut Browser.app/Contents/MacOS/donut-daemon"),
+      PathBuf::from("/Applications/JnmBrowser.app/Contents/MacOS/donut-daemon"),
+      dirs::home_dir()?.join("Applications/JnmBrowser.app/Contents/MacOS/donut-daemon"),
     ];
     for path in paths {
       if path.exists() {
@@ -30,8 +30,8 @@ fn get_daemon_path() -> Option<PathBuf> {
   #[cfg(target_os = "windows")]
   {
     let paths = [
-      dirs::data_local_dir()?.join("Donut Browser/donut-daemon.exe"),
-      PathBuf::from("C:\\Program Files\\Donut Browser\\donut-daemon.exe"),
+      dirs::data_local_dir()?.join("JnmBrowser/donut-daemon.exe"),
+      PathBuf::from("C:\\Program Files\\JnmBrowser\\donut-daemon.exe"),
     ];
     for path in paths {
       if path.exists() {
@@ -79,7 +79,7 @@ pub fn enable_autostart() -> io::Result<()> {
 
   fs::create_dir_all(&plist_dir)?;
 
-  let plist_path = plist_dir.join("com.donutbrowser.daemon.plist");
+  let plist_path = plist_dir.join("com.jnmbrowser.daemon.plist");
 
   // Get log directory (use data directory instead of /tmp)
   let log_dir = get_data_dir()
@@ -93,7 +93,7 @@ pub fn enable_autostart() -> io::Result<()> {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.donutbrowser.daemon</string>
+    <string>com.jnmbrowser.daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>{daemon_path}</string>
@@ -124,7 +124,7 @@ pub fn enable_autostart() -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn get_plist_path() -> Option<PathBuf> {
-  dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.donutbrowser.daemon.plist"))
+  dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.jnmbrowser.daemon.plist"))
 }
 
 #[cfg(target_os = "macos")]
@@ -188,7 +188,7 @@ pub fn start_launch_agent() -> io::Result<()> {
   use std::process::Command;
 
   let output = Command::new("launchctl")
-    .args(["start", "com.donutbrowser.daemon"])
+    .args(["start", "com.jnmbrowser.daemon"])
     .output()?;
 
   if !output.status.success() {
@@ -254,7 +254,7 @@ pub fn enable_autostart() -> io::Result<()> {
   let desktop_content = format!(
     r#"[Desktop Entry]
 Type=Application
-Name=Donut Browser Daemon
+Name=JnmBrowser Daemon
 Exec="{escaped_daemon_path}" run
 Hidden=false
 NoDisplay=true
@@ -301,7 +301,7 @@ pub fn enable_autostart() -> io::Result<()> {
   let (key, _) = hkcu.create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")?;
 
   key.set_value(
-    "DonutBrowserDaemon",
+    "JnmBrowserDaemon",
     &format!("\"{}\" run", daemon_path.display()),
   )?;
 
@@ -319,7 +319,7 @@ pub fn disable_autostart() -> io::Result<()> {
     "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
     winreg::enums::KEY_WRITE,
   ) {
-    let _ = key.delete_value("DonutBrowserDaemon");
+    let _ = key.delete_value("JnmBrowserDaemon");
     log::info!("Removed registry autostart entry");
   }
 
@@ -333,7 +333,7 @@ pub fn is_autostart_enabled() -> bool {
 
   let hkcu = RegKey::predef(HKEY_CURRENT_USER);
   if let Ok(key) = hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run") {
-    key.get_value::<String, _>("DonutBrowserDaemon").is_ok()
+    key.get_value::<String, _>("JnmBrowserDaemon").is_ok()
   } else {
     false
   }
@@ -343,7 +343,7 @@ pub fn get_data_dir() -> Option<PathBuf> {
   if crate::app_dirs::is_portable() {
     return Some(crate::app_dirs::data_dir());
   }
-  if let Some(proj_dirs) = ProjectDirs::from("com", "donutbrowser", "Donut Browser") {
+  if let Some(proj_dirs) = ProjectDirs::from("com", "jnmbrowser", "JnmBrowser") {
     Some(proj_dirs.data_dir().to_path_buf())
   } else {
     dirs::home_dir().map(|h| h.join(".donutbrowser"))

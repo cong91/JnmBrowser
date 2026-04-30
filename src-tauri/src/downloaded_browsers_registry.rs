@@ -7,6 +7,10 @@ use std::sync::Mutex;
 use crate::geoip_downloader::GeoIPDownloader;
 use crate::profile::{BrowserProfile, ProfileManager};
 
+fn startup_browser_auto_downloads_enabled() -> bool {
+  false
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DownloadedBrowserInfo {
   pub browser: String,
@@ -832,6 +836,11 @@ impl DownloadedBrowsersRegistry {
     &self,
     app_handle: &tauri::AppHandle,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    if !startup_browser_auto_downloads_enabled() {
+      log::info!("Startup missing browser binary auto-download is disabled");
+      return Ok(Vec::new());
+    }
+
     // First, clean up any stale registry entries
     if let Ok(cleaned_up) = self.verify_and_cleanup_stale_entries() {
       if !cleaned_up.is_empty() {
@@ -1240,6 +1249,11 @@ mod tests {
 pub async fn ensure_active_browsers_downloaded(
   app_handle: tauri::AppHandle,
 ) -> Result<Vec<String>, String> {
+  if !startup_browser_auto_downloads_enabled() {
+    log::info!("Startup active browser auto-download is disabled");
+    return Ok(Vec::new());
+  }
+
   let registry = DownloadedBrowsersRegistry::instance();
   let version_manager = crate::browser_version_manager::BrowserVersionManager::instance();
   let mut downloaded = Vec::new();

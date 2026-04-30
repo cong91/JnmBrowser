@@ -35,7 +35,7 @@ impl TrayMenu {
   pub fn new() -> Self {
     let menu = Menu::new();
 
-    let quit_item = MenuItem::new("Quit Donut Browser", true, None);
+    let quit_item = MenuItem::new("Quit JnmBrowser", true, None);
 
     menu.append(&quit_item).unwrap();
 
@@ -46,7 +46,7 @@ impl TrayMenu {
 pub fn create_tray_icon(icon: Icon, menu: &Menu) -> TrayIcon {
   let builder = TrayIconBuilder::new()
     .with_icon(icon)
-    .with_tooltip("Donut Browser")
+    .with_tooltip("JnmBrowser")
     .with_menu(Box::new(menu.clone()));
 
   // On macOS, template icons are automatically colored by the system for light/dark mode
@@ -57,7 +57,7 @@ pub fn create_tray_icon(icon: Icon, menu: &Menu) -> TrayIcon {
 }
 
 /// Resolve the .app bundle path from the current daemon executable.
-/// In production the daemon is at `Donut.app/Contents/MacOS/donut-daemon`.
+/// In production the daemon is at `JnmBrowser.app/Contents/MacOS/donut-daemon`.
 #[cfg(target_os = "macos")]
 fn get_app_bundle_path() -> Option<std::path::PathBuf> {
   let exe = std::env::current_exe().ok()?;
@@ -82,14 +82,20 @@ pub fn open_gui() {
     // activation machinery. The single-instance Tauri plugin in the GUI
     // handles deduplication if a GUI instance is already running.
     if let Some(app_bundle) = get_app_bundle_path() {
-      let gui_binary = app_bundle.join("Contents").join("MacOS").join("Donut");
-      if gui_binary.exists() {
+      let macos_dir = app_bundle.join("Contents").join("MacOS");
+      let gui_binary = ["JnmBrowser", "donutbrowser", "Donut"]
+        .iter()
+        .map(|name| macos_dir.join(name))
+        .find(|path| path.exists());
+      if let Some(gui_binary) = gui_binary {
         let _ = Command::new(&gui_binary).spawn();
       } else {
         let _ = Command::new("open").args(["-n"]).arg(&app_bundle).spawn();
       }
     } else {
-      let _ = Command::new("open").args(["-n", "-a", "Donut"]).spawn();
+      let _ = Command::new("open")
+        .args(["-n", "-a", "JnmBrowser"])
+        .spawn();
     }
   }
 
@@ -108,9 +114,9 @@ pub fn open_gui() {
     }
 
     let paths = [
-      dirs::data_local_dir().map(|p| p.join("Donut Browser").join("Donut Browser.exe")),
+      dirs::data_local_dir().map(|p| p.join("JnmBrowser").join("JnmBrowser.exe")),
       Some(PathBuf::from(
-        "C:\\Program Files\\Donut Browser\\Donut Browser.exe",
+        "C:\\Program Files\\JnmBrowser\\JnmBrowser.exe",
       )),
     ];
 
@@ -179,7 +185,7 @@ pub fn quit_gui() {
     // Use spawn() instead of output() to avoid blocking the event loop.
     // AppleScript has a ~2 minute default timeout that would freeze the tray icon.
     let _ = Command::new("osascript")
-      .args(["-e", "tell application \"Donut\" to quit"])
+      .args(["-e", "tell application \"JnmBrowser\" to quit"])
       .spawn();
   }
 
@@ -188,7 +194,7 @@ pub fn quit_gui() {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let _ = Command::new("taskkill")
-      .args(["/IM", "Donut.exe", "/F"])
+      .args(["/IM", "JnmBrowser.exe", "/F"])
       .creation_flags(CREATE_NO_WINDOW)
       .spawn();
     let _ = Command::new("taskkill")

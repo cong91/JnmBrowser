@@ -656,15 +656,6 @@ impl CloudAuthManager {
     }
   }
 
-  pub async fn is_fingerprint_os_allowed(&self, fingerprint_os: Option<&str>) -> bool {
-    let host_os = crate::profile::types::get_host_os();
-    match fingerprint_os {
-      None => true,
-      Some(os) if os == host_os => true,
-      Some(_) => self.has_active_paid_subscription().await,
-    }
-  }
-
   pub async fn is_on_team_plan(&self) -> bool {
     if let Some(state) = self.get_user().await {
       return state.user.team_id.is_some();
@@ -1201,12 +1192,16 @@ pub async fn cloud_logout(app_handle: tauri::AppHandle) -> Result<(), String> {
 
   // Clear sync settings if they point to the cloud URL (prevent leak into Self-Hosted tab)
   let manager = crate::settings_manager::SettingsManager::instance();
+  let mut cloud_sync_was_configured = false;
   if let Ok(sync_settings) = manager.get_sync_settings() {
     if sync_settings.sync_server_url.as_deref() == Some(CLOUD_SYNC_URL) {
+      cloud_sync_was_configured = true;
       let _ = manager.save_sync_server_url(None);
     }
   }
-  let _ = manager.remove_sync_token(&app_handle).await;
+  if cloud_sync_was_configured {
+    let _ = manager.remove_sync_token(&app_handle).await;
+  }
 
   // Remove cloud-managed and cloud-derived proxies
   crate::proxy_manager::PROXY_MANAGER.remove_cloud_proxies();

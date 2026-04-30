@@ -482,7 +482,15 @@ export class SyncService implements OnModuleInit {
     ctx: UserContext,
     pollIntervalMs = 2000,
   ): Observable<SubscribeEventDto> {
-    const basePrefixes = ["profiles/", "proxies/", "groups/", "tombstones/"];
+    const basePrefixes = [
+      "profiles/",
+      "proxies/",
+      "groups/",
+      "vpns/",
+      "extensions/",
+      "extension_groups/",
+      "tombstones/",
+    ];
 
     let prefixes: string[];
     if (ctx.mode === "self-hosted") {

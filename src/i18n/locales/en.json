@@ -124,12 +124,12 @@
       "title": "Default Browser",
       "setAsDefault": "Set as Default Browser",
       "alreadyDefault": "Already Default Browser",
-      "description": "When set as default, Donut Browser will handle web links and allow you to choose which profile to use."
+      "description": "When set as default, JnmBrowser will handle web links and allow you to choose which profile to use."
     },
     "permissions": {
       "title": "System Permissions",
       "loading": "Loading permissions...",
-      "description": "These permissions allow browsers launched from Donut Browser to access system resources. Each website will still ask for your permission individually.",
+      "description": "These permissions allow browsers launched from JnmBrowser to access system resources. Each website will still ask for your permission individually.",
       "microphone": "Microphone",
       "microphoneDescription": "Access to microphone for browser applications",
       "camera": "Camera",
@@ -172,7 +172,7 @@
       "clearCacheFailed": "Failed to clear cache"
     },
     "disableAutoUpdates": "Disable App Auto Updates",
-    "disableAutoUpdatesDescription": "Prevent the app from automatically checking and installing Donut Browser updates. Browser updates are not affected."
+    "disableAutoUpdatesDescription": "Prevent the app from automatically checking and installing JnmBrowser updates. Browser updates are not affected."
   },
   "header": {
     "searchPlaceholder": "Search profiles...",
@@ -187,7 +187,8 @@
       "integrations": "Integrations",
       "importProfile": "Import Profile",
       "extensions": "Extensions"
-    }
+    },
+    "appName": "JnmBrowser"
   },
   "profiles": {
     "title": "Profiles",
@@ -228,7 +229,6 @@
       "stopLeader": "Stop this profile and all its followers",
       "stopFollower": "Following actions of {{leaderName}}",
       "desyncedTooltip": "Synchronization failed at {{url}}",
-      "paidFeature": "Synchronizer is a paid feature",
       "wayfernOnly": "Only Wayfern profiles can be synchronized",
       "selectFollowers": "Select Follower Profiles",
       "selectFollowersDesc": "Choose profiles that will mirror the actions of the leader profile. Only stopped Wayfern profiles can be selected.",
@@ -305,7 +305,14 @@
       "downloading": "Downloading {{browser}} version ({{version}})...",
       "latestNeedsDownload": "Latest version ({{version}}) needs to be downloaded",
       "latestAvailable": "Latest version ({{version}}) is available",
-      "latestDownloading": "Downloading version ({{version}})..."
+      "latestDownloading": "Downloading version ({{version}})...",
+      "updateAvailable": "New {{browser}} kernel {{latest}} is available. Installed {{current}} can still be used; download manually when you want to update.",
+      "downloadProgress": "{{browser}} {{version}} download: {{percent}}%",
+      "downloadDetails": "{{downloaded}} / {{total}} · {{speed}}/s · ETA {{eta}}",
+      "downloadDetailsNoTotal": "{{downloaded}} downloaded · {{speed}}/s",
+      "cancelled": "Download paused",
+      "pauseDownload": "Pause download",
+      "preparingDownload": "Preparing download..."
     },
     "chromiumLabel": "Chromium",
     "chromiumSubtitle": "Powered by Wayfern",
@@ -530,7 +537,10 @@
       "settingsSaved": "Sync settings saved",
       "saveFailed": "Failed to save settings",
       "disconnected": "Sync disconnected",
-      "disconnectFailed": "Failed to disconnect"
+      "disconnectFailed": "Failed to disconnect",
+      "disconnect": "Disconnect",
+      "testConnection": "Test Connection",
+      "testingConnection": "Testing..."
     },
     "serverUrl": "Server URL",
     "serverUrlPlaceholder": "https://sync.example.com",
@@ -1070,7 +1080,7 @@
     "launchHook": {
       "title": "Launch Hook URL",
       "label": "Launch Hook URL",
-      "description": "Donut Browser will POST to this URL whenever the profile is launched.",
+      "description": "JnmBrowser will POST to this URL whenever the profile is launched.",
       "placeholder": "https://example.com/hooks/profile-launch"
     },
     "actions": {
@@ -1412,7 +1422,7 @@
   },
   "wayfernTerms": {
     "title": "Wayfern Terms and Conditions",
-    "description": "Before using Donut Browser, you must read and agree to Wayfern's Terms and Conditions.",
+    "description": "Before using JnmBrowser, you must read and agree to Wayfern's Terms and Conditions.",
     "reviewLabel": "Please review the Terms and Conditions at:",
     "agreeNotice": "By clicking \"I Accept\", you agree to be bound by these terms.",
     "acceptButton": "I Accept",
@@ -1423,7 +1433,7 @@
   "commercialTrial": {
     "title": "Commercial Trial Expired",
     "description": "Your 2-week commercial trial period has ended.",
-    "body": "If you are using Donut Browser for business purposes, you need to purchase a commercial license to continue. You can still use it for personal use for free.",
+    "body": "If you are using JnmBrowser for business purposes, you need to purchase a commercial license to continue. You can still use it for personal use for free.",
     "understandButton": "I Understand",
     "failed": "Failed to save acknowledgment",
     "tryAgain": "Please try again"
@@ -1431,10 +1441,10 @@
   "permissionDialog": {
     "titleMicrophone": "Microphone Access Required",
     "titleCamera": "Camera Access Required",
-    "descMicrophone": "Donut Browser needs access to your microphone to enable microphone functionality in web browsers. Each website that wants to use your microphone will still ask for your permission individually.",
-    "descCamera": "Donut Browser needs access to your camera to enable camera functionality in web browsers. Each website that wants to use your camera will still ask for your permission individually.",
-    "grantedMicrophone": "Permission granted! Browsers launched from Donut Browser can now access your microphone.",
-    "grantedCamera": "Permission granted! Browsers launched from Donut Browser can now access your camera.",
+    "descMicrophone": "JnmBrowser needs access to your microphone to enable microphone functionality in web browsers. Each website that wants to use your microphone will still ask for your permission individually.",
+    "descCamera": "JnmBrowser needs access to your camera to enable camera functionality in web browsers. Each website that wants to use your camera will still ask for your permission individually.",
+    "grantedMicrophone": "Permission granted! Browsers launched from JnmBrowser can now access your microphone.",
+    "grantedCamera": "Permission granted! Browsers launched from JnmBrowser can now access your camera.",
     "notGrantedMicrophone": "Permission not granted. Click the button below to request access to your microphone.",
     "notGrantedCamera": "Permission not granted. Click the button below to request access to your camera.",
     "doneButton": "Done",
@@ -1543,7 +1553,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "Failed to update Donut Browser",
+      "updateFailed": "Failed to update JnmBrowser",
       "restartFailed": "Failed to restart",
       "updateReady": "Update ready, restart to apply",
       "manualDownloadRequired": "Manual download required",

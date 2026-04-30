@@ -583,7 +583,7 @@ export function ImportProfileDialog({
                   }}
                   isCreating={true}
                   crossOsUnlocked={crossOsUnlocked}
-                  limitedMode={!crossOsUnlocked}
+                  limitedMode={false}
                 />
               ) : (
                 <WayfernConfigForm
@@ -593,7 +593,7 @@ export function ImportProfileDialog({
                   }}
                   isCreating={true}
                   crossOsUnlocked={crossOsUnlocked}
-                  limitedMode={!crossOsUnlocked}
+                  limitedMode={false}
                 />
               )}
             </div>

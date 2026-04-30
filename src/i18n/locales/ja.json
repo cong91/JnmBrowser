@@ -124,12 +124,12 @@
       "title": "デフォルトブラウザ",
       "setAsDefault": "デフォルトブラウザに設定",
       "alreadyDefault": "既にデフォルトブラウザです",
-      "description": "デフォルトに設定すると、Donut Browser がウェブリンクを処理し、使用するプロファイルを選択できます。"
+      "description": "デフォルトに設定すると、JnmBrowser がウェブリンクを処理し、使用するプロファイルを選択できます。"
     },
     "permissions": {
       "title": "システム権限",
       "loading": "権限を読み込み中...",
-      "description": "これらの権限により、Donut Browser から起動したブラウザがシステムリソースにアクセスできます。各ウェブサイトは個別に許可を求めます。",
+      "description": "これらの権限により、JnmBrowser から起動したブラウザがシステムリソースにアクセスできます。各ウェブサイトは個別に許可を求めます。",
       "microphone": "マイク",
       "microphoneDescription": "ブラウザアプリケーションのマイクアクセス",
       "camera": "カメラ",
@@ -172,7 +172,7 @@
       "clearCacheFailed": "キャッシュのクリアに失敗しました"
     },
     "disableAutoUpdates": "アプリの自動更新を無効にする",
-    "disableAutoUpdatesDescription": "Donut Browserの自動更新確認・インストールを無効にします。ブラウザの更新には影響しません。"
+    "disableAutoUpdatesDescription": "JnmBrowserの自動更新確認・インストールを無効にします。ブラウザの更新には影響しません。"
   },
   "header": {
     "searchPlaceholder": "プロファイルを検索...",
@@ -187,7 +187,8 @@
       "integrations": "統合",
       "importProfile": "プロファイルをインポート",
       "extensions": "拡張機能"
-    }
+    },
+    "appName": "JnmBrowser"
   },
   "profiles": {
     "title": "プロファイル",
@@ -228,7 +229,6 @@
       "stopLeader": "このプロフィールとすべてのフォロワーを停止",
       "stopFollower": "{{leaderName}}のアクションを追従中",
       "desyncedTooltip": "{{url}}で同期に失敗しました",
-      "paidFeature": "シンクロナイザーは有料機能です",
       "wayfernOnly": "Wayfernプロフィールのみ同期可能です",
       "selectFollowers": "フォロワープロフィールを選択",
       "selectFollowersDesc": "リーダープロフィールのアクションを複製するプロフィールを選択してください。停止中のWayfernプロフィールのみ選択できます。",
@@ -305,7 +305,14 @@
       "downloading": "{{browser}} バージョン ({{version}}) をダウンロード中...",
       "latestNeedsDownload": "最新バージョン ({{version}}) をダウンロードする必要があります",
       "latestAvailable": "最新バージョン ({{version}}) は利用可能です",
-      "latestDownloading": "バージョン ({{version}}) をダウンロード中..."
+      "latestDownloading": "バージョン ({{version}}) をダウンロード中...",
+      "updateAvailable": "New {{browser}} kernel {{latest}} is available. Installed {{current}} can still be used; download manually when you want to update.",
+      "downloadProgress": "{{browser}} {{version}} download: {{percent}}%",
+      "downloadDetails": "{{downloaded}} / {{total}} · {{speed}}/s · ETA {{eta}}",
+      "downloadDetailsNoTotal": "{{downloaded}} downloaded · {{speed}}/s",
+      "cancelled": "ダウンロードを一時停止しました",
+      "pauseDownload": "ダウンロードを一時停止",
+      "preparingDownload": "ダウンロードを準備中..."
     },
     "chromiumLabel": "Chromium",
     "chromiumSubtitle": "Wayfern搭載",
@@ -530,7 +537,10 @@
       "settingsSaved": "同期設定を保存しました",
       "saveFailed": "設定の保存に失敗しました",
       "disconnected": "同期を切断しました",
-      "disconnectFailed": "切断に失敗しました"
+      "disconnectFailed": "切断に失敗しました",
+      "disconnect": "切断",
+      "testConnection": "接続をテスト",
+      "testingConnection": "テスト中..."
     },
     "serverUrl": "サーバーURL",
     "serverUrlPlaceholder": "https://sync.example.com",
@@ -1070,7 +1080,7 @@
     "launchHook": {
       "title": "起動フックURL",
       "label": "起動フックURL",
-      "description": "プロファイルが起動されるたびに、Donut BrowserはこのURLにPOSTリクエストを送信します。",
+      "description": "プロファイルが起動されるたびに、JnmBrowserはこのURLにPOSTリクエストを送信します。",
       "placeholder": "https://example.com/hooks/profile-launch"
     },
     "actions": {
@@ -1412,7 +1422,7 @@
   },
   "wayfernTerms": {
     "title": "Wayfern 利用規約",
-    "description": "Donut Browser を使用する前に、Wayfern の利用規約を読み、同意する必要があります。",
+    "description": "JnmBrowser を使用する前に、Wayfern の利用規約を読み、同意する必要があります。",
     "reviewLabel": "次の URL で利用規約をご確認ください:",
     "agreeNotice": "「同意します」をクリックすると、これらの条項に拘束されることに同意します。",
     "acceptButton": "同意します",
@@ -1423,7 +1433,7 @@
   "commercialTrial": {
     "title": "商用試用期間が終了しました",
     "description": "2 週間の商用試用期間が終了しました。",
-    "body": "商用目的で Donut Browser を使用する場合は、続行するために商用ライセンスを購入する必要があります。個人利用は引き続き無料でお使いいただけます。",
+    "body": "商用目的で JnmBrowser を使用する場合は、続行するために商用ライセンスを購入する必要があります。個人利用は引き続き無料でお使いいただけます。",
     "understandButton": "了解しました",
     "failed": "確認の保存に失敗しました",
     "tryAgain": "もう一度お試しください"
@@ -1431,10 +1441,10 @@
   "permissionDialog": {
     "titleMicrophone": "マイクへのアクセスが必要です",
     "titleCamera": "カメラへのアクセスが必要です",
-    "descMicrophone": "Donut Browser はブラウザのマイク機能を有効にするためにマイクへのアクセスを必要とします。マイクを使用するウェブサイトはそれぞれ個別に許可を求めます。",
-    "descCamera": "Donut Browser はブラウザのカメラ機能を有効にするためにカメラへのアクセスを必要とします。カメラを使用するウェブサイトはそれぞれ個別に許可を求めます。",
-    "grantedMicrophone": "許可が付与されました!Donut Browser から起動したブラウザはマイクにアクセスできます。",
-    "grantedCamera": "許可が付与されました!Donut Browser から起動したブラウザはカメラにアクセスできます。",
+    "descMicrophone": "JnmBrowser はブラウザのマイク機能を有効にするためにマイクへのアクセスを必要とします。マイクを使用するウェブサイトはそれぞれ個別に許可を求めます。",
+    "descCamera": "JnmBrowser はブラウザのカメラ機能を有効にするためにカメラへのアクセスを必要とします。カメラを使用するウェブサイトはそれぞれ個別に許可を求めます。",
+    "grantedMicrophone": "許可が付与されました!JnmBrowser から起動したブラウザはマイクにアクセスできます。",
+    "grantedCamera": "許可が付与されました!JnmBrowser から起動したブラウザはカメラにアクセスできます。",
     "notGrantedMicrophone": "許可されていません。下のボタンを押してマイクへのアクセスを要求してください。",
     "notGrantedCamera": "許可されていません。下のボタンを押してカメラへのアクセスを要求してください。",
     "doneButton": "完了",
@@ -1543,7 +1553,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "Donut Browser の更新に失敗しました",
+      "updateFailed": "JnmBrowser の更新に失敗しました",
       "restartFailed": "再起動に失敗しました",
       "updateReady": "アップデートの準備完了。再起動して適用",
       "manualDownloadRequired": "手動ダウンロードが必要です",

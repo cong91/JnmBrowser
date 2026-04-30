@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import type { BrowserProfile, SyncMode, SyncSettings } from "@/types";
 import { isSyncEnabled } from "@/types";
@@ -35,17 +34,6 @@ export function ProfileSyncDialog({
   onSyncConfigOpen,
 }: ProfileSyncDialogProps) {
   const { t } = useTranslation();
-  const { user: cloudUser } = useCloudAuth();
-  const isCloudSyncEligible =
-    cloudUser != null &&
-    cloudUser.plan !== "free" &&
-    (cloudUser.subscriptionStatus === "active" ||
-      cloudUser.planPeriod === "lifetime");
-  // Encryption available to everyone except team members who aren't owners
-  const canUseEncryption =
-    cloudUser == null ||
-    cloudUser.plan !== "team" ||
-    cloudUser.teamRole === "owner";
   const [isSaving, setIsSaving] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncMode, setSyncMode] = useState<SyncMode>(
@@ -56,7 +44,7 @@ export function ProfileSyncDialog({
   const [isCheckingConfig, setIsCheckingConfig] = useState(false);
   const [userChangedMode, setUserChangedMode] = useState(false);
 
-  const hasConfig = isCloudSyncEligible || hasSelfHostedConfig;
+  const hasConfig = hasSelfHostedConfig;
 
   const checkSyncConfig = useCallback(async () => {
     setIsCheckingConfig(true);
@@ -102,11 +90,6 @@ export function ProfileSyncDialog({
         return;
       }
 
-      if (newMode === "Encrypted" && !canUseEncryption) {
-        showErrorToast(t("settings.encryption.requiresProOrOwner"));
-        return;
-      }
-
       if (newMode === "Encrypted" && !hasE2ePassword) {
         showErrorToast(t("sync.mode.passwordRequired"));
         return;
@@ -132,15 +115,7 @@ export function ProfileSyncDialog({
         setIsSaving(false);
       }
     },
-    [
-      profile,
-      hasConfig,
-      hasE2ePassword,
-      canUseEncryption,
-      onSyncConfigOpen,
-      onClose,
-      t,
-    ],
+    [profile, hasConfig, hasE2ePassword, onSyncConfigOpen, onClose, t],
   );
 
   const handleSyncNow = useCallback(async () => {
@@ -241,26 +216,13 @@ export function ProfileSyncDialog({
                   </div>
 
                   <div className="flex items-start space-x-3">
-                    <RadioGroupItem
-                      value="Encrypted"
-                      id="sync-encrypted"
-                      disabled={!canUseEncryption}
-                    />
-                    <Label
-                      htmlFor="sync-encrypted"
-                      className={
-                        canUseEncryption
-                          ? "cursor-pointer"
-                          : "cursor-not-allowed opacity-50"
-                      }
-                    >
+                    <RadioGroupItem value="Encrypted" id="sync-encrypted" />
+                    <Label htmlFor="sync-encrypted" className="cursor-pointer">
                       <span className="font-medium">
                         {t("sync.mode.encrypted")}
                       </span>
                       <p className="text-sm text-muted-foreground">
-                        {canUseEncryption
-                          ? t("sync.mode.encryptedDescription")
-                          : t("settings.encryption.requiresProOrOwner")}
+                        {t("sync.mode.encryptedDescription")}
                       </p>
                     </Label>
                   </div>

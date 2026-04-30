@@ -161,6 +161,7 @@ fn generate_tray_icons() {
   let svg_path = icons_dir.join("tray-icon.svg");
 
   println!("cargo:rerun-if-changed=icons/tray-icon.svg");
+  println!("cargo:rerun-if-changed=icons/tray-icon-source.png");
 
   if !svg_path.exists() {
     println!("cargo:warning=tray-icon.svg not found, skipping tray icon generation");
@@ -168,7 +169,11 @@ fn generate_tray_icons() {
   }
 
   let svg_data = fs::read(&svg_path).expect("Failed to read tray-icon.svg");
-  let tree = Tree::from_data(&svg_data, &Options::default()).expect("Failed to parse SVG");
+  let options = Options {
+    resources_dir: Some(icons_dir.clone()),
+    ..Options::default()
+  };
+  let tree = Tree::from_data(&svg_data, &options).expect("Failed to parse SVG");
 
   // Generate template icons at different sizes for macOS menu bar
   // 22x22 is standard, 44x44 is retina (@2x)
@@ -188,12 +193,19 @@ fn generate_tray_icons() {
     // For template icons: RGB should be 0,0,0 (black) and alpha controls visibility
     let data = pixmap.data_mut();
     for pixel in data.chunks_exact_mut(4) {
-      // Keep the original alpha (shows where icon content is)
-      // but make the color black for template icon format
+      // Use the original alpha for transparent sources. For opaque raster sources with
+      // a light background, derive alpha from luminance so macOS gets a usable template
+      // mask instead of a solid square.
+      let original_alpha = pixel[3];
+      if original_alpha > 250 {
+        let luminance =
+          (u32::from(pixel[0]) * 299 + u32::from(pixel[1]) * 587 + u32::from(pixel[2]) * 114)
+            / 1000;
+        pixel[3] = 255u8.saturating_sub(luminance as u8);
+      }
       pixel[0] = 0; // R
       pixel[1] = 0; // G
       pixel[2] = 0; // B
-                    // pixel[3] (alpha) stays as-is
     }
 
     let output_path = icons_dir.join(filename);
