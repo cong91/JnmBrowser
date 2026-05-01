@@ -20,13 +20,16 @@ jobs:
         include:
           - name: macOS
             os: macos-latest
-            bundles: app,dmg
+            bundles: app
+            use_custom_macos_dmg: true
           - name: Windows
             os: windows-latest
             bundles: nsis
+            use_custom_macos_dmg: false
           - name: Linux
             os: ubuntu-22.04
             bundles: deb,rpm,appimage
+            use_custom_macos_dmg: false
 
     steps:
       - name: Checkout
@@ -76,17 +79,34 @@ jobs:
           echo "target=$target" >> "$GITHUB_OUTPUT"
           echo "Rust host target: $target"
 
+      - name: Read app version
+        id: app-version
+        shell: bash
+        run: |
+          version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "App version: $version"
+
       - name: Build Tauri bundles
+        if: matrix.use_custom_macos_dmg == false
         env:
           CI: true
           PROFILE: release
           TARGET: ${{ steps.rust-target.outputs.target }}
         run: pnpm tauri build --ci --no-sign --bundles ${{ matrix.bundles }}
 
+      - name: Build custom macOS DMG
+        if: matrix.use_custom_macos_dmg == true
+        env:
+          CI: true
+          PROFILE: release
+          TARGET: ${{ steps.rust-target.outputs.target }}
+        run: bash scripts/build-macos-dmg.sh
+
       - name: Upload ${{ matrix.name }} artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: JnmBrowser-${{ matrix.name }}
+          name: JnmBrowser_${{ steps.app-version.outputs.version }}_${{ matrix.name }}
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/**/*.app
