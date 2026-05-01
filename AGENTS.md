@@ -90,10 +90,6 @@ donutbrowser/
 - Use these as Tailwind classes: `bg-success`, `text-destructive`, `border-warning`, etc.
 - For lighter variants use opacity: `bg-destructive/10`, `bg-success/10`, `border-warning/50`
 
-The `.github/workflows/publish-repos.yml` workflow runs automatically after stable releases and can also be triggered manually via `gh workflow run publish-repos.yml -f tag=v0.18.1`.
-
-Required env vars / secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT_URL`, `R2_BUCKET_NAME`.
-
 ## Proprietary Changes
 
 This project is licensed under AGPL-3.0. Anyone is permitted to study and modify the code.
