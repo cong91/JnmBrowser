@@ -27,7 +27,7 @@ APP_PATH="$(pick_app_path "${1:-}")" || {
   echo "未找到 ${APP_NAME}。"
   echo "请先把 ${APP_NAME} 拖到 /Applications 或 ~/Applications。"
   echo "如果你放在了别的位置，请在终端里手动执行："
-  echo "bash fix-quarantine.command \"/你的/JnmBrowser.app\""
+  echo "bash 修复.command \"/你的/JnmBrowser.app\""
   exit 1
 }
 

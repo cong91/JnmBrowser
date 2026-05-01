@@ -91,9 +91,9 @@ mkdir -p "${STAGE_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 
 cp -R "${APP_PATH}" "${STAGE_DIR}/"
-cp "${PACKAGING_DIR}/fix-quarantine.command" "${STAGE_DIR}/"
-cp "${PACKAGING_DIR}/安装说明.md" "${STAGE_DIR}/"
-chmod +x "${STAGE_DIR}/fix-quarantine.command"
+
+echo "==> Copying packaging/macos contents into DMG"
+find "${PACKAGING_DIR}" -mindepth 1 -maxdepth 1 -exec cp -R {} "${STAGE_DIR}/" \;
 
 ln -sfn /Applications "${STAGE_DIR}/Applications"
 
