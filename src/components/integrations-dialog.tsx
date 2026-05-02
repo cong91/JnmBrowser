@@ -15,7 +15,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useWayfernTerms } from "@/hooks/use-wayfern-terms";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { CopyToClipboard } from "./ui/copy-to-clipboard";
 
@@ -60,8 +59,7 @@ export function IntegrationsDialog({
   const [isMcpStarting, setIsMcpStarting] = useState(false);
   const [mcpInClaudeDesktop, setMcpInClaudeDesktop] = useState(false);
   const [mcpInClaudeCode, setMcpInClaudeCode] = useState(false);
-
-  const { termsAccepted } = useWayfernTerms();
+  const [mcpInCodex, setMcpInCodex] = useState(false);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -117,6 +115,15 @@ export function IntegrationsDialog({
     }
   }, []);
 
+  const loadCodexStatus = useCallback(async () => {
+    try {
+      const exists = await invoke<boolean>("is_mcp_in_codex");
+      setMcpInCodex(exists);
+    } catch {
+      // Codex CLI may not be installed
+    }
+  }, []);
+
   useEffect(() => {
     if (isOpen) {
       void loadSettings();
@@ -125,6 +132,7 @@ export function IntegrationsDialog({
       void loadMcpServerStatus();
       void loadClaudeDesktopStatus();
       void loadClaudeCodeStatus();
+      void loadCodexStatus();
     }
   }, [
     isOpen,
@@ -134,6 +142,7 @@ export function IntegrationsDialog({
     loadMcpServerStatus,
     loadClaudeDesktopStatus,
     loadClaudeCodeStatus,
+    loadCodexStatus,
   ]);
 
   const handleApiToggle = async (enabled: boolean) => {
@@ -375,7 +384,7 @@ export function IntegrationsDialog({
                 <Checkbox
                   id="mcp-enabled"
                   checked={settings.mcp_enabled && mcpConfig !== null}
-                  disabled={!termsAccepted || isMcpStarting}
+                  disabled={isMcpStarting}
                   onCheckedChange={(checked) => void handleMcpToggle(!!checked)}
                 />
                 <div className="grid gap-1.5 leading-none">
@@ -387,11 +396,6 @@ export function IntegrationsDialog({
                   </Label>
                   <p className="text-xs text-muted-foreground">
                     {t("integrations.mcpEnableDescription")}
-                    {!termsAccepted && (
-                      <span className="ml-1 text-warning">
-                        {t("integrations.mcpAcceptTermsFirst")}
-                      </span>
-                    )}
                   </p>
                 </div>
               </div>
@@ -519,6 +523,51 @@ export function IntegrationsDialog({
                         }}
                       >
                         {t("integrations.mcp.addToClaudeCode")}
+                      </Button>
+                    )}
+                  </div>
+
+                  <div className="space-y-2 pt-1 border-t">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      {t("integrations.mcp.codexTitle")}
+                    </p>
+                    {mcpInCodex ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        onClick={async () => {
+                          try {
+                            await invoke("remove_mcp_from_codex");
+                            setMcpInCodex(false);
+                            showSuccessToast(
+                              t("integrations.mcp.removedFromCodex"),
+                            );
+                          } catch (e) {
+                            showErrorToast(String(e));
+                          }
+                        }}
+                      >
+                        {t("integrations.mcp.removeFromCodex")}
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        onClick={async () => {
+                          try {
+                            await invoke("add_mcp_to_codex");
+                            setMcpInCodex(true);
+                            showSuccessToast(
+                              t("integrations.mcp.addedToCodex"),
+                            );
+                          } catch (e) {
+                            showErrorToast(String(e));
+                          }
+                        }}
+                      >
+                        {t("integrations.mcp.addToCodex")}
                       </Button>
                     )}
                   </div>

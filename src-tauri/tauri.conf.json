@@ -41,16 +41,16 @@
     },
     "linux": {
       "deb": {
-        "desktopTemplate": "donutbrowser.desktop",
+        "desktopTemplate": "JnmBrowser.desktop",
         "depends": ["xdg-utils", "libxdo3"]
       },
       "rpm": {
-        "desktopTemplate": "donutbrowser.desktop",
+        "desktopTemplate": "JnmBrowser.desktop",
         "depends": ["xdg-utils", "libxdo"]
       },
       "appimage": {
         "files": {
-          "usr/share/applications/donutbrowser.desktop": "donutbrowser.desktop"
+          "usr/share/applications/JnmBrowser.desktop": "JnmBrowser.desktop"
         }
       }
     },

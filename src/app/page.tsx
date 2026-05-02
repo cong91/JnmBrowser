@@ -30,9 +30,7 @@ import { SettingsDialog } from "@/components/settings-dialog";
 import { SyncAllDialog } from "@/components/sync-all-dialog";
 import { SyncConfigDialog } from "@/components/sync-config-dialog";
 import { SyncFollowerDialog } from "@/components/sync-follower-dialog";
-import { WayfernTermsDialog } from "@/components/wayfern-terms-dialog";
 import { WindowResizeWarningDialog } from "@/components/window-resize-warning-dialog";
-import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { useGroupEvents } from "@/hooks/use-group-events";
 import type { PermissionType } from "@/hooks/use-permissions";
 import { usePermissions } from "@/hooks/use-permissions";
@@ -40,7 +38,7 @@ import { useProfileEvents } from "@/hooks/use-profile-events";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { useSyncSessions } from "@/hooks/use-sync-session";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
-import { useWayfernTerms } from "@/hooks/use-wayfern-terms";
+import { isChromiumBrowser } from "@/lib/browser-utils";
 import {
   dismissToast,
   showErrorToast,
@@ -51,11 +49,11 @@ import {
 import type {
   BrowserProfile,
   CamoufoxConfig,
+  ChromiumConfig,
   SyncSettings,
-  WayfernConfig,
 } from "@/types";
 
-type BrowserTypeString = "camoufox" | "wayfern";
+type BrowserTypeString = "camoufox" | "chromium";
 
 interface PendingUrl {
   id: string;
@@ -92,19 +90,8 @@ export default function Home() {
   const [syncLeaderProfile, setSyncLeaderProfile] =
     useState<BrowserProfile | null>(null);
 
-  // Wayfern terms hook
-  const {
-    termsAccepted,
-    isLoading: termsLoading,
-    checkTerms,
-  } = useWayfernTerms();
-
   // Cloud auth for cross-OS unlock
-  const { user: cloudUser } = useCloudAuth();
-  const crossOsUnlocked =
-    cloudUser?.plan !== "free" &&
-    (cloudUser?.subscriptionStatus === "active" ||
-      cloudUser?.planPeriod === "lifetime");
+  const crossOsUnlocked = true;
 
   const [selfHostedSyncConfigured, setSelfHostedSyncConfigured] =
     useState(false);
@@ -398,19 +385,21 @@ export default function Home() {
     [t],
   );
 
-  const handleSaveWayfernConfig = useCallback(
-    async (profile: BrowserProfile, config: WayfernConfig) => {
+  const handleSaveChromiumConfig = useCallback(
+    async (profile: BrowserProfile, config: ChromiumConfig) => {
       try {
-        await invoke("update_wayfern_config", {
+        await invoke("update_chromium_config", {
           profileId: profile.id,
           config,
         });
         // No need to manually reload - useProfileEvents will handle the update
         setCamoufoxConfigDialogOpen(false);
       } catch (err: unknown) {
-        console.error("Failed to update wayfern config:", err);
+        console.error("Failed to update chromium config:", err);
         showErrorToast(
-          t("errors.updateWayfernConfigFailed", { error: JSON.stringify(err) }),
+          t("errors.updateChromiumConfigFailed", {
+            error: JSON.stringify(err),
+          }),
         );
         throw err;
       }
@@ -427,7 +416,7 @@ export default function Home() {
       proxyId?: string;
       vpnId?: string;
       camoufoxConfig?: CamoufoxConfig;
-      wayfernConfig?: WayfernConfig;
+      chromiumConfig?: ChromiumConfig;
       groupId?: string;
       extensionGroupId?: string;
       ephemeral?: boolean;
@@ -445,7 +434,7 @@ export default function Home() {
             proxyId: profileData.proxyId,
             vpnId: profileData.vpnId,
             camoufoxConfig: profileData.camoufoxConfig,
-            wayfernConfig: profileData.wayfernConfig,
+            chromiumConfig: profileData.chromiumConfig,
             groupId:
               profileData.groupId ??
               (selectedGroupId !== "default" ? selectedGroupId : undefined),
@@ -483,7 +472,10 @@ export default function Home() {
       console.log("Starting launch for profile:", profile.name);
 
       // Show one-time warning about window resizing for fingerprinted browsers
-      if (profile.browser === "camoufox" || profile.browser === "wayfern") {
+      if (
+        profile.browser === "camoufox" ||
+        isChromiumBrowser(profile.browser)
+      ) {
         try {
           const dismissed = await invoke<boolean>(
             "get_window_resize_warning_dismissed",
@@ -679,7 +671,7 @@ export default function Home() {
     const eligibleProfiles = profiles.filter(
       (p) =>
         selectedProfiles.includes(p.id) &&
-        (p.browser === "wayfern" || p.browser === "camoufox"),
+        (isChromiumBrowser(p.browser) || p.browser === "camoufox"),
     );
     if (eligibleProfiles.length === 0) {
       showErrorToast(t("errors.cookieCopyUnsupportedBrowser"));
@@ -853,12 +845,12 @@ export default function Home() {
     };
   }, [checkStartupPrompt, listenForUrlEvents, checkCurrentUrl]);
 
-  // Show warning for non-wayfern/camoufox profiles (support ending March 15, 2026)
+  // Show warning for non-Chromium/Camoufox profiles (support ending March 15, 2026)
   useEffect(() => {
     if (profiles.length === 0) return;
 
     const unsupportedProfiles = profiles.filter(
-      (p) => p.browser !== "wayfern" && p.browser !== "camoufox",
+      (p) => !isChromiumBrowser(p.browser) && p.browser !== "camoufox",
     );
 
     if (unsupportedProfiles.length > 0) {
@@ -869,11 +861,13 @@ export default function Home() {
       showToast({
         id: "browser-support-ending-warning",
         type: "error",
-        title: "Browser support ending soon",
-        description: `Support for the following profiles will be removed on March 15, 2026: ${unsupportedNames}. Please migrate to Wayfern or Camoufox profiles.`,
+        title: t("browserSupportWarning.title"),
+        description: t("browserSupportWarning.description", {
+          names: unsupportedNames,
+        }),
         duration: 15000,
         action: {
-          label: "Learn more",
+          label: t("browserSupportWarning.learnMore"),
           onClick: () => {
             const event = new CustomEvent("url-open-request", {
               detail: "https://github.com/zhom/donutbrowser/discussions",
@@ -883,26 +877,7 @@ export default function Home() {
         },
       });
     }
-  }, [profiles]);
-
-  // Re-check Wayfern terms when a browser download completes
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    const setup = async () => {
-      unlisten = await listen<{ stage: string }>(
-        "download-progress",
-        (event) => {
-          if (event.payload.stage === "completed") {
-            void checkTerms();
-          }
-        },
-      );
-    };
-    void setup();
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, [checkTerms]);
+  }, [profiles, t]);
 
   // Check permissions when they are initialized
   useEffect(() => {
@@ -1094,7 +1069,7 @@ export default function Home() {
         }}
         profile={currentProfileForCamoufoxConfig}
         onSave={handleSaveCamoufoxConfig}
-        onSaveWayfern={handleSaveWayfernConfig}
+        onSaveChromium={handleSaveChromiumConfig}
         isRunning={
           currentProfileForCamoufoxConfig
             ? runningProfiles.has(currentProfileForCamoufoxConfig.id)
@@ -1219,12 +1194,6 @@ export default function Home() {
         onSyncConfigOpen={() => {
           setSyncConfigDialogOpen(true);
         }}
-      />
-
-      {/* Wayfern Terms and Conditions Dialog - shown if terms not accepted */}
-      <WayfernTermsDialog
-        isOpen={!termsLoading && termsAccepted === false}
-        onAccepted={checkTerms}
       />
 
       {/* Launch on Login Dialog - shown on every startup until enabled or declined */}

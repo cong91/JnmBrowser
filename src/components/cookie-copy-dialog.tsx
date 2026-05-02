@@ -30,7 +30,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { getBrowserIcon } from "@/lib/browser-utils";
+import { getBrowserIcon, isChromiumBrowser } from "@/lib/browser-utils";
 import type {
   BrowserProfile,
   CookieCopyRequest,
@@ -86,7 +86,7 @@ export function CookieCopyDialog({
     return profiles.filter(
       (p) =>
         !selectedProfiles.includes(p.id) &&
-        (p.browser === "wayfern" || p.browser === "camoufox"),
+        (isChromiumBrowser(p.browser) || p.browser === "camoufox"),
     );
   }, [profiles, selectedProfiles]);
 
@@ -95,7 +95,7 @@ export function CookieCopyDialog({
       (p) =>
         selectedProfiles.includes(p.id) &&
         p.id !== sourceProfileId &&
-        (p.browser === "wayfern" || p.browser === "camoufox"),
+        (isChromiumBrowser(p.browser) || p.browser === "camoufox"),
     );
   }, [profiles, selectedProfiles, sourceProfileId]);
 

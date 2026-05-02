@@ -18,6 +18,7 @@ mod browser_runner;
 mod browser_version_manager;
 pub mod camoufox;
 mod camoufox_manager;
+pub mod chromium_manager;
 mod default_browser;
 pub mod dns_blocklist;
 mod downloaded_browsers_registry;
@@ -40,8 +41,6 @@ mod settings_manager;
 pub mod sync;
 mod synchronizer;
 pub mod traffic_stats;
-mod wayfern_manager;
-mod wayfern_terms;
 // mod theme_detector; // removed: theme detection handled in webview via CSS prefers-color-scheme
 pub mod cloud_auth;
 mod commercial_license;
@@ -66,10 +65,9 @@ use browser_runner::{
 
 use profile::manager::{
   check_browser_status, clone_profile, create_browser_profile_new, delete_profile,
-  list_browser_profiles, rename_profile, update_camoufox_config, update_profile_dns_blocklist,
-  update_profile_launch_hook, update_profile_note, update_profile_proxy,
-  update_profile_proxy_bypass_rules, update_profile_tags, update_profile_vpn,
-  update_wayfern_config,
+  list_browser_profiles, rename_profile, update_camoufox_config, update_chromium_config,
+  update_profile_dns_blocklist, update_profile_launch_hook, update_profile_note,
+  update_profile_proxy, update_profile_proxy_bypass_rules, update_profile_tags, update_profile_vpn,
 };
 
 use browser_version_manager::{
@@ -375,23 +373,6 @@ async fn export_profile_cookies(profile_id: String, format: String) -> Result<St
 }
 
 #[tauri::command]
-fn check_wayfern_terms_accepted() -> bool {
-  wayfern_terms::WayfernTermsManager::instance().is_terms_accepted()
-}
-
-#[tauri::command]
-fn check_wayfern_downloaded() -> bool {
-  wayfern_terms::WayfernTermsManager::instance().is_wayfern_downloaded()
-}
-
-#[tauri::command]
-async fn accept_wayfern_terms() -> Result<(), String> {
-  wayfern_terms::WayfernTermsManager::instance()
-    .accept_terms()
-    .await
-}
-
-#[tauri::command]
 async fn get_commercial_trial_status(
   app_handle: tauri::AppHandle,
 ) -> Result<commercial_license::TrialStatus, String> {
@@ -433,6 +414,11 @@ struct McpConfig {
   token: String,
 }
 
+const MCP_SERVER_NAME: &str = "JnmBrowser";
+const LEGACY_MCP_SERVER_NAME: &str = "donut-browser";
+const CLAUDE_DESKTOP_EXTENSION_ID: &str = "local.mcpb.JnmBrowser.JnmBrowser";
+const LEGACY_CLAUDE_DESKTOP_EXTENSION_ID: &str = "local.mcpb.donut-browser.donut-browser";
+
 #[tauri::command]
 async fn get_mcp_config(app_handle: tauri::AppHandle) -> Result<Option<McpConfig>, String> {
   let mcp_server = mcp_server::McpServer::instance();
@@ -462,7 +448,7 @@ fn claude_desktop_extension_dir() -> Option<std::path::PathBuf> {
         .join("Application Support")
         .join("Claude")
         .join("Claude Extensions")
-        .join("local.mcpb.donut-browser.donut-browser")
+        .join(CLAUDE_DESKTOP_EXTENSION_ID)
     })
   }
   #[cfg(target_os = "windows")]
@@ -471,7 +457,7 @@ fn claude_desktop_extension_dir() -> Option<std::path::PathBuf> {
       std::path::PathBuf::from(appdata)
         .join("Claude")
         .join("Claude Extensions")
-        .join("local.mcpb.donut-browser.donut-browser")
+        .join(CLAUDE_DESKTOP_EXTENSION_ID)
     })
   }
   #[cfg(target_os = "linux")]
@@ -479,7 +465,37 @@ fn claude_desktop_extension_dir() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|c| {
       c.join("Claude")
         .join("Claude Extensions")
-        .join("local.mcpb.donut-browser.donut-browser")
+        .join(CLAUDE_DESKTOP_EXTENSION_ID)
+    })
+  }
+}
+
+fn legacy_claude_desktop_extension_dir() -> Option<std::path::PathBuf> {
+  #[cfg(target_os = "macos")]
+  {
+    dirs::home_dir().map(|h| {
+      h.join("Library")
+        .join("Application Support")
+        .join("Claude")
+        .join("Claude Extensions")
+        .join(LEGACY_CLAUDE_DESKTOP_EXTENSION_ID)
+    })
+  }
+  #[cfg(target_os = "windows")]
+  {
+    std::env::var("APPDATA").ok().map(|appdata| {
+      std::path::PathBuf::from(appdata)
+        .join("Claude")
+        .join("Claude Extensions")
+        .join(LEGACY_CLAUDE_DESKTOP_EXTENSION_ID)
+    })
+  }
+  #[cfg(target_os = "linux")]
+  {
+    dirs::config_dir().map(|c| {
+      c.join("Claude")
+        .join("Claude Extensions")
+        .join(LEGACY_CLAUDE_DESKTOP_EXTENSION_ID)
     })
   }
 }
@@ -487,7 +503,8 @@ fn claude_desktop_extension_dir() -> Option<std::path::PathBuf> {
 #[tauri::command]
 fn is_mcp_in_claude_desktop() -> Result<bool, String> {
   let dir = claude_desktop_extension_dir().ok_or("Unsupported platform")?;
-  Ok(dir.join("manifest.json").exists())
+  let legacy_dir = legacy_claude_desktop_extension_dir().ok_or("Unsupported platform")?;
+  Ok(dir.join("manifest.json").exists() || legacy_dir.join("manifest.json").exists())
 }
 
 #[tauri::command]
@@ -511,7 +528,7 @@ async fn add_mcp_to_claude_desktop(app_handle: tauri::AppHandle) -> Result<(), S
 
   let manifest = serde_json::json!({
     "manifest_version": "0.3",
-    "name": "donut-browser",
+    "name": MCP_SERVER_NAME,
     "display_name": "JnmBrowser",
     "version": env!("CARGO_PKG_VERSION"),
     "description": "Control JnmBrowser profiles, proxies, and automation via MCP",
@@ -581,7 +598,13 @@ rl.on("close", () => setTimeout(() => process.exit(0), 500));
     .map_err(|e| format!("Failed to write bridge script: {e}"))?;
 
   // Update the extensions-installations.json registry so Claude Desktop picks it up
-  update_claude_extensions_registry("local.mcpb.donut-browser.donut-browser", Some(manifest))?;
+  if let Some(legacy_dir) = legacy_claude_desktop_extension_dir() {
+    if legacy_dir.exists() {
+      let _ = std::fs::remove_dir_all(legacy_dir);
+    }
+  }
+  update_claude_extensions_registry(LEGACY_CLAUDE_DESKTOP_EXTENSION_ID, None)?;
+  update_claude_extensions_registry(CLAUDE_DESKTOP_EXTENSION_ID, Some(manifest))?;
 
   Ok(())
 }
@@ -592,7 +615,13 @@ fn remove_mcp_from_claude_desktop() -> Result<(), String> {
   if ext_dir.exists() {
     std::fs::remove_dir_all(&ext_dir).map_err(|e| format!("Failed to remove extension: {e}"))?;
   }
-  update_claude_extensions_registry("local.mcpb.donut-browser.donut-browser", None)?;
+  if let Some(legacy_dir) = legacy_claude_desktop_extension_dir() {
+    if legacy_dir.exists() {
+      let _ = std::fs::remove_dir_all(legacy_dir);
+    }
+  }
+  update_claude_extensions_registry(CLAUDE_DESKTOP_EXTENSION_ID, None)?;
+  update_claude_extensions_registry(LEGACY_CLAUDE_DESKTOP_EXTENSION_ID, None)?;
   Ok(())
 }
 
@@ -673,6 +702,37 @@ fn find_claude_cli() -> Option<std::path::PathBuf> {
   None
 }
 
+fn find_codex_cli() -> Option<std::path::PathBuf> {
+  let mut candidates: Vec<std::path::PathBuf> = vec![
+    std::path::PathBuf::from("/usr/local/bin/codex"),
+    std::path::PathBuf::from("/opt/homebrew/bin/codex"),
+  ];
+  if let Some(home) = dirs::home_dir() {
+    candidates.insert(0, home.join("Library").join("pnpm").join("codex"));
+    candidates.insert(1, home.join(".local").join("bin").join("codex"));
+  }
+  #[cfg(windows)]
+  if let Ok(appdata) = std::env::var("APPDATA") {
+    candidates.insert(
+      0,
+      std::path::PathBuf::from(&appdata)
+        .join("npm")
+        .join("codex.cmd"),
+    );
+    candidates.push(
+      std::path::PathBuf::from(appdata)
+        .join("Codex")
+        .join("codex.exe"),
+    );
+  }
+  for p in &candidates {
+    if p.exists() {
+      return Some(p.clone());
+    }
+  }
+  None
+}
+
 #[tauri::command]
 fn is_mcp_in_claude_code() -> Result<bool, String> {
   let cli = find_claude_cli().ok_or("Claude Code CLI not found")?;
@@ -681,7 +741,7 @@ fn is_mcp_in_claude_code() -> Result<bool, String> {
     .output()
     .map_err(|e| format!("Failed to run claude: {e}"))?;
   let stdout = String::from_utf8_lossy(&output.stdout);
-  Ok(stdout.contains("donut-browser"))
+  Ok(stdout.contains(MCP_SERVER_NAME) || stdout.contains(LEGACY_MCP_SERVER_NAME))
 }
 
 #[tauri::command]
@@ -701,11 +761,15 @@ async fn add_mcp_to_claude_code(app_handle: tauri::AppHandle) -> Result<(), Stri
   let url = format!("http://127.0.0.1:{port}/mcp/{token}");
 
   let _ = std::process::Command::new(&cli)
-    .args(["mcp", "remove", "donut-browser"])
+    .args(["mcp", "remove", LEGACY_MCP_SERVER_NAME])
+    .output();
+
+  let _ = std::process::Command::new(&cli)
+    .args(["mcp", "remove", MCP_SERVER_NAME])
     .output();
 
   let output = std::process::Command::new(&cli)
-    .args(["mcp", "add", "--transport", "http", "donut-browser", &url])
+    .args(["mcp", "add", "--transport", "http", MCP_SERVER_NAME, &url])
     .output()
     .map_err(|e| format!("Failed to run claude: {e}"))?;
 
@@ -719,13 +783,94 @@ async fn add_mcp_to_claude_code(app_handle: tauri::AppHandle) -> Result<(), Stri
 #[tauri::command]
 fn remove_mcp_from_claude_code() -> Result<(), String> {
   let cli = find_claude_cli().ok_or("Claude Code CLI not found")?;
+  for name in [MCP_SERVER_NAME, LEGACY_MCP_SERVER_NAME] {
+    let output = std::process::Command::new(&cli)
+      .args(["mcp", "remove", name])
+      .output()
+      .map_err(|e| format!("Failed to run claude: {e}"))?;
+    if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      let stderr_trimmed = stderr.trim();
+      if !stderr_trimmed.contains("No MCP server named") {
+        return Err(format!("Failed to remove MCP from Claude Code: {stderr}"));
+      }
+    }
+  }
+  Ok(())
+}
+
+#[tauri::command]
+fn is_mcp_in_codex() -> Result<bool, String> {
+  let cli = find_codex_cli().ok_or("Codex CLI not found")?;
+  for name in [MCP_SERVER_NAME, LEGACY_MCP_SERVER_NAME] {
+    let output = std::process::Command::new(&cli)
+      .args(["mcp", "get", name])
+      .output()
+      .map_err(|e| format!("Failed to run codex: {e}"))?;
+    if output.status.success() {
+      return Ok(true);
+    }
+  }
+  Ok(false)
+}
+
+#[tauri::command]
+async fn add_mcp_to_codex(app_handle: tauri::AppHandle) -> Result<(), String> {
+  let cli = find_codex_cli().ok_or("Codex CLI not found")?;
+
+  let mcp_server = mcp_server::McpServer::instance();
+  let port = mcp_server.get_port().ok_or("MCP server is not running")?;
+
+  let settings_manager = settings_manager::SettingsManager::instance();
+  let token = settings_manager
+    .get_mcp_token(&app_handle)
+    .await
+    .map_err(|e| format!("Failed to get MCP token: {e}"))?
+    .ok_or("MCP token not found")?;
+
+  let url = format!("http://127.0.0.1:{port}/mcp/{token}");
+
+  for name in [LEGACY_MCP_SERVER_NAME, MCP_SERVER_NAME] {
+    let remove_output = std::process::Command::new(&cli)
+      .args(["mcp", "remove", name])
+      .output()
+      .map_err(|e| format!("Failed to run codex: {e}"))?;
+    if !remove_output.status.success() {
+      let stderr = String::from_utf8_lossy(&remove_output.stderr);
+      let stderr_trimmed = stderr.trim();
+      if !stderr_trimmed.contains("No MCP server named") {
+        return Err(format!("Failed to update Codex MCP config: {stderr}"));
+      }
+    }
+  }
+
   let output = std::process::Command::new(&cli)
-    .args(["mcp", "remove", "donut-browser"])
+    .args(["mcp", "add", MCP_SERVER_NAME, "--url", &url])
     .output()
-    .map_err(|e| format!("Failed to run claude: {e}"))?;
+    .map_err(|e| format!("Failed to run codex: {e}"))?;
+
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("Failed to remove MCP from Claude Code: {stderr}"));
+    return Err(format!("Failed to add MCP to Codex: {stderr}"));
+  }
+  Ok(())
+}
+
+#[tauri::command]
+fn remove_mcp_from_codex() -> Result<(), String> {
+  let cli = find_codex_cli().ok_or("Codex CLI not found")?;
+  for name in [MCP_SERVER_NAME, LEGACY_MCP_SERVER_NAME] {
+    let output = std::process::Command::new(&cli)
+      .args(["mcp", "remove", name])
+      .output()
+      .map_err(|e| format!("Failed to run codex: {e}"))?;
+    if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      let stderr_trimmed = stderr.trim();
+      if !stderr_trimmed.contains("No MCP server named") {
+        return Err(format!("Failed to remove MCP from Codex: {stderr}"));
+      }
+    }
   }
   Ok(())
 }
@@ -1100,6 +1245,7 @@ async fn generate_sample_fingerprint(
   version: String,
   config_json: String,
 ) -> Result<String, String> {
+  let browser = crate::browser::normalize_browser_name(&browser).to_string();
   let temp_profile = crate::profile::BrowserProfile {
     id: uuid::Uuid::new_v4(),
     name: "temp_fingerprint_gen".to_string(),
@@ -1112,7 +1258,7 @@ async fn generate_sample_fingerprint(
     last_launch: None,
     release_type: "stable".to_string(),
     camoufox_config: None,
-    wayfern_config: None,
+    chromium_config: None,
     group_id: None,
     tags: Vec::new(),
     note: None,
@@ -1136,10 +1282,10 @@ async fn generate_sample_fingerprint(
       .generate_fingerprint_config(&app_handle, &temp_profile, &config)
       .await
       .map_err(|e| format!("Failed to generate fingerprint: {e}"))
-  } else if browser == "wayfern" {
-    let config: crate::wayfern_manager::WayfernConfig =
+  } else if browser == "chromium" {
+    let config: crate::chromium_manager::ChromiumConfig =
       serde_json::from_str(&config_json).map_err(|e| format!("Failed to parse config: {e}"))?;
-    let manager = crate::wayfern_manager::WayfernManager::instance();
+    let manager = crate::chromium_manager::ChromiumManager::instance();
     manager
       .generate_fingerprint_config(&app_handle, &temp_profile, &config)
       .await
@@ -1812,13 +1958,6 @@ pub fn run() {
             log::warn!("Failed to refresh cloud sync token on startup: {e}");
           }
           cloud_auth::CLOUD_AUTH.sync_cloud_proxy().await;
-
-          // Request wayfern token on startup for paid users
-          if cloud_auth::CLOUD_AUTH.has_active_paid_subscription().await {
-            if let Err(e) = cloud_auth::CLOUD_AUTH.request_wayfern_token().await {
-              log::warn!("Failed to request wayfern token on startup: {e}");
-            }
-          }
         }
         cloud_auth::CloudAuthManager::start_sync_token_refresh_loop(app_handle_cloud).await;
       });
@@ -1893,7 +2032,7 @@ pub fn run() {
       parse_txt_proxies,
       import_proxies_from_parsed,
       update_camoufox_config,
-      update_wayfern_config,
+      update_chromium_config,
       generate_sample_fingerprint,
       get_profile_groups,
       get_groups_with_profile_counts,
@@ -1944,9 +2083,6 @@ pub fn run() {
       copy_profile_cookies,
       import_cookies_from_file,
       export_profile_cookies,
-      check_wayfern_terms_accepted,
-      check_wayfern_downloaded,
-      accept_wayfern_terms,
       get_commercial_trial_status,
       acknowledge_trial_expiration,
       has_acknowledged_trial_expiration,
@@ -1960,6 +2096,9 @@ pub fn run() {
       is_mcp_in_claude_code,
       add_mcp_to_claude_code,
       remove_mcp_from_claude_code,
+      is_mcp_in_codex,
+      add_mcp_to_codex,
+      remove_mcp_from_codex,
       // VPN commands
       import_vpn_config,
       list_vpn_configs,
@@ -1985,8 +2124,6 @@ pub fn run() {
       cloud_auth::cloud_get_isps,
       cloud_auth::create_cloud_location_proxy,
       cloud_auth::restart_sync_service,
-      cloud_auth::cloud_get_wayfern_token,
-      cloud_auth::cloud_refresh_wayfern_token,
       // Team lock commands
       team_lock::get_team_locks,
       team_lock::get_team_lock_status,
@@ -2042,8 +2179,6 @@ mod tests {
       "set_extension_group_sync_enabled",
       "get_team_lock_status",
       "generate_sample_fingerprint",
-      "cloud_get_wayfern_token",
-      "cloud_refresh_wayfern_token",
       "check_missing_binaries",
       "check_missing_geoip_database",
       "ensure_all_binaries_exist",

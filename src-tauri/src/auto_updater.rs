@@ -123,7 +123,10 @@ impl AutoUpdater {
     Ok(notifications)
   }
 
-  pub async fn check_for_updates_with_progress(&self, app_handle: &tauri::AppHandle) {
+  pub async fn check_for_updates_with_progress<R: tauri::Runtime>(
+    &self,
+    app_handle: &tauri::AppHandle<R>,
+  ) {
     if !browser_auto_updates_enabled() {
       log::info!("Browser auto-update check with progress is disabled");
       return;
@@ -316,9 +319,9 @@ impl AutoUpdater {
   }
 
   /// Automatically update all affected profile versions after browser download
-  pub async fn auto_update_profile_versions(
+  pub async fn auto_update_profile_versions<R: tauri::Runtime>(
     &self,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
     browser: &str,
     new_version: &str,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -398,9 +401,9 @@ impl AutoUpdater {
   }
 
   /// Complete browser update process with auto-update of profile versions
-  pub async fn complete_browser_update_with_auto_update(
+  pub async fn complete_browser_update_with_auto_update<R: tauri::Runtime>(
     &self,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
     browser: &str,
     new_version: &str,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -538,9 +541,9 @@ impl AutoUpdater {
 
   /// Update a single profile to the latest installed version for its browser.
   /// Used when a browser closes to ensure it's on the latest version.
-  pub fn update_profile_to_latest_installed(
+  pub fn update_profile_to_latest_installed<R: tauri::Runtime>(
     &self,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
     profile: &crate::profile::BrowserProfile,
   ) -> Option<crate::profile::BrowserProfile> {
     if !browser_auto_updates_enabled() {
@@ -588,9 +591,9 @@ impl AutoUpdater {
 
   /// Update all non-running profiles to the latest installed version for each browser.
   /// Handles the case where a newer version was downloaded but profiles weren't updated.
-  pub fn update_profiles_to_latest_installed(
+  pub fn update_profiles_to_latest_installed<R: tauri::Runtime>(
     &self,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     if !browser_auto_updates_enabled() {
       log::info!("Skipping update of profiles to latest installed browser versions: disabled");
@@ -729,7 +732,7 @@ mod tests {
       last_launch: None,
       release_type: "stable".to_string(),
       camoufox_config: None,
-      wayfern_config: None,
+      chromium_config: None,
       group_id: None,
       tags: Vec::new(),
       note: None,

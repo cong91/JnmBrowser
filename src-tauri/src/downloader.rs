@@ -149,16 +149,16 @@ impl Downloader {
 
         Ok(asset_url)
       }
-      BrowserType::Wayfern => {
-        // For Wayfern, get the download URL from version.json
+      BrowserType::Chromium => {
+        // For Chromium, get the download URL from the manifest
         let version_info = self
           .api_client
-          .fetch_wayfern_version_with_caching(true)
+          .fetch_chromium_version_with_caching(true)
           .await?;
 
         if version_info.version != version {
           log::info!(
-            "Wayfern: requested version {version}, using available version {}",
+            "Chromium: requested version {version}, using available version {}",
             version_info.version
           );
         }
@@ -166,11 +166,11 @@ impl Downloader {
         // Get the download URL for current platform
         let download_url = self
           .api_client
-          .get_wayfern_download_url(&version_info)
+          .get_chromium_download_url(&version_info)
           .ok_or_else(|| {
             let (os, arch) = Self::get_platform_info();
             format!(
-              "No compatible download found for Wayfern on {os}/{arch}. Available platforms: {}",
+              "No compatible download found for Chromium on {os}/{arch}. Available platforms: {}",
               version_info
                 .downloads
                 .iter()
@@ -537,28 +537,23 @@ impl Downloader {
   }
 
   /// Download a browser binary, verify it, and register it in the downloaded browsers registry
-  pub async fn download_browser_full(
+  pub async fn download_browser_full<R: tauri::Runtime>(
     &self,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
     browser_str: String,
     version: String,
   ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    // Only check Wayfern terms if Wayfern is already downloaded
-    let terms_manager = crate::wayfern_terms::WayfernTermsManager::instance();
-    if terms_manager.is_wayfern_downloaded() && !terms_manager.is_terms_accepted() {
-      return Err("Please accept Wayfern Terms and Conditions before downloading browsers".into());
-    }
-
+    let browser_key = crate::browser::canonical_browser_name(&browser_str).to_string();
     let browser_type =
-      BrowserType::from_str(&browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
+      BrowserType::from_str(&browser_key).map_err(|e| format!("Invalid browser type: {e}"))?;
 
     // Register cancellation before any slow version-resolution network calls so the UI can pause
     // while the downloader is still preparing the real asset URL.
-    let requested_download_key = format!("{browser_str}-{version}");
+    let requested_download_key = format!("{browser_key}-{version}");
     let cancel_token = {
       let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
       if downloading.contains(&requested_download_key) {
-        return Err(format!("Browser '{browser_str}' version '{version}' is already being downloaded. Please wait for the current download to complete.").into());
+        return Err(format!("Browser '{browser_key}' version '{version}' is already being downloaded. Please wait for the current download to complete.").into());
       }
       downloading.insert(requested_download_key.clone());
 
@@ -568,23 +563,23 @@ impl Downloader {
       token
     };
 
-    // For Wayfern/Camoufox, resolve the actual available version from the API
-    let version = if browser_str == "wayfern" {
+    // For Chromium/Camoufox, resolve the actual available version from the API
+    let version = if crate::browser::is_chromium_browser_name(&browser_key) {
       match self
         .api_client
-        .fetch_wayfern_version_with_caching(true)
+        .fetch_chromium_version_with_caching(true)
         .await
       {
         Ok(info) if info.version != version => {
           log::info!(
-            "Wayfern: requested {version}, using available {}",
+            "Chromium: requested {version}, using available {}",
             info.version
           );
           info.version
         }
         _ => version,
       }
-    } else if browser_str == "camoufox" {
+    } else if browser_key == "camoufox" {
       match self
         .api_client
         .fetch_camoufox_releases_with_caching(true)
@@ -615,7 +610,7 @@ impl Downloader {
     // If version resolution changed the version string, move the active lock/token to the
     // resolved key used by all subsequent cleanup and progress events.
     let mut download_key = requested_download_key.clone();
-    let resolved_download_key = format!("{browser_str}-{version}");
+    let resolved_download_key = format!("{browser_key}-{version}");
     if resolved_download_key != requested_download_key {
       let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
       if downloading.contains(&resolved_download_key) {
@@ -623,7 +618,7 @@ impl Downloader {
         drop(downloading);
         let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
         tokens.remove(&requested_download_key);
-        return Err(format!("Browser '{browser_str}' version '{version}' is already being downloaded. Please wait for the current download to complete.").into());
+        return Err(format!("Browser '{browser_key}' version '{version}' is already being downloaded. Please wait for the current download to complete.").into());
       }
       downloading.remove(&requested_download_key);
       downloading.insert(resolved_download_key.clone());
@@ -640,34 +635,57 @@ impl Downloader {
     // Use injected registry instance
 
     let binaries_dir = crate::app_dirs::binaries_dir();
+    let install_browser_dir = crate::browser::browser_storage_dir_name(&browser_key);
+    let mut browser_dir = binaries_dir.clone();
+    browser_dir.push(install_browser_dir);
+    browser_dir.push(&version);
+
+    if browser.is_version_downloaded(&version, &binaries_dir) {
+      if !self.registry.is_browser_registered(&browser_key, &version) {
+        if let Err(e) =
+          self
+            .registry
+            .mark_download_completed(&browser_key, &version, browser_dir.clone())
+        {
+          log::warn!(
+            "Warning: Could not repair missing registry entry for {} {}: {}",
+            browser_key,
+            version,
+            e
+          );
+        } else if let Err(e) = self.registry.save() {
+          log::warn!(
+            "Warning: Could not persist repaired registry entry for {} {}: {}",
+            browser_key,
+            version,
+            e
+          );
+        }
+      }
+
+      let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
+      downloading.remove(&download_key);
+      drop(downloading);
+      let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
+      tokens.remove(&download_key);
+      return Ok(version);
+    }
 
     // Check if registry thinks it's downloaded, but also verify files actually exist
-    if self.registry.is_browser_downloaded(&browser_str, &version) {
-      let actually_exists = browser.is_version_downloaded(&version, &binaries_dir);
-
-      if actually_exists {
-        // Remove from downloading set since it's already downloaded
-        let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
-        downloading.remove(&download_key);
-        drop(downloading);
-        let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
-        tokens.remove(&download_key);
-        return Ok(version);
-      } else {
-        // Registry says it's downloaded but files don't exist - clean up registry
-        log::info!("Registry indicates {browser_str} {version} is downloaded, but files are missing. Cleaning up registry entry.");
-        self.registry.remove_browser(&browser_str, &version);
-        self
-          .registry
-          .save()
-          .map_err(|e| format!("Failed to save cleaned registry: {e}"))?;
-      }
+    if self.registry.is_browser_downloaded(&browser_key, &version) {
+      // Remove from downloading set since it's already downloaded
+      let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
+      downloading.remove(&download_key);
+      drop(downloading);
+      let mut tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
+      tokens.remove(&download_key);
+      return Ok(version);
     }
 
     // Check if browser is supported on current platform before attempting download
     if !self
       .version_service
-      .is_browser_supported(&browser_str)
+      .is_browser_supported(&browser_key)
       .unwrap_or(false)
     {
       // Remove from downloading set on error
@@ -679,7 +697,7 @@ impl Downloader {
       return Err(
         format!(
           "Browser '{}' is not supported on your platform ({} {}). Supported browsers: {}",
-          browser_str,
+          browser_key,
           std::env::consts::OS,
           std::env::consts::ARCH,
           self.version_service.get_supported_browsers().join(", ")
@@ -690,21 +708,19 @@ impl Downloader {
 
     let download_info = self
       .version_service
-      .get_download_info(&browser_str, &version)
+      .get_download_info(&browser_key, &version)
       .map_err(|e| format!("Failed to get download info: {e}"))?;
 
-    // Create browser directory
-    let mut browser_dir = binaries_dir.clone();
-    browser_dir.push(&browser_str);
-    browser_dir.push(&version);
-
+    // Create browser directory. Legacy API callers may still pass the old alias,
+    // but the actual replacement engine is stored
+    // under binaries/fingerprint-chromium/<version>/.
     std::fs::create_dir_all(&browser_dir)
       .map_err(|e| format!("Failed to create browser directory: {e}"))?;
 
     // Mark download as started (but don't add to registry yet)
     self
       .registry
-      .mark_download_started(&browser_str, &version, browser_dir.clone());
+      .mark_download_started(&browser_key, &version, browser_dir.clone());
 
     // Attempt to download the archive. If the download fails but an archive with the
     // expected filename already exists (manual download), continue using that file.
@@ -723,7 +739,7 @@ impl Downloader {
       Err(e) => {
         // Do NOT continue with extraction on failed downloads. Partial files may exist but are invalid.
         // Clean registry entry and stop here so the UI can show a single, clear error.
-        let _ = self.registry.remove_browser(&browser_str, &version);
+        let _ = self.registry.remove_browser(&browser_key, &version);
         let _ = self.registry.save();
         let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
         downloading.remove(&download_key);
@@ -734,7 +750,7 @@ impl Downloader {
         // Emit cancelled stage if the download was cancelled by user
         if cancel_token.is_cancelled() {
           let progress = DownloadProgress {
-            browser: browser_str.clone(),
+            browser: browser_key.clone(),
             version: version.clone(),
             downloaded_bytes: 0,
             total_bytes: None,
@@ -767,7 +783,7 @@ impl Downloader {
           // Do not remove the archive here. We keep it until verification succeeds.
         }
         Err(e) => {
-          log::error!("Extraction failed for {browser_str} {version}: {e}");
+          log::error!("Extraction failed for {browser_key} {version}: {e}");
 
           // Delete the corrupt/invalid archive so a fresh download happens next time
           if download_path.exists() {
@@ -775,7 +791,7 @@ impl Downloader {
             let _ = std::fs::remove_file(&download_path);
           }
 
-          let _ = self.registry.remove_browser(&browser_str, &version);
+          let _ = self.registry.remove_browser(&browser_key, &version);
           let _ = self.registry.save();
           {
             let mut downloading = DOWNLOADING_BROWSERS.lock().unwrap();
@@ -788,7 +804,7 @@ impl Downloader {
 
           // Emit error stage so the UI shows a toast
           let progress = DownloadProgress {
-            browser: browser_str.clone(),
+            browser: browser_key.clone(),
             version: version.clone(),
             downloaded_bytes: 0,
             total_bytes: None,
@@ -809,7 +825,7 @@ impl Downloader {
 
     // Emit verification progress
     let progress = DownloadProgress {
-      browser: browser_str.clone(),
+      browser: browser_key.clone(),
       version: version.clone(),
       downloaded_bytes: 0,
       total_bytes: None,
@@ -821,15 +837,15 @@ impl Downloader {
     let _ = events::emit("download-progress", &progress);
 
     // Verify the browser was downloaded correctly
-    log::info!("Verifying download for browser: {browser_str}, version: {version}");
+    log::info!("Verifying download for browser: {browser_key}, version: {version}");
 
     // Use the browser's own verification method
     if !browser.is_version_downloaded(&version, &binaries_dir) {
       // Provide detailed error information for debugging
-      let browser_dir = binaries_dir.join(&browser_str).join(&version);
+      let browser_dir = binaries_dir.join(install_browser_dir).join(&version);
       let mut error_details = format!(
         "Browser download completed but verification failed for {} {}. Expected directory: {}",
-        browser_str,
+        browser_key,
         version,
         browser_dir.display()
       );
@@ -851,7 +867,7 @@ impl Downloader {
       }
 
       // For Camoufox on Linux, provide specific expected files
-      if browser_str == "camoufox" && cfg!(target_os = "linux") {
+      if browser_key == "camoufox" && cfg!(target_os = "linux") {
         let camoufox_subdir = browser_dir.join("camoufox");
         error_details.push_str("\nExpected Camoufox executable locations:");
         error_details.push_str(&format!("\n  {}/camoufox-bin", camoufox_subdir.display()));
@@ -879,7 +895,7 @@ impl Downloader {
       }
 
       // Do not delete files on verification failure; keep archive for manual retry.
-      let _ = self.registry.remove_browser(&browser_str, &version);
+      let _ = self.registry.remove_browser(&browser_key, &version);
       let _ = self.registry.save();
       // Remove browser-version pair from downloading set on verification failure
       {
@@ -897,9 +913,9 @@ impl Downloader {
     if let Err(e) =
       self
         .registry
-        .mark_download_completed(&browser_str, &version, browser_dir.clone())
+        .mark_download_completed(&browser_key, &version, browser_dir.clone())
     {
-      log::warn!("Warning: Could not mark {browser_str} {version} as completed in registry: {e}");
+      log::warn!("Warning: Could not mark {browser_key} {version} as completed in registry: {e}");
     }
     self
       .registry
@@ -917,7 +933,7 @@ impl Downloader {
     }
 
     // If this is Camoufox, automatically download GeoIP database and create version.json
-    if browser_str == "camoufox" {
+    if browser_key == "camoufox" {
       // Check if GeoIP database is already available
       if !crate::geoip_downloader::GeoIPDownloader::is_geoip_database_available() {
         log::info!("Downloading GeoIP database for Camoufox...");
@@ -950,7 +966,7 @@ impl Downloader {
 
     // Emit completion
     let progress = DownloadProgress {
-      browser: browser_str.clone(),
+      browser: browser_key.clone(),
       version: version.clone(),
       downloaded_bytes: 0,
       total_bytes: None,
@@ -1017,8 +1033,8 @@ pub fn is_downloading(browser: &str, version: &str) -> bool {
 }
 
 #[tauri::command]
-pub async fn download_browser(
-  app_handle: tauri::AppHandle,
+pub async fn download_browser<R: tauri::Runtime>(
+  app_handle: tauri::AppHandle<R>,
   browser_str: String,
   version: String,
 ) -> Result<String, String> {
@@ -1031,7 +1047,8 @@ pub async fn download_browser(
 
 #[tauri::command]
 pub async fn cancel_download(browser_str: String, version: String) -> Result<(), String> {
-  let download_key = format!("{browser_str}-{version}");
+  let browser_key = crate::browser::canonical_browser_name(&browser_str).to_string();
+  let download_key = format!("{browser_key}-{version}");
   let token = {
     let tokens = DOWNLOAD_CANCELLATION_TOKENS.lock().unwrap();
     tokens.get(&download_key).cloned()
@@ -1042,7 +1059,7 @@ pub async fn cancel_download(browser_str: String, version: String) -> Result<(),
     Ok(())
   } else {
     Err(format!(
-      "No active download found for {browser_str} {version}"
+      "No active download found for {browser_key} {version}"
     ))
   }
 }
@@ -1051,6 +1068,8 @@ pub async fn cancel_download(browser_str: String, version: String) -> Result<(),
 mod tests {
   use super::*;
 
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  use std::sync::Arc;
   use tempfile::TempDir;
   use wiremock::matchers::{method, path};
   use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1146,6 +1165,232 @@ mod tests {
 
     let downloaded_content = std::fs::read(&downloaded_file).unwrap();
     assert_eq!(downloaded_content.len(), test_content.len());
+  }
+
+  #[cfg(target_os = "macos")]
+  struct EnvVarGuard {
+    key: String,
+    previous: Option<String>,
+  }
+
+  #[cfg(target_os = "macos")]
+  impl EnvVarGuard {
+    fn set(key: &str, value: &str) -> Self {
+      let previous = std::env::var(key).ok();
+      std::env::set_var(key, value);
+      Self {
+        key: key.to_string(),
+        previous,
+      }
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+      if let Some(previous) = &self.previous {
+        std::env::set_var(&self.key, previous);
+      } else {
+        std::env::remove_var(&self.key);
+      }
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  async fn spawn_fingerprint_manifest_server(
+    version: &str,
+    dmg_bytes: Vec<u8>,
+  ) -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+  ) {
+    use axum::body::Body;
+    use axum::http::{header, HeaderValue, Response, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+
+    let manifest_hits = Arc::new(AtomicUsize::new(0));
+    let dmg_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let manifest_json = serde_json::json!({
+      "version": version,
+      "downloads": {
+        "linux-x64": serde_json::Value::Null,
+        "linux-arm64": serde_json::Value::Null,
+        "macos-x64": format!("{base_url}/test-browser.dmg"),
+        "macos-arm64": format!("{base_url}/test-browser.dmg"),
+        "windows-x64": serde_json::Value::Null,
+        "windows-arm64": serde_json::Value::Null
+      }
+    })
+    .to_string();
+
+    let manifest_hits_for_route = Arc::clone(&manifest_hits);
+    let manifest_json_for_route = manifest_json.clone();
+    let dmg_hits_for_route = Arc::clone(&dmg_hits);
+    let dmg_bytes_for_route = dmg_bytes.clone();
+
+    let router = Router::new()
+      .route(
+        "/fingerprint-chromium.json",
+        get(move || {
+          let manifest_hits = Arc::clone(&manifest_hits_for_route);
+          let manifest_json = manifest_json_for_route.clone();
+          async move {
+            manifest_hits.fetch_add(1, Ordering::SeqCst);
+            (
+              StatusCode::OK,
+              [(header::CONTENT_TYPE, "application/json")],
+              manifest_json,
+            )
+          }
+        }),
+      )
+      .route(
+        "/test-browser.dmg",
+        get(move || {
+          let dmg_hits = Arc::clone(&dmg_hits_for_route);
+          let dmg_bytes = dmg_bytes_for_route.clone();
+          async move {
+            dmg_hits.fetch_add(1, Ordering::SeqCst);
+            let mut response = Response::new(Body::from(dmg_bytes));
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+              header::CONTENT_TYPE,
+              HeaderValue::from_static("application/x-apple-diskimage"),
+            );
+            response
+          }
+        }),
+      );
+
+    let server = tokio::spawn(async move {
+      axum::serve(listener, router).await.unwrap();
+    });
+
+    (
+      format!("{base_url}/fingerprint-chromium.json"),
+      manifest_hits,
+      dmg_hits,
+      server,
+    )
+  }
+
+  #[cfg(target_os = "macos")]
+  fn build_test_chromium_dmg(temp_dir: &TempDir) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source_root = temp_dir.path().join("dmg-source");
+    let app_root = source_root.join("Chromium.app");
+    let macos_dir = app_root.join("Contents").join("MacOS");
+    std::fs::create_dir_all(&macos_dir).unwrap();
+
+    let executable = macos_dir.join("Chromium");
+    std::fs::write(
+      &executable,
+      "#!/bin/sh\necho 'fingerprint-chromium test binary'\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let dmg_path = temp_dir.path().join("fingerprint-test.dmg");
+    let output = std::process::Command::new("hdiutil")
+      .args([
+        "create",
+        "-quiet",
+        "-fs",
+        "HFS+",
+        "-volname",
+        "FingerprintChromiumTest",
+        "-srcfolder",
+        source_root.to_str().unwrap(),
+        dmg_path.to_str().unwrap(),
+      ])
+      .output()
+      .unwrap();
+
+    assert!(
+      output.status.success(),
+      "Failed to create test DMG: stdout={}, stderr={}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+
+    dmg_path
+  }
+
+  #[cfg(target_os = "macos")]
+  #[tokio::test]
+  #[serial_test::serial]
+  async fn test_chromium_manifest_download_reinstalls_after_deletion_and_repairs_registry() {
+    let data_dir = TempDir::new().unwrap();
+    let cache_dir = TempDir::new().unwrap();
+    let artifact_dir = TempDir::new().unwrap();
+    let _data_guard = crate::app_dirs::set_test_data_dir(data_dir.path().to_path_buf());
+    let _cache_guard = crate::app_dirs::set_test_cache_dir(cache_dir.path().to_path_buf());
+
+    let version = format!("142.0.7444.175-phase3-{}", std::process::id());
+    let dmg_path = build_test_chromium_dmg(&artifact_dir);
+    let dmg_bytes = std::fs::read(&dmg_path).unwrap();
+    let (manifest_url, _manifest_hits, dmg_hits, server) =
+      spawn_fingerprint_manifest_server(&version, dmg_bytes).await;
+    let _manifest_guard = EnvVarGuard::set("JNM_FINGERPRINT_CHROMIUM_MANIFEST_URL", &manifest_url);
+
+    let registry = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
+    registry.remove_browser("chromium", &version);
+    registry.save().unwrap();
+
+    let app = tauri::test::mock_app();
+    let app_handle = app.handle().clone();
+    let downloader = Downloader::new_for_test();
+    let install_dir = crate::app_dirs::binaries_dir()
+      .join("fingerprint-chromium")
+      .join(&version);
+    let app_bundle = install_dir.join("Chromium.app");
+
+    let first = downloader
+      .download_browser_full(&app_handle, "chromium".to_string(), version.clone())
+      .await
+      .unwrap();
+    assert_eq!(first, version);
+    assert!(app_bundle.exists());
+    assert!(registry.is_browser_downloaded("chromium", &version));
+
+    std::fs::remove_dir_all(&install_dir).unwrap();
+    assert!(!install_dir.exists());
+
+    let second = downloader
+      .download_browser_full(&app_handle, "chromium".to_string(), version.clone())
+      .await
+      .unwrap();
+    assert_eq!(second, version);
+    assert!(app_bundle.exists());
+    assert!(registry.is_browser_downloaded("chromium", &version));
+
+    registry.remove_browser("chromium", &version);
+    registry.save().unwrap();
+    assert!(!registry.is_browser_registered("chromium", &version));
+
+    let third = downloader
+      .download_browser_full(&app_handle, "chromium".to_string(), version.clone())
+      .await
+      .unwrap();
+    assert_eq!(third, version);
+    assert!(app_bundle.exists());
+    assert!(registry.is_browser_registered("chromium", &version));
+    assert_eq!(
+      dmg_hits.load(Ordering::SeqCst),
+      2,
+      "third call should repair registry from installed files instead of re-downloading archive"
+    );
+
+    server.abort();
   }
 }
 

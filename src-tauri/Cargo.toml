@@ -1,10 +1,10 @@
 [package]
-name = "donutbrowser"
+name = "JnmBrowser"
 version = "0.22.7"
 description = "Simple Yet Powerful Anti-Detect Browser"
 authors = ["zhom@github"]
 edition = "2021"
-default-run = "donutbrowser"
+default-run = "JnmBrowser"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 doctest = false
 
 [[bin]]
-name = "donutbrowser"
+name = "JnmBrowser"
 path = "src/main.rs"
 
 [[bin]]

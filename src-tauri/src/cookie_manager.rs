@@ -34,6 +34,8 @@ pub mod chrome_decrypt {
   const SALT: &[u8] = b"saltysalt";
   const IV: [u8; 16] = [b' '; 16]; // 16 spaces
   const HOST_HASH_LEN: usize = 32; // SHA-256 output length
+  #[cfg(target_os = "macos")]
+  const MOCK_KEYCHAIN_PASSWORD: &[u8] = b"mock_password";
 
   fn derive_key(password: &[u8]) -> [u8; KEY_LEN] {
     let mut key = [0u8; KEY_LEN];
@@ -50,16 +52,32 @@ pub mod chrome_decrypt {
     key
   }
 
+  #[cfg(target_os = "macos")]
+  fn mock_keychain_key() -> [u8; KEY_LEN] {
+    derive_key(MOCK_KEYCHAIN_PASSWORD)
+  }
+
   pub fn get_encryption_key(profile_data_path: &Path) -> Option<[u8; KEY_LEN]> {
     let key_file = profile_data_path.join("os_crypt_key");
     // Read as raw bytes and do NOT trim — Chromium's `ReadFileToString`
     // passes the exact file contents to `Pbkdf2(file_contents)`. Any
     // normalisation we do here would produce a different derived key.
-    let contents = std::fs::read(&key_file).ok()?;
-    if contents.is_empty() {
-      return None;
+    if let Ok(contents) = std::fs::read(&key_file) {
+      if contents.is_empty() {
+        return None;
+      }
+      return Some(derive_key(&contents));
     }
-    Some(derive_key(&contents))
+
+    #[cfg(target_os = "macos")]
+    {
+      Some(mock_keychain_key())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+      None
+    }
   }
 
   /// Decrypt a Chrome encrypted cookie value.
@@ -193,27 +211,25 @@ impl CookieManager {
   fn get_cookie_db_path(profile: &BrowserProfile, profiles_dir: &Path) -> Result<PathBuf, String> {
     let profile_data_path = profile.get_profile_data_path(profiles_dir);
 
-    match profile.browser.as_str() {
-      "wayfern" => {
-        let path = Self::wayfern_cookie_path(&profile_data_path);
-        if path.exists() {
-          Ok(path)
-        } else {
-          Err(format!("Cookie database not found at: {}", path.display()))
-        }
+    if crate::browser::is_chromium_browser_name(&profile.browser) {
+      let path = Self::wayfern_cookie_path(&profile_data_path);
+      if path.exists() {
+        Ok(path)
+      } else {
+        Err(format!("Cookie database not found at: {}", path.display()))
       }
-      "camoufox" => {
-        let path = profile_data_path.join("cookies.sqlite");
-        if path.exists() {
-          Ok(path)
-        } else {
-          Err(format!("Cookie database not found at: {}", path.display()))
-        }
+    } else if profile.browser == "camoufox" {
+      let path = profile_data_path.join("cookies.sqlite");
+      if path.exists() {
+        Ok(path)
+      } else {
+        Err(format!("Cookie database not found at: {}", path.display()))
       }
-      _ => Err(format!(
+    } else {
+      Err(format!(
         "Unsupported browser type for cookie operations: {}",
         profile.browser
-      )),
+      ))
     }
   }
 
@@ -227,25 +243,23 @@ impl CookieManager {
   ) -> Result<PathBuf, String> {
     let profile_data_path = profile.get_profile_data_path(profiles_dir);
 
-    match profile.browser.as_str() {
-      "wayfern" => {
-        let path = Self::wayfern_cookie_path(&profile_data_path);
-        if !path.exists() {
-          Self::create_empty_chrome_cookies_db(&path)?;
-        }
-        Ok(path)
+    if crate::browser::is_chromium_browser_name(&profile.browser) {
+      let path = Self::wayfern_cookie_path(&profile_data_path);
+      if !path.exists() {
+        Self::create_empty_chrome_cookies_db(&path)?;
       }
-      "camoufox" => {
-        let path = profile_data_path.join("cookies.sqlite");
-        if !path.exists() {
-          Self::create_empty_firefox_cookies_db(&path)?;
-        }
-        Ok(path)
+      Ok(path)
+    } else if profile.browser == "camoufox" {
+      let path = profile_data_path.join("cookies.sqlite");
+      if !path.exists() {
+        Self::create_empty_firefox_cookies_db(&path)?;
       }
-      _ => Err(format!(
+      Ok(path)
+    } else {
+      Err(format!(
         "Unsupported browser type for cookie operations: {}",
         profile.browser
-      )),
+      ))
     }
   }
 
@@ -254,7 +268,7 @@ impl CookieManager {
   /// Schema matches what recent Chromium versions write on first launch:
   /// the `cookies` table, the `meta` table with version info, and the
   /// `host_key/top_frame_site_key/name/path` unique index. Chromium's cookie
-  /// store migration code will upgrade this forward when Wayfern first
+  /// store migration code will upgrade this forward when the legacy Chromium runtime first
   /// launches the profile.
   fn create_empty_chrome_cookies_db(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -383,7 +397,7 @@ impl CookieManager {
     Ok(cookies)
   }
 
-  /// Read cookies from a Chrome/Wayfern profile.
+  /// Read cookies from a Chrome/Chromium-compatible profile.
   /// Handles encrypted cookies by decrypting encrypted_value using the profile's encryption key.
   fn read_chrome_cookies(
     db_path: &Path,
@@ -538,13 +552,13 @@ impl CookieManager {
     Ok((copied, replaced))
   }
 
-  /// Write cookies to a Chrome/Wayfern profile.
+  /// Write cookies to a Chrome/Chromium-compatible profile.
   ///
   /// Always writes values as plaintext in the `value` column with an empty
   /// `encrypted_value`. Chromium reads plaintext on a per-row basis when
   /// `encrypted_value` is empty, so this mixes cleanly with any pre-existing
   /// encrypted cookies in the database. We avoid encrypting on write because
-  /// the os_crypt key derivation between Wayfern's runtime and an external
+  /// the os_crypt key derivation between the Chromium runtime and an external
   /// writer is not guaranteed to match, and a ciphertext Chromium can't
   /// decrypt silently produces an empty cookie value at runtime.
   fn write_chrome_cookies(
@@ -655,13 +669,13 @@ impl CookieManager {
 
     let db_path = Self::get_cookie_db_path(profile, &profiles_dir)?;
 
-    let cookies = match profile.browser.as_str() {
-      "camoufox" => Self::read_firefox_cookies(&db_path)?,
-      "wayfern" => {
-        let key = Self::get_chrome_encryption_key(profile, &profiles_dir);
-        Self::read_chrome_cookies(&db_path, key.as_ref())?
-      }
-      _ => return Err(format!("Unsupported browser type: {}", profile.browser)),
+    let cookies = if profile.browser == "camoufox" {
+      Self::read_firefox_cookies(&db_path)?
+    } else if crate::browser::is_chromium_browser_name(&profile.browser) {
+      let key = Self::get_chrome_encryption_key(profile, &profiles_dir);
+      Self::read_chrome_cookies(&db_path, key.as_ref())?
+    } else {
+      return Err(format!("Unsupported browser type: {}", profile.browser));
     };
 
     let mut domain_map: HashMap<String, Vec<UnifiedCookie>> = HashMap::new();
@@ -711,13 +725,13 @@ impl CookieManager {
       .ok_or_else(|| format!("Source profile not found: {}", request.source_profile_id))?;
 
     let source_db_path = Self::get_cookie_db_path(source, &profiles_dir)?;
-    let all_cookies = match source.browser.as_str() {
-      "camoufox" => Self::read_firefox_cookies(&source_db_path)?,
-      "wayfern" => {
-        let key = Self::get_chrome_encryption_key(source, &profiles_dir);
-        Self::read_chrome_cookies(&source_db_path, key.as_ref())?
-      }
-      _ => return Err(format!("Unsupported browser type: {}", source.browser)),
+    let all_cookies = if source.browser == "camoufox" {
+      Self::read_firefox_cookies(&source_db_path)?
+    } else if crate::browser::is_chromium_browser_name(&source.browser) {
+      let key = Self::get_chrome_encryption_key(source, &profiles_dir);
+      Self::read_chrome_cookies(&source_db_path, key.as_ref())?
+    } else {
+      return Err(format!("Unsupported browser type: {}", source.browser));
     };
 
     let cookies_to_copy: Vec<UnifiedCookie> = if request.selected_cookies.is_empty() {
@@ -783,18 +797,18 @@ impl CookieManager {
         }
       };
 
-      let write_result = match target.browser.as_str() {
-        "camoufox" => Self::write_firefox_cookies(&target_db_path, &cookies_to_copy),
-        "wayfern" => Self::write_chrome_cookies(&target_db_path, &cookies_to_copy),
-        _ => {
-          results.push(CookieCopyResult {
-            target_profile_id: target_id.clone(),
-            cookies_copied: 0,
-            cookies_replaced: 0,
-            errors: vec![format!("Unsupported browser: {}", target.browser)],
-          });
-          continue;
-        }
+      let write_result = if target.browser == "camoufox" {
+        Self::write_firefox_cookies(&target_db_path, &cookies_to_copy)
+      } else if crate::browser::is_chromium_browser_name(&target.browser) {
+        Self::write_chrome_cookies(&target_db_path, &cookies_to_copy)
+      } else {
+        results.push(CookieCopyResult {
+          target_profile_id: target_id.clone(),
+          cookies_copied: 0,
+          cookies_replaced: 0,
+          errors: vec![format!("Unsupported browser: {}", target.browser)],
+        });
+        continue;
       };
 
       match write_result {
@@ -1049,10 +1063,12 @@ impl CookieManager {
     // Profile may have never been launched yet — create an empty DB on demand.
     let db_path = Self::ensure_cookie_db_path(profile, &profiles_dir)?;
 
-    let write_result = match profile.browser.as_str() {
-      "camoufox" => Self::write_firefox_cookies(&db_path, &cookies),
-      "wayfern" => Self::write_chrome_cookies(&db_path, &cookies),
-      _ => return Err(format!("Unsupported browser type: {}", profile.browser)),
+    let write_result = if profile.browser == "camoufox" {
+      Self::write_firefox_cookies(&db_path, &cookies)
+    } else if crate::browser::is_chromium_browser_name(&profile.browser) {
+      Self::write_chrome_cookies(&db_path, &cookies)
+    } else {
+      return Err(format!("Unsupported browser type: {}", profile.browser));
     };
 
     match write_result {
@@ -1519,19 +1535,19 @@ mod tests {
     let _ = std::fs::remove_file(&tmp);
   }
 
-  /// Wayfern → Camoufox: write cookies to a Chrome DB, read them back, and
+  /// Chromium → Camoufox: write cookies to a Chrome DB, read them back, and
   /// verify they land in a Firefox DB with values intact, correct schemeMap,
   /// and non-expired timestamps. This is the path exercised by the
   /// "copy cookies between profiles of different browser types" feature.
   #[test]
-  fn test_wayfern_cookies_transfer_to_camoufox() {
+  fn test_chromium_cookies_transfer_to_camoufox() {
     let chrome_db =
       std::env::temp_dir().join(format!("donut_xbrowser_chrome_{}.db", uuid::Uuid::new_v4()));
     let ff_db = std::env::temp_dir().join(format!("donut_xbrowser_ff_{}.db", uuid::Uuid::new_v4()));
     create_chrome_cookies_db(&chrome_db);
     create_firefox_cookies_db(&ff_db);
 
-    // Simulate cookies in a Wayfern profile: a persistent cookie and a
+    // Simulate cookies in a Chromium profile: a persistent cookie and a
     // session cookie, both from a real-world HTTPS site.
     let source_cookies = vec![
       UnifiedCookie {
@@ -1561,7 +1577,7 @@ mod tests {
     ];
     CookieManager::write_chrome_cookies(&chrome_db, &source_cookies).unwrap();
 
-    // Read back from the Chrome DB (as if reading from the Wayfern profile).
+    // Read back from the Chrome DB (as if reading from the Chromium profile).
     let from_chrome = CookieManager::read_chrome_cookies(&chrome_db, None).unwrap();
     assert_eq!(from_chrome.len(), 2);
     let c_user_src = from_chrome.iter().find(|c| c.name == "c_user").unwrap();
@@ -1624,11 +1640,11 @@ mod tests {
     let _ = std::fs::remove_file(&ff_db);
   }
 
-  /// Camoufox → Wayfern: the reverse direction. Ensures the Chrome writer
+  /// Camoufox → Chromium: the reverse direction. Ensures the Chrome writer
   /// still produces plaintext values / empty encrypted_value when fed cookies
   /// that originated in Firefox.
   #[test]
-  fn test_camoufox_cookies_transfer_to_wayfern() {
+  fn test_camoufox_cookies_transfer_to_chromium() {
     let ff_db =
       std::env::temp_dir().join(format!("donut_xbrowser_rev_ff_{}.db", uuid::Uuid::new_v4()));
     let chrome_db = std::env::temp_dir().join(format!(
@@ -1684,7 +1700,7 @@ mod tests {
 
   /// Regression: decrypting a real v10-encrypted Chromium cookie with the
   /// correct PBKDF2 iterations and the `SHA-256(host_key)` integrity-prefix
-  /// strip. Captured from a real Wayfern profile:
+  /// strip. Captured from a real Chromium-compatible profile:
   ///   host_key = ".github.com"
   ///   name     = "_octo"
   ///   password = "OSfgzI5GUqy/pK4ANrYugw=="   (contents of os_crypt_key)
@@ -1758,7 +1774,30 @@ mod tests {
     let _ = std::fs::remove_dir_all(&profile_dir);
   }
 
-  /// Regression: a brand-new Wayfern profile has no `Default/Cookies` file
+  #[test]
+  #[cfg(target_os = "macos")]
+  fn test_mock_keychain_fallback_decrypts_cookie() {
+    let profile_dir =
+      std::env::temp_dir().join(format!("donut_mock_keychain_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let key = chrome_decrypt::get_encryption_key(&profile_dir)
+      .expect("mock keychain fallback should return a key");
+
+    let encrypted_hex = "7631308a1fe243a02c094d82a292236a6b5db26ea424b8680037a64a4dad84cbfb565c576e5cff2819b2129d1c3bad244ab568";
+    let encrypted: Vec<u8> = (0..encrypted_hex.len())
+      .step_by(2)
+      .map(|i| u8::from_str_radix(&encrypted_hex[i..i + 2], 16).unwrap())
+      .collect();
+
+    let decrypted = chrome_decrypt::decrypt(&encrypted, "127.0.0.1", &key)
+      .expect("mock keychain decryption must succeed");
+    assert_eq!(decrypted, "dark");
+
+    let _ = std::fs::remove_dir_all(&profile_dir);
+  }
+
+  /// Regression: a brand-new Chromium profile has no `Default/Cookies` file
   /// yet (Chromium only writes it on first launch). Copying/importing into
   /// such a profile must create the file on demand.
   #[test]

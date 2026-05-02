@@ -1,0 +1,11 @@
+{
+  "version": "142.0.7444.175",
+  "downloads": {
+    "linux-x64": "https://github.com/adryfish/fingerprint-chromium/releases/download/142.0.7444.175/ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz",
+    "linux-arm64": null,
+    "macos-x64": "https://github.com/adryfish/fingerprint-chromium/releases/download/142.0.7444.175/ungoogled-chromium_142.0.7444.175-1.1_macos.dmg",
+    "macos-arm64": "https://github.com/adryfish/fingerprint-chromium/releases/download/142.0.7444.175/ungoogled-chromium_142.0.7444.175-1.1_macos.dmg",
+    "windows-x64": "https://github.com/adryfish/fingerprint-chromium/releases/download/142.0.7444.175/ungoogled-chromium_142.0.7444.175-1.1_windows_x64.zip",
+    "windows-arm64": null
+  }
+}

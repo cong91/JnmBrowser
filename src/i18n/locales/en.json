@@ -156,14 +156,14 @@
       "passwordSaved": "Encryption password set",
       "passwordMismatch": "Passwords do not match",
       "passwordTooShort": "Password must be at least 8 characters",
-      "requiresProOrOwner": "Profile encryption is available for Pro users and team owners."
+      "requiresProOrOwner": "Profile encryption can be configured here."
     },
     "commercial": {
-      "title": "Commercial License",
-      "trialActive": "Trial: {{days}} days, {{hours}} hours remaining",
-      "trialActiveDescription": "Commercial use is free during the trial period",
-      "trialExpired": "Trial expired",
-      "trialExpiredDescription": "Personal use remains free. Commercial use requires a license."
+      "title": "Usage",
+      "trialActive": "All features are available",
+      "trialActiveDescription": "Personal and commercial use are both available.",
+      "trialExpired": "All features are available",
+      "trialExpiredDescription": "Personal and commercial use are both available."
     },
     "advanced": {
       "title": "Advanced",
@@ -229,9 +229,9 @@
       "stopLeader": "Stop this profile and all its followers",
       "stopFollower": "Following actions of {{leaderName}}",
       "desyncedTooltip": "Synchronization failed at {{url}}",
-      "wayfernOnly": "Only Wayfern profiles can be synchronized",
+      "wayfernOnly": "Only Chromium profiles can be synchronized",
       "selectFollowers": "Select Follower Profiles",
-      "selectFollowersDesc": "Choose profiles that will mirror the actions of the leader profile. Only stopped Wayfern profiles can be selected.",
+      "selectFollowersDesc": "Choose profiles that will mirror the actions of the leader profile. Only stopped Chromium profiles can be selected.",
       "leader": "Leader",
       "follower": "Follower",
       "startSession": "Start Sync Session",
@@ -273,7 +273,7 @@
     "antiDetect": {
       "title": "Anti-Detect Browser",
       "description": "Choose a browser with anti-detection capabilities",
-      "chromium": "Wayfern",
+      "chromium": "Chromium",
       "firefox": "Camoufox",
       "badge": "Anti-Detect Browser"
     },
@@ -315,7 +315,7 @@
       "preparingDownload": "Preparing download..."
     },
     "chromiumLabel": "Chromium",
-    "chromiumSubtitle": "Powered by Wayfern",
+    "chromiumSubtitle": "Powered by Chromium",
     "firefoxLabel": "Firefox",
     "firefoxSubtitle": "Powered by Camoufox",
     "camoufoxWarning": "Firefox (Camoufox) is maintained by a third-party organization. For production use, please use Chromium.",
@@ -626,6 +626,11 @@
       "removeFromClaudeCode": "Remove from Claude Code",
       "addedToClaudeCode": "Added to Claude Code",
       "removedFromClaudeCode": "Removed from Claude Code",
+      "codexTitle": "Codex",
+      "addToCodex": "Add to Codex",
+      "removeFromCodex": "Remove from Codex",
+      "addedToCodex": "Added to Codex",
+      "removedFromCodex": "Removed from Codex",
       "config": "MCP Configuration",
       "copyConfig": "Copy Configuration"
     },
@@ -649,7 +654,7 @@
     "tokenCopied": "Token copied",
     "mcpEnableLabel": "Enable MCP Server (Model Context Protocol)",
     "mcpEnableDescription": "Allow AI assistants like Claude Desktop to control browsers.",
-    "mcpAcceptTermsFirst": "(Accept Wayfern terms in Settings first)",
+    "mcpAcceptTermsFirst": "(Accept Chromium terms in Settings first)",
     "mcpStarted": "MCP server started on port {{port}}",
     "mcpStopped": "MCP server stopped",
     "mcpToggleFailed": "Failed to toggle MCP server",
@@ -702,8 +707,8 @@
         "webgl": "Block WebGL"
       }
     },
-    "wayfern": {
-      "title": "Wayfern Configuration",
+    "chromium": {
+      "title": "Chromium Configuration",
       "fingerprint": {
         "title": "Fingerprint",
         "randomize": "Randomize on Launch",
@@ -756,7 +761,7 @@
       "sourcePlaceholder": "Select a profile to copy cookies from",
       "running": "(running)",
       "targetProfiles": "Target Profiles ({{count}})",
-      "noOtherTargets": "No other Wayfern/Camoufox profiles selected",
+      "noOtherTargets": "No other Chromium/Camoufox profiles selected",
       "selectSourceFirst": "Select a source profile first",
       "selectionStatus": "({{selected}} of {{total}} selected)",
       "searchPlaceholder": "Search domains or cookies...",
@@ -804,7 +809,7 @@
       "preview": "{{count}} cookies found",
       "success": "Successfully imported {{imported}} cookies ({{replaced}} replaced)",
       "error": "Failed to import cookies",
-      "proFeature": "Cookie import is a Pro feature"
+      "proFeature": "Cookie import is available"
     },
     "export": {
       "title": "Export Cookies",
@@ -881,7 +886,7 @@
     "unknownError": "An unknown error occurred. Please try again.",
     "noProfilesForUrl": "No profiles available. Please create a profile first before opening URLs.",
     "updateCamoufoxConfigFailed": "Failed to update camoufox config: {{error}}",
-    "updateWayfernConfigFailed": "Failed to update wayfern config: {{error}}",
+    "updateChromiumConfigFailed": "Failed to update chromium config: {{error}}",
     "createProfileFailed": "Failed to create profile: {{error}}",
     "launchBrowserFailed": "Failed to launch browser: {{error}}",
     "cannotDeleteRunningProfile": "Cannot delete profile while browser is running. Please stop the browser first.",
@@ -889,7 +894,7 @@
     "renameProfileFailed": "Failed to rename profile: {{error}}",
     "killBrowserFailed": "Failed to kill browser: {{error}}",
     "deleteSelectedProfilesFailed": "Failed to delete selected profiles: {{error}}",
-    "cookieCopyUnsupportedBrowser": "Cookie copy only works with Wayfern and Camoufox profiles",
+    "cookieCopyUnsupportedBrowser": "Cookie copy only works with Chromium and Camoufox profiles",
     "updateSyncSettingsFailed": "Failed to update sync settings",
     "cloneProfileFailed": "Failed to clone profile: {{error}}",
     "loadSupportedBrowsersFailed": "Failed to load supported browsers",
@@ -906,7 +911,7 @@
   },
   "browser": {
     "camoufox": "Camoufox",
-    "wayfern": "Wayfern"
+    "chromium": "Chromium"
   },
   "fingerprint": {
     "crossOsWarning": "Spoofing fingerprint for a different operating system is less reliable because it is impossible to perfectly mimic all underlying components. Use with caution.",
@@ -1006,7 +1011,7 @@
     "productSub": "Product Sub",
     "brand": "Brand",
     "brandVersion": "Brand Version",
-    "proFeature": "This is a Pro feature",
+    "proFeature": "Advanced fingerprint settings are available",
     "generateFingerprint": "Generate Fingerprint",
     "refreshFingerprint": "Refresh Fingerprint",
     "canvasNoiseSeedPlaceholder": "Enter a seed string for canvas fingerprint",
@@ -1102,7 +1107,7 @@
     "extensionsTab": "Extensions",
     "groupsTab": "Groups",
     "managedNotice": "Extensions managed here will replace any manually installed extensions in profiles when launched.",
-    "proRequired": "Extension management is a Pro feature",
+    "proRequired": "Extension management is available",
     "empty": "No extensions uploaded yet.",
     "noGroups": "No extension groups created yet.",
     "createGroup": "Create Group",
@@ -1156,12 +1161,12 @@
     "assignGroupFailed": "Failed to assign extension group"
   },
   "pro": {
-    "badge": "PRO",
-    "fingerprintLocked": "Fingerprint editing is a Pro feature",
-    "cookieCopyLocked": "Cookie copying is a Pro feature",
-    "cookieImportLocked": "Cookie import is a Pro feature",
-    "cookieExportLocked": "Cookie export is a Pro feature",
-    "cookieManagementLocked": "Cookie management is a Pro feature"
+    "badge": "OPEN",
+    "fingerprintLocked": "Fingerprint editing is available",
+    "cookieCopyLocked": "Cookie copying is available",
+    "cookieImportLocked": "Cookie import is available",
+    "cookieExportLocked": "Cookie export is available",
+    "cookieManagementLocked": "Cookie management is available"
   },
   "dnsBlocklist": {
     "title": "DNS Blocklist",
@@ -1421,8 +1426,8 @@
     "tryAgain": "Please try again"
   },
   "wayfernTerms": {
-    "title": "Wayfern Terms and Conditions",
-    "description": "Before using JnmBrowser, you must read and agree to Wayfern's Terms and Conditions.",
+    "title": "Chromium Terms and Conditions",
+    "description": "Before using JnmBrowser, you must read and agree to Chromium's Terms and Conditions.",
     "reviewLabel": "Please review the Terms and Conditions at:",
     "agreeNotice": "By clicking \"I Accept\", you agree to be bound by these terms.",
     "acceptButton": "I Accept",
@@ -1431,10 +1436,10 @@
     "tryAgain": "Please try again"
   },
   "commercialTrial": {
-    "title": "Commercial Trial Expired",
-    "description": "Your 2-week commercial trial period has ended.",
-    "body": "If you are using JnmBrowser for business purposes, you need to purchase a commercial license to continue. You can still use it for personal use for free.",
-    "understandButton": "I Understand",
+    "title": "Usage Information",
+    "description": "All features are available.",
+    "body": "JnmBrowser is available for both personal and commercial use.",
+    "understandButton": "OK",
     "failed": "Failed to save acknowledgment",
     "tryAgain": "Please try again"
   },
@@ -1595,5 +1600,10 @@
       "upToDateDescription": "All browser versions are up to date",
       "updateAllFailed": "Failed to update browser versions"
     }
+  },
+  "browserSupportWarning": {
+    "title": "Browser support ending soon",
+    "description": "Support for the following profiles will be removed on March 15, 2026: {{names}}. Please migrate to Chromium or Camoufox profiles.",
+    "learnMore": "Learn more"
   }
 }

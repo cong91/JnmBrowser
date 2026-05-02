@@ -828,10 +828,12 @@ impl ExtensionManager {
     browser: &str,
   ) -> Result<(), Box<dyn std::error::Error>> {
     let group = self.get_group(group_id)?;
-    let browser_type = match browser {
-      "camoufox" => "firefox",
-      "wayfern" => "chromium",
-      _ => return Err(format!("Extensions are not supported for browser '{browser}'").into()),
+    let browser_type = if browser == "camoufox" {
+      "firefox"
+    } else if crate::browser::is_chromium_browser_name(browser) {
+      "chromium"
+    } else {
+      return Err(format!("Extensions are not supported for browser '{browser}'").into());
     };
 
     for ext_id in &group.extension_ids {
@@ -870,10 +872,12 @@ impl ExtensionManager {
       return Ok(Vec::new());
     }
 
-    let browser_type = match profile.browser.as_str() {
-      "camoufox" => "firefox",
-      "wayfern" => "chromium",
-      _ => return Ok(Vec::new()),
+    let browser_type = if profile.browser == "camoufox" {
+      "firefox"
+    } else if crate::browser::is_chromium_browser_name(&profile.browser) {
+      "chromium"
+    } else {
+      return Ok(Vec::new());
     };
 
     let mut extension_paths = Vec::new();
@@ -1386,9 +1390,9 @@ mod tests {
       .validate_group_compatibility(&group.id, "camoufox")
       .is_ok());
 
-    // Incompatible with wayfern (chromium-based)
+    // Incompatible with Chromium-based profiles
     assert!(mgr
-      .validate_group_compatibility(&group.id, "wayfern")
+      .validate_group_compatibility(&group.id, "chromium")
       .is_err());
   }
 

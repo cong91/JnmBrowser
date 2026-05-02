@@ -695,41 +695,8 @@ export class SyncService implements OnModuleInit {
    * Check if the user has reached their profile limit.
    * Counts objects in the profiles/ prefix.
    */
-  private async checkProfileLimit(ctx: UserContext): Promise<void> {
-    if (ctx.profileLimit <= 0) return; // 0 = unlimited
-
-    let count = 0;
-
-    const userResult = await this.s3Client.send(
-      new ListObjectsV2Command({
-        Bucket: this.bucket,
-        Prefix: `${ctx.prefix}profiles/`,
-        Delimiter: "/",
-      }),
-    );
-    count += userResult.CommonPrefixes?.length || 0;
-
-    if (ctx.teamPrefix && ctx.teamProfileLimit && ctx.teamProfileLimit > 0) {
-      const teamResult = await this.s3Client.send(
-        new ListObjectsV2Command({
-          Bucket: this.bucket,
-          Prefix: `${ctx.teamPrefix}profiles/`,
-          Delimiter: "/",
-        }),
-      );
-      const teamCount = teamResult.CommonPrefixes?.length || 0;
-      if (teamCount >= ctx.teamProfileLimit) {
-        throw new ForbiddenException(
-          `Team profile limit reached (${ctx.teamProfileLimit}). Ask the team owner to upgrade.`,
-        );
-      }
-    }
-
-    if (count >= ctx.profileLimit) {
-      throw new ForbiddenException(
-        `Profile limit reached (${ctx.profileLimit}). Upgrade your plan for more profiles.`,
-      );
-    }
+  private async checkProfileLimit(_ctx: UserContext): Promise<void> {
+    return;
   }
 
   /**

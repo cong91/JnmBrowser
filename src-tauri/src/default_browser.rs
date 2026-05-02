@@ -381,7 +381,7 @@ mod windows {
 mod linux {
   use std::process::Command;
 
-  const APP_DESKTOP_NAME: &str = "donutbrowser.desktop";
+  const APP_DESKTOP_NAME: &str = "JnmBrowser.desktop";
 
   pub fn is_default_browser() -> Result<bool, String> {
     // Check if xdg-mime is available

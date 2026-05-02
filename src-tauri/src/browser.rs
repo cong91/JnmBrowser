@@ -14,24 +14,65 @@ pub struct ProxySettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BrowserType {
   Camoufox,
-  Wayfern,
+  Chromium,
 }
 
 impl BrowserType {
   pub fn as_str(&self) -> &'static str {
     match self {
       BrowserType::Camoufox => "camoufox",
-      BrowserType::Wayfern => "wayfern",
+      BrowserType::Chromium => "chromium",
     }
   }
 
   pub fn from_str(s: &str) -> Result<Self, String> {
     match s {
       "camoufox" => Ok(BrowserType::Camoufox),
-      "wayfern" => Ok(BrowserType::Wayfern),
+      "chromium" => Ok(BrowserType::Chromium),
       _ => Err(format!("Unknown browser type: {s}")),
     }
   }
+}
+
+pub fn normalize_browser_name(name: &str) -> &str {
+  name
+}
+
+pub fn is_chromium_browser_name(name: &str) -> bool {
+  normalize_browser_name(name) == "chromium"
+}
+
+pub fn canonical_browser_name(name: &str) -> &str {
+  if is_chromium_browser_name(name) {
+    "chromium"
+  } else {
+    name
+  }
+}
+
+pub fn browser_storage_dir_name(name: &str) -> &str {
+  if is_chromium_browser_name(name) {
+    "fingerprint-chromium"
+  } else {
+    normalize_browser_name(name)
+  }
+}
+
+pub fn chromium_legacy_runtime_names() -> &'static [&'static str] {
+  &[]
+}
+
+pub fn chromium_process_name_looks_like(name: &str) -> bool {
+  let name = name.to_lowercase();
+  name.contains("chromium")
+    || name.contains("chrome")
+    || chromium_legacy_runtime_names()
+      .iter()
+      .any(|legacy_name| name.contains(legacy_name))
+}
+
+pub fn use_fingerprint_chromium_runtime() -> bool {
+  true
 }
 
 #[allow(dead_code)]
@@ -183,15 +224,15 @@ mod macos {
     Ok(executable_path)
   }
 
-  pub fn get_wayfern_executable_path(
+  pub fn get_chromium_executable_path(
     install_dir: &Path,
   ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    // Wayfern is Chromium-based, look for Chromium.app
+    // Chromium-compatible runtime, look for Chromium.app
     // Find the .app directory
     let app_path = std::fs::read_dir(install_dir)?
       .filter_map(Result::ok)
       .find(|entry| entry.path().extension().is_some_and(|ext| ext == "app"))
-      .ok_or("Wayfern app not found")?;
+      .ok_or("Chromium app not found")?;
 
     // Construct the browser executable path
     let mut executable_dir = app_path.path();
@@ -204,15 +245,15 @@ mod macos {
       .find(|entry| {
         let binding = entry.file_name();
         let name = binding.to_string_lossy();
-        name.contains("Chromium") || name == "Wayfern"
+        name.contains("Chromium") || name.contains("Chrome")
       })
       .map(|entry| entry.path())
-      .ok_or("No Wayfern executable found in MacOS directory")?;
+      .ok_or("No Chromium executable found in MacOS directory")?;
 
     Ok(executable_path)
   }
 
-  pub fn is_wayfern_version_downloaded(install_dir: &Path) -> bool {
+  pub fn is_chromium_version_downloaded(install_dir: &Path) -> bool {
     // On macOS, check for .app files (Chromium.app)
     if let Ok(entries) = std::fs::read_dir(install_dir) {
       for entry in entries.flatten() {
@@ -290,14 +331,19 @@ mod linux {
     browser_type: &BrowserType,
   ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let possible_executables = match browser_type {
-      BrowserType::Wayfern => vec![
-        install_dir.join("chromium"),
-        install_dir.join("chrome"),
-        install_dir.join("wayfern"),
-        install_dir.join("wayfern").join("chromium"),
-        install_dir.join("wayfern").join("chrome"),
-        install_dir.join("chrome-linux").join("chrome"),
-      ],
+      BrowserType::Chromium => {
+        let mut candidates = vec![
+          install_dir.join("chromium"),
+          install_dir.join("chrome"),
+          install_dir.join("chrome-linux").join("chrome"),
+        ];
+        for legacy_name in chromium_legacy_runtime_names() {
+          candidates.push(install_dir.join(legacy_name));
+          candidates.push(install_dir.join(legacy_name).join("chromium"));
+          candidates.push(install_dir.join(legacy_name).join("chrome"));
+        }
+        candidates
+      }
       _ => vec![],
     };
 
@@ -345,14 +391,19 @@ mod linux {
 
   pub fn is_chromium_version_downloaded(install_dir: &Path, browser_type: &BrowserType) -> bool {
     let possible_executables = match browser_type {
-      BrowserType::Wayfern => vec![
-        install_dir.join("chromium"),
-        install_dir.join("chrome"),
-        install_dir.join("wayfern"),
-        install_dir.join("wayfern").join("chromium"),
-        install_dir.join("wayfern").join("chrome"),
-        install_dir.join("chrome-linux").join("chrome"),
-      ],
+      BrowserType::Chromium => {
+        let mut candidates = vec![
+          install_dir.join("chromium"),
+          install_dir.join("chrome"),
+          install_dir.join("chrome-linux").join("chrome"),
+        ];
+        for legacy_name in chromium_legacy_runtime_names() {
+          candidates.push(install_dir.join(legacy_name));
+          candidates.push(install_dir.join(legacy_name).join("chromium"));
+          candidates.push(install_dir.join(legacy_name).join("chrome"));
+        }
+        candidates
+      }
       _ => vec![],
     };
 
@@ -434,15 +485,20 @@ mod windows {
   ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     // On Windows, look for .exe files
     let possible_paths = match browser_type {
-      BrowserType::Wayfern => vec![
-        install_dir.join("chromium.exe"),
-        install_dir.join("chrome.exe"),
-        install_dir.join("wayfern.exe"),
-        install_dir.join("bin").join("chromium.exe"),
-        install_dir.join("wayfern").join("chromium.exe"),
-        install_dir.join("wayfern").join("chrome.exe"),
-        install_dir.join("chrome-win").join("chrome.exe"),
-      ],
+      BrowserType::Chromium => {
+        let mut candidates = vec![
+          install_dir.join("chromium.exe"),
+          install_dir.join("chrome.exe"),
+          install_dir.join("bin").join("chromium.exe"),
+          install_dir.join("chrome-win").join("chrome.exe"),
+        ];
+        for legacy_name in chromium_legacy_runtime_names() {
+          candidates.push(install_dir.join(format!("{legacy_name}.exe")));
+          candidates.push(install_dir.join(legacy_name).join("chromium.exe"));
+          candidates.push(install_dir.join(legacy_name).join("chrome.exe"));
+        }
+        candidates
+      }
       _ => vec![],
     };
 
@@ -462,14 +518,14 @@ mod windows {
             .unwrap_or_default()
             .to_string_lossy()
             .to_lowercase();
-          if name.contains("chromium") || name.contains("chrome") || name.contains("wayfern") {
+          if chromium_process_name_looks_like(&name) {
             return Ok(path);
           }
         }
       }
     }
 
-    Err("Chromium/Wayfern executable not found in Windows installation directory".into())
+    Err("Chromium executable not found in Windows installation directory".into())
   }
 
   pub fn is_firefox_version_downloaded(install_dir: &Path) -> bool {
@@ -511,15 +567,20 @@ mod windows {
   pub fn is_chromium_version_downloaded(install_dir: &Path, browser_type: &BrowserType) -> bool {
     // On Windows, check for .exe files
     let possible_executables = match browser_type {
-      BrowserType::Wayfern => vec![
-        install_dir.join("chromium.exe"),
-        install_dir.join("chrome.exe"),
-        install_dir.join("wayfern.exe"),
-        install_dir.join("bin").join("chromium.exe"),
-        install_dir.join("wayfern").join("chromium.exe"),
-        install_dir.join("wayfern").join("chrome.exe"),
-        install_dir.join("chrome-win").join("chrome.exe"),
-      ],
+      BrowserType::Chromium => {
+        let mut candidates = vec![
+          install_dir.join("chromium.exe"),
+          install_dir.join("chrome.exe"),
+          install_dir.join("bin").join("chromium.exe"),
+          install_dir.join("chrome-win").join("chrome.exe"),
+        ];
+        for legacy_name in chromium_legacy_runtime_names() {
+          candidates.push(install_dir.join(format!("{legacy_name}.exe")));
+          candidates.push(install_dir.join(legacy_name).join("chromium.exe"));
+          candidates.push(install_dir.join(legacy_name).join("chrome.exe"));
+        }
+        candidates
+      }
       _ => vec![],
     };
 
@@ -540,7 +601,7 @@ mod windows {
             .unwrap_or_default()
             .to_string_lossy()
             .to_lowercase();
-          if name.contains("chromium") || name.contains("chrome") || name.contains("wayfern") {
+          if chromium_process_name_looks_like(&name) {
             return true;
           }
         }
@@ -645,25 +706,25 @@ impl Browser for CamoufoxBrowser {
   }
 }
 
-/// Wayfern is a Chromium-based anti-detect browser with CDP-based fingerprint injection
-pub struct WayfernBrowser;
+/// Chromium is the anti-detect runtime browser with CDP-based fingerprint injection
+pub struct ChromiumBrowser;
 
-impl WayfernBrowser {
+impl ChromiumBrowser {
   pub fn new() -> Self {
     Self
   }
 }
 
-impl Browser for WayfernBrowser {
+impl Browser for ChromiumBrowser {
   fn get_executable_path(&self, install_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
-    return macos::get_wayfern_executable_path(install_dir);
+    return macos::get_chromium_executable_path(install_dir);
 
     #[cfg(target_os = "linux")]
-    return linux::get_chromium_executable_path(install_dir, &BrowserType::Wayfern);
+    return linux::get_chromium_executable_path(&install_dir, &BrowserType::Chromium);
 
     #[cfg(target_os = "windows")]
-    return windows::get_chromium_executable_path(install_dir, &BrowserType::Wayfern);
+    return windows::get_chromium_executable_path(&install_dir, &BrowserType::Chromium);
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     Err("Unsupported platform".into())
@@ -677,7 +738,7 @@ impl Browser for WayfernBrowser {
     remote_debugging_port: Option<u16>,
     headless: bool,
   ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // Wayfern uses Chromium-style arguments
+    // Chromium runtime uses Chromium-style arguments
     let mut args = vec![
       format!("--user-data-dir={}", profile_path),
       "--no-default-browser-check".to_string(),
@@ -689,10 +750,11 @@ impl Browser for WayfernBrowser {
       "--disable-session-crashed-bubble".to_string(),
       "--hide-crash-restore-bubble".to_string(),
       "--disable-infobars".to_string(),
-      // Wayfern-specific args for automation
+      // Chromium-specific args for automation
       "--disable-features=DialMediaRouteProvider".to_string(),
       "--use-mock-keychain".to_string(),
       "--password-store=basic".to_string(),
+      "--disable-non-proxied-udp".to_string(),
     ];
 
     // Add remote debugging port (required for CDP fingerprint injection)
@@ -722,16 +784,16 @@ impl Browser for WayfernBrowser {
   }
 
   fn is_version_downloaded(&self, version: &str, binaries_dir: &Path) -> bool {
-    let install_dir = binaries_dir.join("wayfern").join(version);
+    let install_dir = binaries_dir.join("fingerprint-chromium").join(version);
 
     #[cfg(target_os = "macos")]
-    return macos::is_wayfern_version_downloaded(&install_dir);
+    return macos::is_chromium_version_downloaded(&install_dir);
 
     #[cfg(target_os = "linux")]
-    return linux::is_chromium_version_downloaded(&install_dir, &BrowserType::Wayfern);
+    return linux::is_chromium_version_downloaded(&install_dir, &BrowserType::Chromium);
 
     #[cfg(target_os = "windows")]
-    return windows::is_chromium_version_downloaded(&install_dir, &BrowserType::Wayfern);
+    return windows::is_chromium_version_downloaded(&install_dir, &BrowserType::Chromium);
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     false
@@ -766,7 +828,7 @@ impl BrowserFactory {
   pub fn create_browser(&self, browser_type: BrowserType) -> Box<dyn Browser> {
     match browser_type {
       BrowserType::Camoufox => Box::new(CamoufoxBrowser::new()),
-      BrowserType::Wayfern => Box::new(WayfernBrowser::new()),
+      BrowserType::Chromium => Box::new(ChromiumBrowser::new()),
     }
   }
 }
@@ -859,7 +921,7 @@ mod tests {
   fn test_browser_type_conversions() {
     // Test as_str
     assert_eq!(BrowserType::Camoufox.as_str(), "camoufox");
-    assert_eq!(BrowserType::Wayfern.as_str(), "wayfern");
+    assert_eq!(BrowserType::Chromium.as_str(), "chromium");
 
     // Test from_str
     assert_eq!(
@@ -867,8 +929,8 @@ mod tests {
       BrowserType::Camoufox
     );
     assert_eq!(
-      BrowserType::from_str("wayfern").expect("wayfern should be valid"),
-      BrowserType::Wayfern
+      BrowserType::from_str("chromium").expect("chromium should map to chromium"),
+      BrowserType::Chromium
     );
 
     // Test invalid browser type - these should properly fail
@@ -886,9 +948,19 @@ mod tests {
       "Removed browser types should return error"
     );
     assert!(
-      BrowserType::from_str("chromium").is_err(),
-      "Removed browser types should return error"
+      BrowserType::from_str("wayfern").is_err(),
+      "Legacy Wayfern browser type should return error"
     );
+  }
+
+  #[test]
+  fn test_browser_name_helpers_keep_chromium_canonical() {
+    assert_eq!(normalize_browser_name("chromium"), "chromium");
+    assert!(is_chromium_browser_name("chromium"));
+    assert_eq!(canonical_browser_name("chromium"), "chromium");
+    assert_eq!(browser_storage_dir_name("chromium"), "fingerprint-chromium");
+    assert!(!is_chromium_browser_name("wayfern"));
+    assert_eq!(canonical_browser_name("wayfern"), "wayfern");
   }
 
   #[test]
@@ -930,27 +1002,27 @@ mod tests {
   }
 
   #[test]
-  fn test_wayfern_launch_args() {
-    let browser = WayfernBrowser::new();
+  fn test_chromium_launch_args() {
+    let browser = ChromiumBrowser::new();
     let args = browser
       .create_launch_args("/path/to/profile", None, None, None, false)
-      .expect("Failed to create launch args for Wayfern");
+      .expect("Failed to create launch args for Chromium");
 
     assert!(
       args.contains(&"--user-data-dir=/path/to/profile".to_string()),
-      "Wayfern args should contain user-data-dir"
+      "Chromium args should contain user-data-dir"
     );
     assert!(
       args.contains(&"--no-default-browser-check".to_string()),
-      "Wayfern args should contain no-default-browser-check"
+      "Chromium args should contain no-default-browser-check"
     );
     assert!(
       args.contains(&"--disable-background-mode".to_string()),
-      "Wayfern args should contain disable-background-mode"
+      "Chromium args should contain disable-background-mode"
     );
     assert!(
       args.contains(&"--disable-component-update".to_string()),
-      "Wayfern args should contain disable-component-update"
+      "Chromium args should contain disable-component-update"
     );
 
     let args_with_url = browser
@@ -961,10 +1033,10 @@ mod tests {
         None,
         false,
       )
-      .expect("Failed to create launch args for Wayfern with URL");
+      .expect("Failed to create launch args for Chromium with URL");
     assert!(
       args_with_url.contains(&"https://example.com".to_string()),
-      "Wayfern args should contain the URL"
+      "Chromium args should contain the URL"
     );
     assert_eq!(
       args_with_url.last().expect("Args should not be empty"),
@@ -974,19 +1046,19 @@ mod tests {
     // Test remote debugging
     let args_with_debug = browser
       .create_launch_args("/path/to/profile", None, None, Some(9222), false)
-      .expect("Failed to create launch args for Wayfern with remote debugging");
+      .expect("Failed to create launch args for Chromium with remote debugging");
     assert!(
       args_with_debug.contains(&"--remote-debugging-port=9222".to_string()),
-      "Wayfern args should contain remote debugging port"
+      "Chromium args should contain remote debugging port"
     );
 
     // Test headless mode
     let args_headless = browser
       .create_launch_args("/path/to/profile", None, None, None, true)
-      .expect("Failed to create launch args for Wayfern headless");
+      .expect("Failed to create launch args for Chromium headless");
     assert!(
       args_headless.contains(&"--headless=new".to_string()),
-      "Wayfern args should contain headless flag when requested"
+      "Chromium args should contain headless flag when requested"
     );
   }
 
@@ -1058,54 +1130,54 @@ mod tests {
     assert!(browser.is_version_downloaded("135.0.1", binaries_dir));
     assert!(!browser.is_version_downloaded("999.0", binaries_dir));
 
-    // Test with Wayfern browser
-    let wayfern_dir = binaries_dir.join("wayfern").join("1.0.0");
-    fs::create_dir_all(&wayfern_dir).expect("Failed to create wayfern directory");
+    // Test with fingerprint-chromium replacement browser
+    let chromium_dir = binaries_dir.join("fingerprint-chromium").join("1.0.0");
+    fs::create_dir_all(&chromium_dir).expect("Failed to create fingerprint-chromium directory");
 
     #[cfg(target_os = "macos")]
     {
-      let wayfern_app_dir = wayfern_dir.join("Chromium.app");
-      fs::create_dir_all(wayfern_app_dir.join("Contents").join("MacOS"))
+      let chromium_app_dir = chromium_dir.join("Chromium.app");
+      fs::create_dir_all(chromium_app_dir.join("Contents").join("MacOS"))
         .expect("Failed to create Chromium.app structure");
 
-      let executable_path = wayfern_app_dir
+      let executable_path = chromium_app_dir
         .join("Contents")
         .join("MacOS")
         .join("Chromium");
       fs::write(&executable_path, "mock executable")
-        .expect("Failed to write mock Wayfern executable");
+        .expect("Failed to write mock Chromium executable");
     }
 
     #[cfg(target_os = "linux")]
     {
-      let executable_path = wayfern_dir.join("chromium");
+      let executable_path = chromium_dir.join("chromium");
       fs::write(&executable_path, "mock executable")
-        .expect("Failed to write mock wayfern executable");
+        .expect("Failed to write mock chromium executable");
 
       use std::os::unix::fs::PermissionsExt;
       let mut permissions = executable_path
         .metadata()
-        .expect("Failed to get wayfern metadata")
+        .expect("Failed to get chromium metadata")
         .permissions();
       permissions.set_mode(0o755);
       fs::set_permissions(&executable_path, permissions)
-        .expect("Failed to set wayfern permissions");
+        .expect("Failed to set chromium permissions");
     }
 
     #[cfg(target_os = "windows")]
     {
-      let executable_path = wayfern_dir.join("chromium.exe");
+      let executable_path = chromium_dir.join("chromium.exe");
       fs::write(&executable_path, "mock executable").expect("Failed to write mock chromium.exe");
     }
 
-    let wayfern_browser = WayfernBrowser::new();
+    let chromium_browser = ChromiumBrowser::new();
     assert!(
-      wayfern_browser.is_version_downloaded("1.0.0", binaries_dir),
-      "Wayfern version should be detected as downloaded"
+      chromium_browser.is_version_downloaded("1.0.0", binaries_dir),
+      "Chromium version should be detected as downloaded"
     );
     assert!(
-      !wayfern_browser.is_version_downloaded("9.9.9", binaries_dir),
-      "Non-existent Wayfern version should not be detected as downloaded"
+      !chromium_browser.is_version_downloaded("9.9.9", binaries_dir),
+      "Non-existent Chromium version should not be detected as downloaded"
     );
   }
 
@@ -1167,13 +1239,13 @@ mod tests {
   }
 
   #[test]
-  fn test_wayfern_config_has_no_executable_path() {
-    // Verify WayfernConfig does not store executable_path
-    let config = crate::wayfern_manager::WayfernConfig::default();
+  fn test_chromium_config_has_no_executable_path() {
+    // Verify ChromiumConfig does not store executable_path
+    let config = crate::chromium_manager::ChromiumConfig::default();
     let json = serde_json::to_value(&config).unwrap();
     assert!(
       json.get("executable_path").is_none(),
-      "WayfernConfig should not have executable_path field"
+      "ChromiumConfig should not have executable_path field"
     );
   }
 
@@ -1195,7 +1267,7 @@ mod tests {
     let profile = BrowserProfile {
       id: uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap(),
       name: "test".to_string(),
-      browser: "wayfern".to_string(),
+      browser: "chromium".to_string(),
       version: "1.0.0".to_string(),
       proxy_id: None,
       vpn_id: None,
@@ -1204,7 +1276,7 @@ mod tests {
       last_launch: None,
       release_type: "stable".to_string(),
       camoufox_config: None,
-      wayfern_config: None,
+      chromium_config: None,
       group_id: None,
       tags: Vec::new(),
       note: None,
@@ -1220,13 +1292,31 @@ mod tests {
       dns_blocklist: None,
     };
 
-    let path = profile.get_profile_data_path(&profiles_dir);
+    let path = profile.get_profile_data_path_for_runtime(&profiles_dir, true);
     assert_eq!(
       path,
       profiles_dir
         .join("12345678-1234-1234-1234-123456789abc")
+        .join(crate::profile::types::chromium_profile_data_dir_name(true))
+    );
+    let legacy_path = profile.get_profile_data_path_for_runtime(&profiles_dir, false);
+    assert_eq!(
+      legacy_path,
+      profiles_dir
+        .join("12345678-1234-1234-1234-123456789abc")
         .join("profile")
     );
+  }
+
+  #[test]
+  fn test_use_fingerprint_chromium_runtime_always_enabled() {
+    assert!(use_fingerprint_chromium_runtime());
+  }
+
+  #[test]
+  fn test_browser_storage_dir_name_routes_chromium_to_fingerprint_runtime() {
+    assert_eq!(browser_storage_dir_name("chromium"), "fingerprint-chromium");
+    assert_eq!(browser_storage_dir_name("camoufox"), "camoufox");
   }
 }
 

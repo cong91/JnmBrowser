@@ -33,18 +33,23 @@ impl Extractor {
     dest_dir: &Path,
     exe_path: &Path,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dest_dir_string = dest_dir.to_string_lossy().to_lowercase();
     // Determine browser type from the destination directory path
-    let browser_type = if dest_dir.to_string_lossy().contains("camoufox") {
+    let browser_type = if dest_dir_string.contains("camoufox") {
       "camoufox"
-    } else if dest_dir.to_string_lossy().contains("wayfern") {
-      "wayfern"
+    } else if dest_dir_string.contains("fingerprint-chromium")
+      || crate::browser::chromium_legacy_runtime_names()
+        .iter()
+        .any(|legacy_name| dest_dir_string.contains(legacy_name))
+    {
+      "chromium"
     } else {
       return Ok(());
     };
 
-    // For Camoufox and Wayfern on Linux, we expect the executable directly under version directory
+    // For Camoufox and Chromium on Linux, we expect the executable directly under version directory
     // e.g., binaries/camoufox/<version>/camoufox, without an extra subdirectory
-    if browser_type == "camoufox" || browser_type == "wayfern" {
+    if browser_type == "camoufox" || browser_type == "chromium" {
       return Ok(());
     }
 
@@ -93,9 +98,9 @@ impl Extractor {
     Ok(())
   }
 
-  pub async fn extract_browser(
+  pub async fn extract_browser<R: tauri::Runtime>(
     &self,
-    _app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle<R>,
     browser_type: BrowserType,
     version: &str,
     archive_path: &Path,
@@ -930,13 +935,17 @@ impl Extractor {
     );
 
     // Look for .exe files, preferring main browser executables
-    let priority_exe_names = [
-      "firefox.exe",
-      "chrome.exe",
-      "chromium.exe",
-      "camoufox.exe",
-      "wayfern.exe",
+    let mut priority_exe_names = vec![
+      "firefox.exe".to_string(),
+      "chrome.exe".to_string(),
+      "chromium.exe".to_string(),
+      "camoufox.exe".to_string(),
     ];
+    priority_exe_names.extend(
+      crate::browser::chromium_legacy_runtime_names()
+        .iter()
+        .map(|legacy_name| format!("{legacy_name}.exe")),
+    );
 
     // First try priority executable names
     for exe_name in &priority_exe_names {
@@ -999,11 +1008,9 @@ impl Extractor {
 
             // Check if it's a browser executable
             if file_name.contains("firefox")
-              || file_name.contains("chrome")
-              || file_name.contains("chromium")
               || file_name.contains("browser")
               || file_name.contains("camoufox")
-              || file_name.contains("wayfern")
+              || crate::browser::chromium_process_name_looks_like(&file_name)
             {
               return Ok(path);
             }
@@ -1050,24 +1057,22 @@ impl Extractor {
     log::info!("Searching for Linux executable in: {}", dest_dir.display());
 
     // Enhanced list of common browser executable names
-    let exe_names = [
-      // Firefox variants (used by Camoufox)
-      "firefox",
-      "firefox-bin",
-      // Chrome/Chromium variants (used by Wayfern)
-      "chrome",
-      "chromium",
-      "chromium-browser",
-      "chromium-bin",
-      // Camoufox variants
-      "camoufox",
-      "camoufox-bin",
-      "camoufox-browser",
-      // Wayfern variants
-      "wayfern",
-      "wayfern-bin",
-      "wayfern-browser",
+    let mut exe_names = vec![
+      "firefox".to_string(),
+      "firefox-bin".to_string(),
+      "chrome".to_string(),
+      "chromium".to_string(),
+      "chromium-browser".to_string(),
+      "chromium-bin".to_string(),
+      "camoufox".to_string(),
+      "camoufox-bin".to_string(),
+      "camoufox-browser".to_string(),
     ];
+    for legacy_name in crate::browser::chromium_legacy_runtime_names() {
+      exe_names.push((*legacy_name).to_string());
+      exe_names.push(format!("{legacy_name}-bin"));
+      exe_names.push(format!("{legacy_name}-browser"));
+    }
 
     // First, try direct lookup in the main directory
     for exe_name in &exe_names {
@@ -1079,30 +1084,34 @@ impl Extractor {
     }
 
     // Enhanced list of common Linux subdirectories to search
-    let subdirs = [
-      "bin",
-      "usr/bin",
-      "usr/local/bin",
-      "opt",
-      "sbin",
-      "usr/sbin",
-      "firefox",
-      "chrome",
-      "chromium",
-      "camoufox",
-      "wayfern",
-      ".",
-      "./",
-      "Browser",
-      "browser",
-      "opt/camoufox",
-      "usr/lib/firefox",
-      "usr/lib/chromium",
-      "usr/lib/camoufox",
-      "usr/share/applications",
-      "usr/bin",
-      "AppRun",
+    let mut subdirs = vec![
+      "bin".to_string(),
+      "usr/bin".to_string(),
+      "usr/local/bin".to_string(),
+      "opt".to_string(),
+      "sbin".to_string(),
+      "usr/sbin".to_string(),
+      "firefox".to_string(),
+      "chrome".to_string(),
+      "chromium".to_string(),
+      "camoufox".to_string(),
+      ".".to_string(),
+      "./".to_string(),
+      "Browser".to_string(),
+      "browser".to_string(),
+      "opt/camoufox".to_string(),
+      "usr/lib/firefox".to_string(),
+      "usr/lib/chromium".to_string(),
+      "usr/lib/camoufox".to_string(),
+      "usr/share/applications".to_string(),
+      "usr/bin".to_string(),
+      "AppRun".to_string(),
     ];
+    subdirs.extend(
+      crate::browser::chromium_legacy_runtime_names()
+        .iter()
+        .map(|legacy_name| legacy_name.to_string()),
+    );
 
     // Search in subdirectories
     for subdir in &subdirs {
@@ -1189,11 +1198,10 @@ impl Extractor {
           if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
             let name_lower = file_name.to_lowercase();
             if name_lower.contains("firefox")
-              || name_lower.contains("chrome")
               || name_lower.contains("brave")
               || name_lower.contains("zen")
               || name_lower.contains("camoufox")
-              || name_lower.contains("wayfern")
+              || crate::browser::chromium_process_name_looks_like(&name_lower)
               || name_lower.ends_with(".appimage")
               || !name_lower.contains('.')
             {
@@ -1245,11 +1253,10 @@ impl Extractor {
           if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
             let name_lower = file_name.to_lowercase();
             if name_lower.contains("firefox")
-              || name_lower.contains("chrome")
               || name_lower.contains("brave")
               || name_lower.contains("zen")
               || name_lower.contains("camoufox")
-              || name_lower.contains("wayfern")
+              || crate::browser::chromium_process_name_looks_like(&name_lower)
               || file_name.ends_with(".AppImage")
             {
               log::info!(

@@ -45,12 +45,50 @@ impl BrowserVersionManager {
     &BROWSER_VERSION_SERVICE
   }
 
+  fn fingerprint_chromium_download_info_for_platform(
+    os: &str,
+    arch: &str,
+    version: &str,
+  ) -> Result<DownloadInfo, Box<dyn std::error::Error + Send + Sync>> {
+    let platform_key = format!("{os}-{arch}");
+    let (filename, is_archive) = match platform_key.as_str() {
+      "macos-arm64" | "macos-x64" => (format!("ungoogled-chromium_{version}-1.1_macos.dmg"), true),
+      "linux-x64" => (
+        format!("ungoogled-chromium-{version}-1-x86_64_linux.tar.xz"),
+        true,
+      ),
+      "windows-x64" => (
+        format!("ungoogled-chromium_{version}-1.1_windows_x64.zip"),
+        true,
+      ),
+      "linux-arm64" | "windows-arm64" => {
+        return Err(
+          format!("fingerprint-chromium manifest currently has no download for {platform_key}")
+            .into(),
+        )
+      }
+      _ => {
+        return Err(
+          format!("Unsupported platform/architecture for fingerprint-chromium: {os}/{arch}").into(),
+        )
+      }
+    };
+
+    Ok(DownloadInfo {
+      url: format!("https://raw.githubusercontent.com/JnmHub/JnmBrowser-chromium/main/{filename}"),
+      filename,
+      is_archive,
+    })
+  }
+
   /// Check if a browser is supported on the current platform and architecture
   pub fn is_browser_supported(
     &self,
     browser: &str,
   ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let (os, arch) = Self::get_platform_info();
+
+    let browser = crate::browser::canonical_browser_name(browser);
 
     match browser {
       "firefox" | "firefox-developer" => Ok(true),
@@ -74,22 +112,6 @@ impl BrowserVersionManager {
         // Camoufox supports all platforms and architectures according to the JS code
         Ok(true)
       }
-      "wayfern" => {
-        // Wayfern support depends on version.json downloads availability
-        // Currently supports macos-arm64 and linux-x64
-        let platform_key = format!("{os}-{arch}");
-        // Check dynamically, but allow the browser to appear even if platform not available yet
-        // The actual download will fail gracefully if not supported
-        Ok(matches!(
-          platform_key.as_str(),
-          "macos-arm64"
-            | "linux-x64"
-            | "macos-x64"
-            | "linux-arm64"
-            | "windows-x64"
-            | "windows-arm64"
-        ))
-      }
       _ => Err(format!("Unknown browser: {browser}").into()),
     }
   }
@@ -103,7 +125,6 @@ impl BrowserVersionManager {
       "brave",
       "chromium",
       "camoufox",
-      "wayfern",
     ];
 
     all_browsers
@@ -115,6 +136,8 @@ impl BrowserVersionManager {
 
   /// Get cached browser versions immediately (returns None if no cache exists)
   pub fn get_cached_browser_versions(&self, browser: &str) -> Option<Vec<String>> {
+    let browser = crate::browser::canonical_browser_name(browser);
+
     if browser == "brave" {
       return self
         .api_client
@@ -133,6 +156,8 @@ impl BrowserVersionManager {
     &self,
     browser: &str,
   ) -> Option<Vec<BrowserVersionInfo>> {
+    let browser = crate::browser::canonical_browser_name(browser);
+
     if browser == "brave" {
       if let Some(releases) = self.api_client.get_cached_github_releases("brave") {
         let detailed_info: Vec<BrowserVersionInfo> = releases
@@ -164,6 +189,7 @@ impl BrowserVersionManager {
 
   /// Check if cache should be updated (expired or doesn't exist)
   pub fn should_update_cache(&self, browser: &str) -> bool {
+    let browser = crate::browser::canonical_browser_name(browser);
     self.api_client.is_cache_expired(browser)
   }
 
@@ -226,6 +252,8 @@ impl BrowserVersionManager {
     browser: &str,
     no_caching: bool,
   ) -> Result<BrowserVersionsResult, Box<dyn std::error::Error + Send + Sync>> {
+    let browser = crate::browser::canonical_browser_name(browser);
+
     // Get existing cached versions to compare and merge
     let existing_versions = self
       .api_client
@@ -241,7 +269,6 @@ impl BrowserVersionManager {
       "brave" => self.fetch_brave_versions(true).await?,
       "chromium" => self.fetch_chromium_versions(true).await?,
       "camoufox" => self.fetch_camoufox_versions(true).await?,
-      "wayfern" => self.fetch_wayfern_versions(true).await?,
       _ => return Err(format!("Unsupported browser: {browser}").into()),
     };
 
@@ -294,6 +321,8 @@ impl BrowserVersionManager {
     browser: &str,
     no_caching: bool,
   ) -> Result<Vec<BrowserVersionInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    let browser = crate::browser::canonical_browser_name(browser);
+
     // For detailed versions, we'll use the merged versions from fetch_browser_versions_with_count
     // to ensure consistency with the version list
     let versions_result = self
@@ -400,27 +429,14 @@ impl BrowserVersionManager {
           })
           .collect()
       }
-      "chromium" => {
-        let releases = self.fetch_chromium_releases_detailed(true).await?;
-        merged_versions
-          .into_iter()
-          .map(|version| {
-            if let Some(release) = releases.iter().find(|r| r.version == version) {
-              BrowserVersionInfo {
-                version: release.version.clone(),
-                is_prerelease: release.is_prerelease,
-                date: release.date.clone(),
-              }
-            } else {
-              BrowserVersionInfo {
-                version: version.clone(),
-                is_prerelease: false, // Chromium usually stable releases
-                date: "".to_string(),
-              }
-            }
-          })
-          .collect()
-      }
+      "chromium" => merged_versions
+        .into_iter()
+        .map(|version| BrowserVersionInfo {
+          version: version.clone(),
+          is_prerelease: false,
+          date: "".to_string(),
+        })
+        .collect(),
       "camoufox" => {
         let releases = self.fetch_camoufox_releases_detailed(true).await?;
         merged_versions
@@ -442,17 +458,6 @@ impl BrowserVersionManager {
           })
           .collect()
       }
-      "wayfern" => {
-        // Wayfern only has one version from version.json
-        merged_versions
-          .into_iter()
-          .map(|version| BrowserVersionInfo {
-            version: version.clone(),
-            is_prerelease: false, // Wayfern releases are always stable
-            date: "".to_string(),
-          })
-          .collect()
-      }
       _ => {
         return Err(format!("Unsupported browser: {browser}").into());
       }
@@ -466,6 +471,8 @@ impl BrowserVersionManager {
     &self,
     browser: &str,
   ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let browser = crate::browser::canonical_browser_name(browser);
+
     // Get existing cached versions
     let existing_versions = self
       .api_client
@@ -510,6 +517,7 @@ impl BrowserVersionManager {
     version: &str,
   ) -> Result<DownloadInfo, Box<dyn std::error::Error + Send + Sync>> {
     let (os, arch) = Self::get_platform_info();
+    let browser = crate::browser::canonical_browser_name(browser);
 
     match browser {
       "firefox" => {
@@ -620,36 +628,7 @@ impl BrowserVersionManager {
           is_archive,
         })
       }
-      "chromium" => {
-        let platform_str = match (&os[..], &arch[..]) {
-          ("windows", "x64") => "Win_x64",
-          ("windows", "arm64") => "Win_Arm64",
-          ("linux", "x64") => "Linux_x64",
-          ("linux", "arm64") => return Err("Chromium doesn't support ARM64 on Linux".into()),
-          ("macos", "x64") => "Mac",
-          ("macos", "arm64") => "Mac_Arm",
-          _ => {
-            return Err(
-              format!("Unsupported platform/architecture for Chromium: {os}/{arch}").into(),
-            )
-          }
-        };
-
-        let (archive_name, filename) = match os.as_str() {
-          "windows" => ("chrome-win.zip", format!("chromium-{version}-win.zip")),
-          "linux" => ("chrome-linux.zip", format!("chromium-{version}-linux.zip")),
-          "macos" => ("chrome-mac.zip", format!("chromium-{version}-mac.zip")),
-          _ => return Err(format!("Unsupported platform for Chromium: {os}").into()),
-        };
-
-        Ok(DownloadInfo {
-          url: format!(
-            "https://commondatastorage.googleapis.com/chromium-browser-snapshots/{platform_str}/{version}/{archive_name}"
-          ),
-          filename,
-          is_archive: true,
-        })
-      }
+      "chromium" => Self::fingerprint_chromium_download_info_for_platform(&os, &arch, version),
       "camoufox" => {
         // Camoufox downloads from GitHub releases with pattern: camoufox-{version}-{release}-{os}.{arch}.zip
         let (os_name, arch_name) = match (&os[..], &arch[..]) {
@@ -674,31 +653,6 @@ impl BrowserVersionManager {
           ),
           filename: format!("camoufox-{version}-{os_name}.{arch_name}.zip"),
           is_archive: true,
-        })
-      }
-      "wayfern" => {
-        // Wayfern downloads from https://download.wayfern.com/
-        // File naming: wayfern-{chromium_version}-{platform}-{arch}.{ext}
-        // Platform/arch format: linux-x64, macos-arm64, etc.
-        let platform_key = format!("{os}-{arch}");
-        let (filename, is_archive) = match platform_key.as_str() {
-          "macos-arm64" | "macos-x64" => (format!("wayfern-{version}-{platform_key}.dmg"), true),
-          "linux-x64" | "linux-arm64" => (format!("wayfern-{version}-{platform_key}.tar.xz"), true),
-          "windows-x64" | "windows-arm64" => {
-            (format!("wayfern-{version}-{platform_key}.zip"), true)
-          }
-          _ => {
-            return Err(
-              format!("Unsupported platform/architecture for Wayfern: {os}/{arch}").into(),
-            )
-          }
-        };
-
-        // Note: The actual URL will be resolved dynamically from version.json in downloader.rs
-        Ok(DownloadInfo {
-          url: format!("https://download.wayfern.com/{filename}"),
-          filename,
-          is_archive,
         })
       }
       _ => Err(format!("Unsupported browser: {browser}").into()),
@@ -843,18 +797,7 @@ impl BrowserVersionManager {
     &self,
     no_caching: bool,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let releases = self.fetch_chromium_releases_detailed(no_caching).await?;
-    Ok(releases.into_iter().map(|r| r.version).collect())
-  }
-
-  async fn fetch_chromium_releases_detailed(
-    &self,
-    no_caching: bool,
-  ) -> Result<Vec<BrowserRelease>, Box<dyn std::error::Error + Send + Sync>> {
-    self
-      .api_client
-      .fetch_chromium_releases_with_caching(no_caching)
-      .await
+    self.fetch_chromium_manifest_versions(no_caching).await
   }
 
   async fn fetch_camoufox_versions(
@@ -875,19 +818,19 @@ impl BrowserVersionManager {
       .await
   }
 
-  async fn fetch_wayfern_versions(
+  async fn fetch_chromium_manifest_versions(
     &self,
     no_caching: bool,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let version_info = self
       .api_client
-      .fetch_wayfern_version_with_caching(no_caching)
+      .fetch_chromium_version_with_caching(no_caching)
       .await?;
 
     // Check if current platform has a download available
     if self
       .api_client
-      .has_wayfern_compatible_download(&version_info)
+      .has_chromium_compatible_download(&version_info)
     {
       Ok(vec![version_info.version])
     } else {
@@ -1042,25 +985,42 @@ mod tests {
       assert!(!zen_info.is_archive);
     }
 
-    // Test Chromium
-    let chromium_info = service.get_download_info("chromium", "1465660").unwrap();
+    // Test Chromium fingerprint runtime
+    let chromium_info = service
+      .get_download_info("chromium", "142.0.7444.175")
+      .unwrap();
 
     #[cfg(target_os = "macos")]
     {
-      assert_eq!(chromium_info.filename, "chromium-1465660-mac.zip");
-      assert!(chromium_info.url.contains("chrome-mac.zip"));
+      assert_eq!(
+        chromium_info.filename,
+        "ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"
+      );
+      assert!(chromium_info
+        .url
+        .contains("ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"));
     }
 
     #[cfg(target_os = "linux")]
     {
-      assert_eq!(chromium_info.filename, "chromium-1465660-linux.zip");
-      assert!(chromium_info.url.contains("chrome-linux.zip"));
+      assert_eq!(
+        chromium_info.filename,
+        "ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz"
+      );
+      assert!(chromium_info
+        .url
+        .contains("ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz"));
     }
 
     #[cfg(target_os = "windows")]
     {
-      assert_eq!(chromium_info.filename, "chromium-1465660-win.zip");
-      assert!(chromium_info.url.contains("chrome-win.zip"));
+      assert_eq!(
+        chromium_info.filename,
+        "ungoogled-chromium_142.0.7444.175-1.1_windows_x64.zip"
+      );
+      assert!(chromium_info
+        .url
+        .contains("ungoogled-chromium_142.0.7444.175-1.1_windows_x64.zip"));
     }
 
     assert!(chromium_info.is_archive);
@@ -1097,6 +1057,72 @@ mod tests {
     assert!(unsupported_result.is_err());
 
     log::info!("Download info test passed for all browsers");
+  }
+
+  #[test]
+  fn test_fingerprint_chromium_download_info_platform_matrix() {
+    let macos_x64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
+      "macos",
+      "x64",
+      "142.0.7444.175",
+    )
+    .unwrap();
+    assert_eq!(
+      macos_x64.filename,
+      "ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"
+    );
+    assert!(macos_x64.is_archive);
+
+    let macos_arm64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
+      "macos",
+      "arm64",
+      "142.0.7444.175",
+    )
+    .unwrap();
+    assert_eq!(
+      macos_arm64.filename,
+      "ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"
+    );
+
+    let linux_x64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
+      "linux",
+      "x64",
+      "142.0.7444.175",
+    )
+    .unwrap();
+    assert_eq!(
+      linux_x64.filename,
+      "ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz"
+    );
+    assert!(linux_x64.url.ends_with(".tar.xz"));
+
+    let windows_x64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
+      "windows",
+      "x64",
+      "142.0.7444.175",
+    )
+    .unwrap();
+    assert_eq!(
+      windows_x64.filename,
+      "ungoogled-chromium_142.0.7444.175-1.1_windows_x64.zip"
+    );
+    assert!(windows_x64.url.ends_with(".zip"));
+
+    let linux_arm64_err = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
+      "linux",
+      "arm64",
+      "142.0.7444.175",
+    )
+    .expect_err("linux-arm64 should currently be unsupported by manifest");
+    assert!(linux_arm64_err.to_string().contains("linux-arm64"));
+
+    let windows_arm64_err = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
+      "windows",
+      "arm64",
+      "142.0.7444.175",
+    )
+    .expect_err("windows-arm64 should currently be unsupported by manifest");
+    assert!(windows_arm64_err.to_string().contains("windows-arm64"));
   }
 }
 

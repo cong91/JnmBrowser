@@ -126,9 +126,9 @@ impl GeoIPDownloader {
     None
   }
 
-  pub async fn download_geoip_database(
+  pub async fn download_geoip_database<R: tauri::Runtime>(
     &self,
-    _app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle<R>,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if DOWNLOAD_IN_PROGRESS
       .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -142,9 +142,9 @@ impl GeoIPDownloader {
     result
   }
 
-  async fn download_geoip_database_inner(
+  async fn download_geoip_database_inner<R: tauri::Runtime>(
     &self,
-    _app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle<R>,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Emit initial progress
     let _ = events::emit(
@@ -182,14 +182,21 @@ impl GeoIPDownloader {
     let _ = fs::remove_file(&temp_path).await;
 
     // Download the file
-    let response = self.client.get(&download_url).send().await?;
+    let response = self
+      .client
+      .get(&download_url)
+      .header("User-Agent", "Mozilla/5.0 (compatible; JnmBrowser)")
+      .send()
+      .await?;
 
     if !response.status().is_success() {
+      let status = response.status();
+      let body = response.text().await.unwrap_or_default();
+      let snippet: String = body.chars().take(300).collect();
       return Err(
         format!(
-          "Failed to download GeoIP database: HTTP {}",
-          response.status()
-        )
+        "Failed to download GeoIP database from {download_url}: HTTP {status}; response: {snippet}"
+      )
         .into(),
       );
     }
@@ -284,7 +291,7 @@ impl GeoIPDownloader {
     let response = self
       .client
       .get(&url)
-      .header("User-Agent", "Mozilla/5.0 (compatible; donutbrowser)")
+      .header("User-Agent", "Mozilla/5.0 (compatible; JnmBrowser)")
       .send()
       .await?;
 
@@ -371,7 +378,7 @@ mod tests {
     let response = downloader
       .client
       .get(&url)
-      .header("User-Agent", "Mozilla/5.0 (compatible; donutbrowser)")
+      .header("User-Agent", "Mozilla/5.0 (compatible; JnmBrowser)")
       .send()
       .await
       .expect("Request should succeed");

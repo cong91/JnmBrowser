@@ -156,14 +156,14 @@
       "passwordSaved": "Mot de passe de chiffrement défini",
       "passwordMismatch": "Les mots de passe ne correspondent pas",
       "passwordTooShort": "Le mot de passe doit contenir au moins 8 caractères",
-      "requiresProOrOwner": "Le chiffrement des profils est disponible pour les utilisateurs Pro et les propriétaires d'équipe."
+      "requiresProOrOwner": "Le chiffrement des profils peut être configuré ici."
     },
     "commercial": {
-      "title": "Licence commerciale",
-      "trialActive": "Essai: {{days}} jours, {{hours}} heures restantes",
-      "trialActiveDescription": "L'utilisation commerciale est gratuite pendant la période d'essai",
-      "trialExpired": "Essai expiré",
-      "trialExpiredDescription": "L'utilisation personnelle reste gratuite. L'utilisation commerciale nécessite une licence."
+      "title": "Utilisation",
+      "trialActive": "Toutes les fonctionnalités sont disponibles",
+      "trialActiveDescription": "L'utilisation personnelle et commerciale est disponible.",
+      "trialExpired": "Toutes les fonctionnalités sont disponibles",
+      "trialExpiredDescription": "L'utilisation personnelle et commerciale est disponible."
     },
     "advanced": {
       "title": "Avancé",
@@ -229,9 +229,9 @@
       "stopLeader": "Arrêter ce profil et tous ses suiveurs",
       "stopFollower": "Suit les actions de {{leaderName}}",
       "desyncedTooltip": "La synchronisation a échoué à {{url}}",
-      "wayfernOnly": "Seuls les profils Wayfern peuvent être synchronisés",
+      "wayfernOnly": "Seuls les profils Chromium peuvent être synchronisés",
       "selectFollowers": "Sélectionner les profils suiveurs",
-      "selectFollowersDesc": "Choisissez les profils qui reproduiront les actions du profil leader. Seuls les profils Wayfern arrêtés peuvent être sélectionnés.",
+      "selectFollowersDesc": "Choisissez les profils qui reproduiront les actions du profil leader. Seuls les profils Chromium arrêtés peuvent être sélectionnés.",
       "leader": "Leader",
       "follower": "Suiveur",
       "startSession": "Démarrer la session de synchronisation",
@@ -273,7 +273,7 @@
     "antiDetect": {
       "title": "Navigateur anti-détection",
       "description": "Choisissez un navigateur avec des capacités anti-détection",
-      "chromium": "Wayfern",
+      "chromium": "Chromium",
       "firefox": "Camoufox",
       "badge": "Navigateur anti-détection"
     },
@@ -315,7 +315,7 @@
       "preparingDownload": "Préparation du téléchargement..."
     },
     "chromiumLabel": "Chromium",
-    "chromiumSubtitle": "Propulsé par Wayfern",
+    "chromiumSubtitle": "Propulsé par Chromium",
     "firefoxLabel": "Firefox",
     "firefoxSubtitle": "Propulsé par Camoufox",
     "camoufoxWarning": "Firefox (Camoufox) est maintenu par une organisation tierce. Pour une utilisation en production, veuillez utiliser Chromium.",
@@ -626,6 +626,11 @@
       "removeFromClaudeCode": "Supprimer de Claude Code",
       "addedToClaudeCode": "Ajouté à Claude Code",
       "removedFromClaudeCode": "Supprimé de Claude Code",
+      "codexTitle": "Codex",
+      "addToCodex": "Ajouter à Codex",
+      "removeFromCodex": "Supprimer de Codex",
+      "addedToCodex": "Ajouté à Codex",
+      "removedFromCodex": "Supprimé de Codex",
       "config": "Configuration MCP",
       "copyConfig": "Copier la configuration"
     },
@@ -649,7 +654,7 @@
     "tokenCopied": "Jeton copié",
     "mcpEnableLabel": "Activer le serveur MCP (Model Context Protocol)",
     "mcpEnableDescription": "Permet aux assistants IA comme Claude Desktop de contrôler les navigateurs.",
-    "mcpAcceptTermsFirst": "(Acceptez d'abord les conditions Wayfern dans les Paramètres)",
+    "mcpAcceptTermsFirst": "(Acceptez d'abord les conditions Chromium dans les Paramètres)",
     "mcpStarted": "Serveur MCP démarré sur le port {{port}}",
     "mcpStopped": "Serveur MCP arrêté",
     "mcpToggleFailed": "Échec du basculement du serveur MCP",
@@ -702,8 +707,8 @@
         "webgl": "Bloquer WebGL"
       }
     },
-    "wayfern": {
-      "title": "Configuration Wayfern",
+    "chromium": {
+      "title": "Configuration Chromium",
       "fingerprint": {
         "title": "Empreinte digitale",
         "randomize": "Randomiser au lancement",
@@ -756,7 +761,7 @@
       "sourcePlaceholder": "Sélectionnez un profil pour copier les cookies",
       "running": "(en cours)",
       "targetProfiles": "Profils cibles ({{count}})",
-      "noOtherTargets": "Aucun autre profil Wayfern/Camoufox sélectionné",
+      "noOtherTargets": "Aucun autre profil Chromium/Camoufox sélectionné",
       "selectSourceFirst": "Sélectionnez d'abord un profil source",
       "selectionStatus": "({{selected}} sur {{total}} sélectionnés)",
       "searchPlaceholder": "Rechercher des domaines ou cookies...",
@@ -804,7 +809,7 @@
       "preview": "{{count}} cookies trouvés",
       "success": "{{imported}} cookies importés avec succès ({{replaced}} remplacés)",
       "error": "Échec de l'importation des cookies",
-      "proFeature": "L'importation de cookies est une fonctionnalité Pro"
+      "proFeature": "L'importation de cookies est disponible"
     },
     "export": {
       "title": "Exporter les Cookies",
@@ -881,7 +886,7 @@
     "unknownError": "Une erreur inconnue s'est produite. Veuillez réessayer.",
     "noProfilesForUrl": "Aucun profil disponible. Veuillez créer un profil avant d’ouvrir des URL.",
     "updateCamoufoxConfigFailed": "Échec de la mise à jour de la configuration camoufox : {{error}}",
-    "updateWayfernConfigFailed": "Échec de la mise à jour de la configuration wayfern : {{error}}",
+    "updateChromiumConfigFailed": "Échec de la mise à jour de la configuration chromium : {{error}}",
     "createProfileFailed": "Échec de la création du profil : {{error}}",
     "launchBrowserFailed": "Échec du lancement du navigateur : {{error}}",
     "cannotDeleteRunningProfile": "Impossible de supprimer le profil pendant que le navigateur est en cours d’exécution. Arrêtez d’abord le navigateur.",
@@ -889,7 +894,7 @@
     "renameProfileFailed": "Échec du renommage du profil : {{error}}",
     "killBrowserFailed": "Échec de l’arrêt du navigateur : {{error}}",
     "deleteSelectedProfilesFailed": "Échec de la suppression des profils sélectionnés : {{error}}",
-    "cookieCopyUnsupportedBrowser": "La copie de cookies ne fonctionne qu’avec les profils Wayfern et Camoufox",
+    "cookieCopyUnsupportedBrowser": "La copie de cookies ne fonctionne qu’avec les profils Chromium et Camoufox",
     "updateSyncSettingsFailed": "Échec de la mise à jour des paramètres de synchronisation",
     "cloneProfileFailed": "Échec du clonage du profil : {{error}}",
     "loadSupportedBrowsersFailed": "Échec du chargement des navigateurs pris en charge",
@@ -906,7 +911,7 @@
   },
   "browser": {
     "camoufox": "Camoufox",
-    "wayfern": "Wayfern"
+    "chromium": "Chromium"
   },
   "fingerprint": {
     "crossOsWarning": "L'usurpation d'empreinte pour un système d'exploitation différent est moins fiable car il est impossible d'imiter parfaitement tous les composants sous-jacents. À utiliser avec précaution.",
@@ -1006,7 +1011,7 @@
     "productSub": "Produit Sub",
     "brand": "Marque",
     "brandVersion": "Version de la marque",
-    "proFeature": "Ceci est une fonctionnalité Pro",
+    "proFeature": "Les paramètres avancés d'empreinte sont disponibles",
     "generateFingerprint": "Générer l'empreinte",
     "refreshFingerprint": "Actualiser l'empreinte",
     "canvasNoiseSeedPlaceholder": "Entrez une graine pour l'empreinte canvas",
@@ -1102,7 +1107,7 @@
     "extensionsTab": "Extensions",
     "groupsTab": "Groupes",
     "managedNotice": "Les extensions gérées ici remplaceront toutes les extensions installées manuellement dans les profils lors du lancement.",
-    "proRequired": "La gestion des extensions est une fonctionnalité Pro",
+    "proRequired": "La gestion des extensions est disponible",
     "empty": "Aucune extension téléchargée pour l'instant.",
     "noGroups": "Aucun groupe d'extensions créé pour l'instant.",
     "createGroup": "Créer un Groupe",
@@ -1156,12 +1161,12 @@
     "assignGroupFailed": "Échec de l'attribution du groupe d'extensions"
   },
   "pro": {
-    "badge": "PRO",
-    "fingerprintLocked": "La modification d'empreinte est une fonctionnalité Pro",
-    "cookieCopyLocked": "La copie de cookies est une fonctionnalité Pro",
-    "cookieImportLocked": "L'importation de cookies est une fonctionnalité Pro",
-    "cookieExportLocked": "L'exportation de cookies est une fonctionnalité Pro",
-    "cookieManagementLocked": "La gestion des cookies est une fonctionnalité Pro"
+    "badge": "OUVERT",
+    "fingerprintLocked": "La modification d'empreinte est disponible",
+    "cookieCopyLocked": "La copie de cookies est disponible",
+    "cookieImportLocked": "L'importation de cookies est disponible",
+    "cookieExportLocked": "L'exportation de cookies est disponible",
+    "cookieManagementLocked": "La gestion des cookies est disponible"
   },
   "dnsBlocklist": {
     "title": "Liste de blocage DNS",
@@ -1421,8 +1426,8 @@
     "tryAgain": "Veuillez réessayer"
   },
   "wayfernTerms": {
-    "title": "Conditions générales de Wayfern",
-    "description": "Avant d'utiliser JnmBrowser, vous devez lire et accepter les Conditions Générales de Wayfern.",
+    "title": "Conditions générales de Chromium",
+    "description": "Avant d'utiliser JnmBrowser, vous devez lire et accepter les Conditions Générales de Chromium.",
     "reviewLabel": "Veuillez consulter les Conditions Générales sur :",
     "agreeNotice": "En cliquant sur « J'accepte », vous acceptez ces conditions.",
     "acceptButton": "J'accepte",
@@ -1431,10 +1436,10 @@
     "tryAgain": "Veuillez réessayer"
   },
   "commercialTrial": {
-    "title": "Période d'essai commerciale expirée",
-    "description": "Votre période d'essai commercial de 2 semaines est terminée.",
-    "body": "Si vous utilisez JnmBrowser à des fins professionnelles, vous devez acheter une licence commerciale pour continuer. Vous pouvez toujours l'utiliser gratuitement à des fins personnelles.",
-    "understandButton": "J'ai compris",
+    "title": "Informations d'utilisation",
+    "description": "Toutes les fonctionnalités sont disponibles.",
+    "body": "JnmBrowser est disponible pour un usage personnel et commercial.",
+    "understandButton": "OK",
     "failed": "Échec de l'enregistrement de la confirmation",
     "tryAgain": "Veuillez réessayer"
   },
@@ -1595,5 +1600,10 @@
       "upToDateDescription": "Toutes les versions des navigateurs sont à jour",
       "updateAllFailed": "Échec de la mise à jour des versions des navigateurs"
     }
+  },
+  "browserSupportWarning": {
+    "title": "Browser support ending soon",
+    "description": "Support for the following profiles will be removed on March 15, 2026: {{names}}. Please migrate to Chromium or Camoufox profiles.",
+    "learnMore": "Learn more"
   }
 }

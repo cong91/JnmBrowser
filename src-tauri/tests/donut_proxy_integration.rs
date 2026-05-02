@@ -1401,10 +1401,10 @@ async fn test_local_proxy_with_shadowsocks_upstream(
   }
   sleep(Duration::from_millis(500)).await;
 
-  // Test: HTTP request through donut-proxy → Shadowsocks → example.com
+  // Test: HTTP request through donut-proxy → Shadowsocks → http://www.baidu.com/
   let mut stream = TcpStream::connect(("127.0.0.1", local_port)).await?;
   let request =
-    "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    "GET http://www.baidu.com/ HTTP/1.1\r\nHost: www.baidu.com\r\nConnection: close\r\n\r\n";
   stream.write_all(request.as_bytes()).await?;
 
   let mut response = vec![0u8; 16384];
@@ -1415,8 +1415,10 @@ async fn test_local_proxy_with_shadowsocks_upstream(
   let response_str = String::from_utf8_lossy(&response[..n]);
 
   assert!(
-    response_str.contains("Example Domain"),
-    "HTTP traffic through Shadowsocks should reach example.com, got: {}",
+    response_str.contains("baidu")
+      || response_str.contains("百度")
+      || response_str.contains("<!--STATUS OK-->"),
+    "HTTP traffic through Shadowsocks should reach http://www.baidu.com/, got: {}",
     &response_str[..response_str.len().min(500)]
   );
   println!("Shadowsocks upstream proxy test passed");

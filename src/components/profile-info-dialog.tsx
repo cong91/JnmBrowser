@@ -41,6 +41,7 @@ import {
   getBrowserDisplayName,
   getOSDisplayName,
   getProfileIcon,
+  isChromiumBrowser,
   isCrossOsProfile,
 } from "@/lib/browser-utils";
 import { formatRelativeTime } from "@/lib/flag-utils";
@@ -174,8 +175,8 @@ export function ProfileInfoDialog({
   if (!profile) return null;
 
   const ProfileIcon = getProfileIcon(profile);
-  const isCamoufoxOrWayfern =
-    profile.browser === "camoufox" || profile.browser === "wayfern";
+  const isCamoufoxOrChromium =
+    profile.browser === "camoufox" || isChromiumBrowser(profile.browser);
   const isDeleteDisabled = isRunning;
 
   const proxyName = profile.proxy_id
@@ -273,7 +274,7 @@ export function ProfileInfoDialog({
       },
       disabled: isDisabled,
       runningBadge: isRunning,
-      hidden: !isCamoufoxOrWayfern || !onConfigureCamoufox,
+      hidden: !isCamoufoxOrChromium || !onConfigureCamoufox,
     },
     {
       icon: <LuUsers className="w-4 h-4" />,
@@ -282,7 +283,7 @@ export function ProfileInfoDialog({
         handleAction(() => onLaunchWithSync?.(profile));
       },
       disabled: isDisabled || isRunning,
-      hidden: profile.browser !== "wayfern" || !onLaunchWithSync,
+      hidden: !isChromiumBrowser(profile.browser) || !onLaunchWithSync,
     },
     {
       icon: <LuCopy className="w-4 h-4" />,
@@ -293,7 +294,7 @@ export function ProfileInfoDialog({
       disabled: isDisabled,
       runningBadge: isRunning,
       hidden:
-        !isCamoufoxOrWayfern ||
+        !isCamoufoxOrChromium ||
         profile.ephemeral === true ||
         !onCopyCookiesToProfile,
     },
@@ -306,7 +307,7 @@ export function ProfileInfoDialog({
       disabled: isDisabled,
       runningBadge: isRunning,
       hidden:
-        !isCamoufoxOrWayfern ||
+        !isCamoufoxOrChromium ||
         profile.ephemeral === true ||
         !onOpenCookieManagement,
     },
@@ -421,14 +422,14 @@ export function ProfileInfoDialog({
                             os={
                               profile.host_os ||
                               profile.camoufox_config?.os ||
-                              profile.wayfern_config?.os ||
+                              profile.chromium_config?.os ||
                               ""
                             }
                           />
                           {getOSDisplayName(
                             profile.host_os ||
                               profile.camoufox_config?.os ||
-                              profile.wayfern_config?.os ||
+                              profile.chromium_config?.os ||
                               "",
                           )}
                         </Badge>

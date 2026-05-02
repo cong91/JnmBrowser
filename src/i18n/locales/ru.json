@@ -156,14 +156,14 @@
       "passwordSaved": "Пароль шифрования установлен",
       "passwordMismatch": "Пароли не совпадают",
       "passwordTooShort": "Пароль должен содержать не менее 8 символов",
-      "requiresProOrOwner": "Шифрование профилей доступно для пользователей Pro и владельцев команд."
+      "requiresProOrOwner": "Шифрование профилей можно настроить здесь."
     },
     "commercial": {
-      "title": "Коммерческая лицензия",
-      "trialActive": "Пробный период: осталось {{days}} дней, {{hours}} часов",
-      "trialActiveDescription": "Коммерческое использование бесплатно в течение пробного периода",
-      "trialExpired": "Пробный период истёк",
-      "trialExpiredDescription": "Личное использование остаётся бесплатным. Для коммерческого использования требуется лицензия."
+      "title": "Использование",
+      "trialActive": "Все функции доступны",
+      "trialActiveDescription": "Доступно личное и коммерческое использование.",
+      "trialExpired": "Все функции доступны",
+      "trialExpiredDescription": "Доступно личное и коммерческое использование."
     },
     "advanced": {
       "title": "Дополнительно",
@@ -229,9 +229,9 @@
       "stopLeader": "Остановить этот профиль и всех его последователей",
       "stopFollower": "Повторяет действия {{leaderName}}",
       "desyncedTooltip": "Синхронизация не удалась на {{url}}",
-      "wayfernOnly": "Синхронизировать можно только профили Wayfern",
+      "wayfernOnly": "Синхронизировать можно только профили Chromium",
       "selectFollowers": "Выберите профили-последователи",
-      "selectFollowersDesc": "Выберите профили, которые будут повторять действия профиля-лидера. Можно выбрать только остановленные профили Wayfern.",
+      "selectFollowersDesc": "Выберите профили, которые будут повторять действия профиля-лидера. Можно выбрать только остановленные профили Chromium.",
       "leader": "Лидер",
       "follower": "Последователь",
       "startSession": "Начать сессию синхронизации",
@@ -273,7 +273,7 @@
     "antiDetect": {
       "title": "Антидетект браузер",
       "description": "Выберите браузер с возможностями защиты от обнаружения",
-      "chromium": "Wayfern",
+      "chromium": "Chromium",
       "firefox": "Camoufox",
       "badge": "Антидетект браузер"
     },
@@ -315,7 +315,7 @@
       "preparingDownload": "Подготовка загрузки..."
     },
     "chromiumLabel": "Chromium",
-    "chromiumSubtitle": "На базе Wayfern",
+    "chromiumSubtitle": "На базе Chromium",
     "firefoxLabel": "Firefox",
     "firefoxSubtitle": "На базе Camoufox",
     "camoufoxWarning": "Firefox (Camoufox) поддерживается сторонней организацией. Для промышленного использования используйте Chromium.",
@@ -626,6 +626,11 @@
       "removeFromClaudeCode": "Удалить из Claude Code",
       "addedToClaudeCode": "Добавлено в Claude Code",
       "removedFromClaudeCode": "Удалено из Claude Code",
+      "codexTitle": "Codex",
+      "addToCodex": "Добавить в Codex",
+      "removeFromCodex": "Удалить из Codex",
+      "addedToCodex": "Добавлено в Codex",
+      "removedFromCodex": "Удалено из Codex",
       "config": "Конфигурация MCP",
       "copyConfig": "Копировать конфигурацию"
     },
@@ -649,7 +654,7 @@
     "tokenCopied": "Токен скопирован",
     "mcpEnableLabel": "Включить MCP сервер (Model Context Protocol)",
     "mcpEnableDescription": "Позволяет ИИ-ассистентам, таким как Claude Desktop, управлять браузерами.",
-    "mcpAcceptTermsFirst": "(Сначала примите условия Wayfern в Настройках)",
+    "mcpAcceptTermsFirst": "(Сначала примите условия Chromium в Настройках)",
     "mcpStarted": "MCP сервер запущен на порту {{port}}",
     "mcpStopped": "MCP сервер остановлен",
     "mcpToggleFailed": "Не удалось переключить MCP сервер",
@@ -702,8 +707,8 @@
         "webgl": "Блокировать WebGL"
       }
     },
-    "wayfern": {
-      "title": "Настройки Wayfern",
+    "chromium": {
+      "title": "Настройки Chromium",
       "fingerprint": {
         "title": "Отпечаток",
         "randomize": "Случайный при запуске",
@@ -756,7 +761,7 @@
       "sourcePlaceholder": "Выберите профиль для копирования cookies",
       "running": "(запущен)",
       "targetProfiles": "Целевые профили ({{count}})",
-      "noOtherTargets": "Других выбранных Wayfern/Camoufox профилей нет",
+      "noOtherTargets": "Других выбранных Chromium/Camoufox профилей нет",
       "selectSourceFirst": "Сначала выберите исходный профиль",
       "selectionStatus": "(выбрано {{selected}} из {{total}})",
       "searchPlaceholder": "Поиск доменов или cookies...",
@@ -804,7 +809,7 @@
       "preview": "Найдено {{count}} cookies",
       "success": "Успешно импортировано {{imported}} cookies ({{replaced}} заменено)",
       "error": "Ошибка импорта cookies",
-      "proFeature": "Импорт cookies — функция Pro"
+      "proFeature": "Импорт cookies доступен"
     },
     "export": {
       "title": "Экспорт Cookies",
@@ -881,7 +886,7 @@
     "unknownError": "Произошла неизвестная ошибка. Попробуйте снова.",
     "noProfilesForUrl": "Нет доступных профилей. Сначала создайте профиль, прежде чем открывать URL.",
     "updateCamoufoxConfigFailed": "Не удалось обновить настройки camoufox: {{error}}",
-    "updateWayfernConfigFailed": "Не удалось обновить настройки wayfern: {{error}}",
+    "updateChromiumConfigFailed": "Не удалось обновить настройки chromium: {{error}}",
     "createProfileFailed": "Не удалось создать профиль: {{error}}",
     "launchBrowserFailed": "Не удалось запустить браузер: {{error}}",
     "cannotDeleteRunningProfile": "Невозможно удалить профиль, пока браузер запущен. Сначала остановите браузер.",
@@ -889,7 +894,7 @@
     "renameProfileFailed": "Не удалось переименовать профиль: {{error}}",
     "killBrowserFailed": "Не удалось остановить браузер: {{error}}",
     "deleteSelectedProfilesFailed": "Не удалось удалить выбранные профили: {{error}}",
-    "cookieCopyUnsupportedBrowser": "Копирование cookies работает только с профилями Wayfern и Camoufox",
+    "cookieCopyUnsupportedBrowser": "Копирование cookies работает только с профилями Chromium и Camoufox",
     "updateSyncSettingsFailed": "Не удалось обновить параметры синхронизации",
     "cloneProfileFailed": "Не удалось клонировать профиль: {{error}}",
     "loadSupportedBrowsersFailed": "Не удалось загрузить поддерживаемые браузеры",
@@ -906,7 +911,7 @@
   },
   "browser": {
     "camoufox": "Camoufox",
-    "wayfern": "Wayfern"
+    "chromium": "Chromium"
   },
   "fingerprint": {
     "crossOsWarning": "Подмена отпечатка для другой операционной системы менее надёжна, так как невозможно идеально имитировать все базовые компоненты. Используйте с осторожностью.",
@@ -1006,7 +1011,7 @@
     "productSub": "Подверсия продукта",
     "brand": "Бренд",
     "brandVersion": "Версия бренда",
-    "proFeature": "Это функция Pro",
+    "proFeature": "Расширенные настройки отпечатка доступны",
     "generateFingerprint": "Сгенерировать отпечаток",
     "refreshFingerprint": "Обновить отпечаток",
     "canvasNoiseSeedPlaceholder": "Введите строку-семя для отпечатка canvas",
@@ -1102,7 +1107,7 @@
     "extensionsTab": "Расширения",
     "groupsTab": "Группы",
     "managedNotice": "Расширения, управляемые здесь, заменят все вручную установленные расширения в профилях при запуске.",
-    "proRequired": "Управление расширениями — функция Pro",
+    "proRequired": "Управление расширениями доступно",
     "empty": "Расширения ещё не загружены.",
     "noGroups": "Группы расширений ещё не созданы.",
     "createGroup": "Создать группу",
@@ -1156,12 +1161,12 @@
     "assignGroupFailed": "Не удалось назначить группу расширений"
   },
   "pro": {
-    "badge": "PRO",
-    "fingerprintLocked": "Редактирование отпечатка — функция Pro",
-    "cookieCopyLocked": "Копирование cookies — функция Pro",
-    "cookieImportLocked": "Импорт cookies — функция Pro",
-    "cookieExportLocked": "Экспорт cookies — функция Pro",
-    "cookieManagementLocked": "Управление cookies — функция Pro"
+    "badge": "OPEN",
+    "fingerprintLocked": "Редактирование отпечатка доступно",
+    "cookieCopyLocked": "Копирование cookies доступно",
+    "cookieImportLocked": "Импорт cookies доступен",
+    "cookieExportLocked": "Экспорт cookies доступен",
+    "cookieManagementLocked": "Управление cookies доступно"
   },
   "dnsBlocklist": {
     "title": "Список блокировки DNS",
@@ -1421,8 +1426,8 @@
     "tryAgain": "Пожалуйста, попробуйте снова"
   },
   "wayfernTerms": {
-    "title": "Условия использования Wayfern",
-    "description": "Прежде чем использовать JnmBrowser, необходимо прочитать и согласиться с Условиями использования Wayfern.",
+    "title": "Условия использования Chromium",
+    "description": "Прежде чем использовать JnmBrowser, необходимо прочитать и согласиться с Условиями использования Chromium.",
     "reviewLabel": "Пожалуйста, ознакомьтесь с Условиями использования по адресу:",
     "agreeNotice": "Нажимая «Я принимаю», вы соглашаетесь с этими условиями.",
     "acceptButton": "Я принимаю",
@@ -1431,10 +1436,10 @@
     "tryAgain": "Пожалуйста, попробуйте снова"
   },
   "commercialTrial": {
-    "title": "Срок коммерческой пробной версии истёк",
-    "description": "Ваш 2-недельный коммерческий пробный период закончился.",
-    "body": "Если вы используете JnmBrowser в коммерческих целях, для продолжения вам нужно приобрести коммерческую лицензию. Вы можете продолжать использовать его бесплатно для личных целей.",
-    "understandButton": "Понятно",
+    "title": "Информация об использовании",
+    "description": "Все функции доступны.",
+    "body": "JnmBrowser доступен для личного и коммерческого использования.",
+    "understandButton": "OK",
     "failed": "Не удалось сохранить подтверждение",
     "tryAgain": "Пожалуйста, попробуйте снова"
   },
@@ -1595,5 +1600,10 @@
       "upToDateDescription": "Все версии браузеров актуальны",
       "updateAllFailed": "Не удалось обновить версии браузеров"
     }
+  },
+  "browserSupportWarning": {
+    "title": "Browser support ending soon",
+    "description": "Support for the following profiles will be removed on March 15, 2026: {{names}}. Please migrate to Chromium or Camoufox profiles.",
+    "learnMore": "Learn more"
   }
 }

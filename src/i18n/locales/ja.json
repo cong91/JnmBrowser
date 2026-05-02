@@ -156,14 +156,14 @@
       "passwordSaved": "暗号化パスワードが設定されました",
       "passwordMismatch": "パスワードが一致しません",
       "passwordTooShort": "パスワードは8文字以上である必要があります",
-      "requiresProOrOwner": "プロファイルの暗号化はProユーザーとチームオーナーのみ利用できます。"
+      "requiresProOrOwner": "プロファイル暗号化はここで設定できます。"
     },
     "commercial": {
-      "title": "商用ライセンス",
-      "trialActive": "トライアル: 残り {{days}} 日 {{hours}} 時間",
-      "trialActiveDescription": "トライアル期間中は商用利用が無料です",
-      "trialExpired": "トライアル期限切れ",
-      "trialExpiredDescription": "個人利用は引き続き無料です。商用利用にはライセンスが必要です。"
+      "title": "利用",
+      "trialActive": "すべての機能を利用できます",
+      "trialActiveDescription": "個人利用・商用利用のどちらも利用できます。",
+      "trialExpired": "すべての機能を利用できます",
+      "trialExpiredDescription": "個人利用・商用利用のどちらも利用できます。"
     },
     "advanced": {
       "title": "詳細設定",
@@ -229,9 +229,9 @@
       "stopLeader": "このプロフィールとすべてのフォロワーを停止",
       "stopFollower": "{{leaderName}}のアクションを追従中",
       "desyncedTooltip": "{{url}}で同期に失敗しました",
-      "wayfernOnly": "Wayfernプロフィールのみ同期可能です",
+      "wayfernOnly": "Chromiumプロフィールのみ同期可能です",
       "selectFollowers": "フォロワープロフィールを選択",
-      "selectFollowersDesc": "リーダープロフィールのアクションを複製するプロフィールを選択してください。停止中のWayfernプロフィールのみ選択できます。",
+      "selectFollowersDesc": "リーダープロフィールのアクションを複製するプロフィールを選択してください。停止中のChromiumプロフィールのみ選択できます。",
       "leader": "リーダー",
       "follower": "フォロワー",
       "startSession": "同期セッションを開始",
@@ -273,7 +273,7 @@
     "antiDetect": {
       "title": "アンチ検出ブラウザ",
       "description": "アンチ検出機能を持つブラウザを選択",
-      "chromium": "Wayfern",
+      "chromium": "Chromium",
       "firefox": "Camoufox",
       "badge": "アンチ検出ブラウザ"
     },
@@ -315,7 +315,7 @@
       "preparingDownload": "ダウンロードを準備中..."
     },
     "chromiumLabel": "Chromium",
-    "chromiumSubtitle": "Wayfern搭載",
+    "chromiumSubtitle": "Chromium搭載",
     "firefoxLabel": "Firefox",
     "firefoxSubtitle": "Camoufox搭載",
     "camoufoxWarning": "Firefox（Camoufox）はサードパーティの組織によって管理されています。本番環境での使用にはChromiumをご利用ください。",
@@ -626,6 +626,11 @@
       "removeFromClaudeCode": "Claude Code から削除",
       "addedToClaudeCode": "Claude Code に追加しました",
       "removedFromClaudeCode": "Claude Code から削除しました",
+      "codexTitle": "Codex",
+      "addToCodex": "Codex に追加",
+      "removeFromCodex": "Codex から削除",
+      "addedToCodex": "Codex に追加しました",
+      "removedFromCodex": "Codex から削除しました",
       "config": "MCP設定",
       "copyConfig": "設定をコピー"
     },
@@ -649,7 +654,7 @@
     "tokenCopied": "トークンをコピーしました",
     "mcpEnableLabel": "MCP サーバーを有効にする (Model Context Protocol)",
     "mcpEnableDescription": "Claude Desktop などの AI アシスタントがブラウザを制御できます。",
-    "mcpAcceptTermsFirst": "(設定で先に Wayfern の規約に同意してください)",
+    "mcpAcceptTermsFirst": "(設定で先に Chromium の規約に同意してください)",
     "mcpStarted": "MCP サーバーをポート {{port}} で起動しました",
     "mcpStopped": "MCP サーバーを停止しました",
     "mcpToggleFailed": "MCP サーバーの切り替えに失敗しました",
@@ -702,8 +707,8 @@
         "webgl": "WebGLをブロック"
       }
     },
-    "wayfern": {
-      "title": "Wayfern設定",
+    "chromium": {
+      "title": "Chromium設定",
       "fingerprint": {
         "title": "フィンガープリント",
         "randomize": "起動時にランダム化",
@@ -756,7 +761,7 @@
       "sourcePlaceholder": "Cookie をコピーするプロファイルを選択",
       "running": "(実行中)",
       "targetProfiles": "対象プロファイル ({{count}})",
-      "noOtherTargets": "他に Wayfern/Camoufox プロファイルが選択されていません",
+      "noOtherTargets": "他に Chromium/Camoufox プロファイルが選択されていません",
       "selectSourceFirst": "最初にソースプロファイルを選択してください",
       "selectionStatus": "({{selected}} / {{total}} 選択中)",
       "searchPlaceholder": "ドメインまたは Cookie を検索...",
@@ -804,7 +809,7 @@
       "preview": "{{count}}件のCookieが見つかりました",
       "success": "{{imported}}件のCookieをインポートしました（{{replaced}}件を置換）",
       "error": "Cookieのインポートに失敗しました",
-      "proFeature": "Cookieのインポートはプロ機能です"
+      "proFeature": "Cookie のインポートを利用できます"
     },
     "export": {
       "title": "Cookieのエクスポート",
@@ -881,7 +886,7 @@
     "unknownError": "不明なエラーが発生しました。もう一度お試しください。",
     "noProfilesForUrl": "利用可能なプロファイルがありません。URLを開く前にプロファイルを作成してください。",
     "updateCamoufoxConfigFailed": "camoufox設定の更新に失敗しました: {{error}}",
-    "updateWayfernConfigFailed": "wayfern設定の更新に失敗しました: {{error}}",
+    "updateChromiumConfigFailed": "chromium設定の更新に失敗しました: {{error}}",
     "createProfileFailed": "プロファイルの作成に失敗しました: {{error}}",
     "launchBrowserFailed": "ブラウザの起動に失敗しました: {{error}}",
     "cannotDeleteRunningProfile": "ブラウザの実行中にプロファイルを削除できません。先にブラウザを停止してください。",
@@ -889,7 +894,7 @@
     "renameProfileFailed": "プロファイルの名前変更に失敗しました: {{error}}",
     "killBrowserFailed": "ブラウザの停止に失敗しました: {{error}}",
     "deleteSelectedProfilesFailed": "選択したプロファイルの削除に失敗しました: {{error}}",
-    "cookieCopyUnsupportedBrowser": "Cookieのコピーは Wayfern および Camoufox プロファイルでのみ機能します",
+    "cookieCopyUnsupportedBrowser": "Cookieのコピーは Chromium および Camoufox プロファイルでのみ機能します",
     "updateSyncSettingsFailed": "同期設定の更新に失敗しました",
     "cloneProfileFailed": "プロファイルの複製に失敗しました: {{error}}",
     "loadSupportedBrowsersFailed": "サポートされているブラウザの読み込みに失敗しました",
@@ -906,7 +911,7 @@
   },
   "browser": {
     "camoufox": "Camoufox",
-    "wayfern": "Wayfern"
+    "chromium": "Chromium"
   },
   "fingerprint": {
     "crossOsWarning": "異なるオペレーティングシステムのフィンガープリント偽装は、すべての基盤コンポーネントを完璧に模倣することが不可能なため、信頼性が低くなります。注意してご使用ください。",
@@ -1006,7 +1011,7 @@
     "productSub": "プロダクトサブ",
     "brand": "ブランド",
     "brandVersion": "ブランドバージョン",
-    "proFeature": "これはPro機能です",
+    "proFeature": "高度なフィンガープリント設定を利用できます",
     "generateFingerprint": "フィンガープリントを生成",
     "refreshFingerprint": "フィンガープリントを更新",
     "canvasNoiseSeedPlaceholder": "キャンバスフィンガープリント用のシード文字列を入力",
@@ -1102,7 +1107,7 @@
     "extensionsTab": "拡張機能",
     "groupsTab": "グループ",
     "managedNotice": "ここで管理される拡張機能は、起動時にプロファイルに手動でインストールされた拡張機能を置き換えます。",
-    "proRequired": "拡張機能管理はプロ機能です",
+    "proRequired": "拡張機能管理を利用できます",
     "empty": "まだ拡張機能がアップロードされていません。",
     "noGroups": "まだ拡張機能グループが作成されていません。",
     "createGroup": "グループを作成",
@@ -1156,12 +1161,12 @@
     "assignGroupFailed": "拡張機能グループの割り当てに失敗しました"
   },
   "pro": {
-    "badge": "PRO",
-    "fingerprintLocked": "フィンガープリント編集はプロ機能です",
-    "cookieCopyLocked": "Cookieのコピーはプロ機能です",
-    "cookieImportLocked": "Cookieのインポートはプロ機能です",
-    "cookieExportLocked": "Cookieのエクスポートはプロ機能です",
-    "cookieManagementLocked": "Cookie管理はプロ機能です"
+    "badge": "開放",
+    "fingerprintLocked": "フィンガープリント編集を利用できます",
+    "cookieCopyLocked": "Cookie のコピーを利用できます",
+    "cookieImportLocked": "Cookie のインポートを利用できます",
+    "cookieExportLocked": "Cookie のエクスポートを利用できます",
+    "cookieManagementLocked": "Cookie 管理を利用できます"
   },
   "dnsBlocklist": {
     "title": "DNSブロックリスト",
@@ -1421,8 +1426,8 @@
     "tryAgain": "もう一度お試しください"
   },
   "wayfernTerms": {
-    "title": "Wayfern 利用規約",
-    "description": "JnmBrowser を使用する前に、Wayfern の利用規約を読み、同意する必要があります。",
+    "title": "Chromium 利用規約",
+    "description": "JnmBrowser を使用する前に、Chromium の利用規約を読み、同意する必要があります。",
     "reviewLabel": "次の URL で利用規約をご確認ください:",
     "agreeNotice": "「同意します」をクリックすると、これらの条項に拘束されることに同意します。",
     "acceptButton": "同意します",
@@ -1431,10 +1436,10 @@
     "tryAgain": "もう一度お試しください"
   },
   "commercialTrial": {
-    "title": "商用試用期間が終了しました",
-    "description": "2 週間の商用試用期間が終了しました。",
-    "body": "商用目的で JnmBrowser を使用する場合は、続行するために商用ライセンスを購入する必要があります。個人利用は引き続き無料でお使いいただけます。",
-    "understandButton": "了解しました",
+    "title": "利用情報",
+    "description": "すべての機能を利用できます。",
+    "body": "JnmBrowser は個人利用・商用利用のどちらにも利用できます。",
+    "understandButton": "OK",
     "failed": "確認の保存に失敗しました",
     "tryAgain": "もう一度お試しください"
   },
@@ -1595,5 +1600,10 @@
       "upToDateDescription": "すべてのブラウザバージョンは最新です",
       "updateAllFailed": "ブラウザバージョンの更新に失敗しました"
     }
+  },
+  "browserSupportWarning": {
+    "title": "Browser support ending soon",
+    "description": "Support for the following profiles will be removed on March 15, 2026: {{names}}. Please migrate to Chromium or Camoufox profiles.",
+    "learnMore": "Learn more"
   }
 }

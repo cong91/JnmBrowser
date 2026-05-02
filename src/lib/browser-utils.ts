@@ -11,15 +11,22 @@ import {
 } from "react-icons/fa";
 
 /**
+ * Normalize browser names for UI rendering
+ */
+export function normalizeBrowserType(browserType: string): string {
+  return browserType;
+}
+
+/**
  * Map internal browser names to display names
  */
 export function getBrowserDisplayName(browserType: string): string {
   const browserNames: Record<string, string> = {
     camoufox: "Camoufox",
-    wayfern: "Wayfern",
+    chromium: "Chromium",
   };
 
-  return browserNames[browserType] || browserType;
+  return browserNames[normalizeBrowserType(browserType)] || browserType;
 }
 
 /**
@@ -28,10 +35,10 @@ export function getBrowserDisplayName(browserType: string): string {
  * Other browsers get a warning icon to indicate they're not anti-detect
  */
 export function getBrowserIcon(browserType: string) {
-  switch (browserType) {
+  switch (normalizeBrowserType(browserType)) {
     case "camoufox":
       return FaFirefox; // Firefox-based anti-detect browser
-    case "wayfern":
+    case "chromium":
       return FaChrome; // Chromium-based anti-detect browser
     default:
       // All other browsers get a warning icon
@@ -47,6 +54,10 @@ export function getProfileIcon(profile: {
   return getBrowserIcon(profile.browser);
 }
 
+export function isChromiumBrowser(browserType: string): boolean {
+  return normalizeBrowserType(browserType) === "chromium";
+}
+
 export const getCurrentOS = () => {
   if (typeof window !== "undefined") {
     const userAgent = window.navigator.userAgent;
@@ -60,12 +71,12 @@ export const getCurrentOS = () => {
 export function isCrossOsProfile(profile: {
   host_os?: string;
   camoufox_config?: { os?: string };
-  wayfern_config?: { os?: string };
+  chromium_config?: { os?: string };
 }): boolean {
   const profileOs =
     profile.host_os ||
     profile.camoufox_config?.os ||
-    profile.wayfern_config?.os;
+    profile.chromium_config?.os;
   if (!profileOs) return false;
   return profileOs !== getCurrentOS();
 }

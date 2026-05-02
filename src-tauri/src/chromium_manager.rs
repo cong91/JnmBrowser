@@ -2,7 +2,8 @@ use crate::browser_runner::BrowserRunner;
 use crate::profile::BrowserProfile;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -14,7 +15,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WayfernConfig {
+pub struct ChromiumConfig {
   #[serde(default)]
   pub fingerprint: Option<String>,
   #[serde(default)]
@@ -43,7 +44,7 @@ pub struct WayfernConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(non_snake_case)]
-pub struct WayfernLaunchResult {
+pub struct ChromiumLaunchResult {
   pub id: String,
   #[serde(alias = "process_id")]
   pub processId: Option<u32>,
@@ -53,7 +54,7 @@ pub struct WayfernLaunchResult {
   pub cdp_port: Option<u16>,
 }
 
-struct WayfernInstance {
+struct ChromiumInstance {
   id: String,
   process_id: Option<u32>,
   profile_path: Option<String>,
@@ -61,12 +62,12 @@ struct WayfernInstance {
   cdp_port: Option<u16>,
 }
 
-struct WayfernManagerInner {
-  instances: HashMap<String, WayfernInstance>,
+struct ChromiumManagerInner {
+  instances: HashMap<String, ChromiumInstance>,
 }
 
-pub struct WayfernManager {
-  inner: Arc<AsyncMutex<WayfernManagerInner>>,
+pub struct ChromiumManager {
+  inner: Arc<AsyncMutex<ChromiumManagerInner>>,
   http_client: Client,
 }
 
@@ -78,21 +79,33 @@ struct CdpTarget {
   websocket_debugger_url: Option<String>,
 }
 
-impl WayfernManager {
+impl ChromiumManager {
+  fn chromium_extension_launch_args(extension_paths: &[String]) -> Vec<String> {
+    if extension_paths.is_empty() {
+      return Vec::new();
+    }
+
+    let joined = extension_paths.join(",");
+    vec![
+      format!("--load-extension={joined}"),
+      format!("--disable-extensions-except={joined}"),
+    ]
+  }
+
   fn new() -> Self {
     Self {
-      inner: Arc::new(AsyncMutex::new(WayfernManagerInner {
+      inner: Arc::new(AsyncMutex::new(ChromiumManagerInner {
         instances: HashMap::new(),
       })),
       http_client: Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
-        .expect("Failed to build reqwest client for wayfern_manager"),
+        .expect("Failed to build reqwest client for chromium_manager"),
     }
   }
 
-  pub fn instance() -> &'static WayfernManager {
-    &WAYFERN_MANAGER
+  pub fn instance() -> &'static ChromiumManager {
+    &CHROMIUM_MANAGER
   }
 
   #[allow(dead_code)]
@@ -112,24 +125,369 @@ impl WayfernManager {
     Ok(port)
   }
 
-  /// Normalize fingerprint data from Wayfern CDP format to our storage format.
-  /// Wayfern returns fields like fonts, webglParameters as JSON strings which we keep as-is.
+  /// Normalize fingerprint data from the legacy Chromium CDP format to our storage format.
+  /// The legacy runtime returned fields like fonts and webglParameters as JSON strings, which we keep as-is.
+  #[allow(dead_code)]
   fn normalize_fingerprint(fingerprint: serde_json::Value) -> serde_json::Value {
-    // Our storage format matches what Wayfern returns:
+    // Our storage format matches what the legacy runtime returned:
     // - fonts, plugins, mimeTypes, voices are JSON strings
     // - webglParameters, webgl2Parameters, etc. are JSON strings
     // The form displays them as JSON text areas, so no conversion needed.
     fingerprint
   }
 
-  /// Denormalize fingerprint data from our storage format to Wayfern CDP format.
-  /// Wayfern expects certain fields as JSON strings.
+  /// Denormalize fingerprint data from our storage format to the legacy Chromium CDP format.
+  /// The legacy runtime expects certain fields as JSON strings.
+  #[allow(dead_code)]
   fn denormalize_fingerprint(fingerprint: serde_json::Value) -> serde_json::Value {
-    // Our storage format matches what Wayfern expects:
+    // Our storage format matches what the legacy runtime expects:
     // - fonts, plugins, mimeTypes, voices are JSON strings
     // - webglParameters, webgl2Parameters, etc. are JSON strings
     // So no conversion is needed
     fingerprint
+  }
+
+  fn current_fingerprint_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+      "macos"
+    } else if cfg!(target_os = "linux") {
+      "linux"
+    } else {
+      "windows"
+    }
+  }
+
+  fn stable_fingerprint_seed(profile: &BrowserProfile) -> u32 {
+    let digest = Sha256::digest(profile.id.to_string().as_bytes());
+    u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]])
+  }
+
+  fn json_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+      value
+        .get(*key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+    })
+  }
+
+  fn json_u32(value: &serde_json::Value, keys: &[&str]) -> Option<u32> {
+    keys.iter().find_map(|key| {
+      value
+        .get(*key)
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+    })
+  }
+
+  fn json_f64(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+      value
+        .get(*key)
+        .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|n| n as f64)))
+        .filter(|n| n.is_finite())
+    })
+  }
+
+  fn json_languages(value: &serde_json::Value) -> Option<String> {
+    let languages = value.get("languages")?;
+    if let Some(s) = languages.as_str() {
+      let trimmed = s.trim();
+      if !trimmed.is_empty() {
+        return Some(trimmed.to_string());
+      }
+    }
+
+    if let Some(arr) = languages.as_array() {
+      let values = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+      if !values.is_empty() {
+        return Some(values.join(","));
+      }
+    }
+
+    None
+  }
+
+  fn stored_fingerprint_value(config: &ChromiumConfig) -> Value {
+    config
+      .fingerprint
+      .as_deref()
+      .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+      .map(|parsed| parsed.get("fingerprint").cloned().unwrap_or(parsed))
+      .unwrap_or_else(|| json!({}))
+  }
+
+  fn runtime_browser_full_version(profile: &BrowserProfile) -> String {
+    let version = profile.version.trim();
+    if version.is_empty() {
+      "142.0.7444.175".to_string()
+    } else {
+      version.to_string()
+    }
+  }
+
+  fn runtime_browser_major_version(profile: &BrowserProfile) -> String {
+    Self::runtime_browser_full_version(profile)
+      .split('.')
+      .next()
+      .filter(|s| !s.is_empty())
+      .unwrap_or("142")
+      .to_string()
+  }
+
+  fn runtime_user_agent_version(profile: &BrowserProfile) -> String {
+    format!("{}.0.0.0", Self::runtime_browser_major_version(profile))
+  }
+
+  fn normalize_user_agent_for_runtime(raw: &str, profile: &BrowserProfile) -> String {
+    let marker = "Chrome/";
+    if let Some(start) = raw.find(marker) {
+      let version_start = start + marker.len();
+      let version_end = raw[version_start..]
+        .find(|c: char| c.is_ascii_whitespace())
+        .map(|offset| version_start + offset)
+        .unwrap_or_else(|| raw.len());
+      let mut normalized = String::with_capacity(raw.len() + 16);
+      normalized.push_str(&raw[..version_start]);
+      normalized.push_str(&Self::runtime_user_agent_version(profile));
+      normalized.push_str(&raw[version_end..]);
+      normalized
+    } else {
+      raw.to_string()
+    }
+  }
+
+  fn user_agent_override_params(profile: &BrowserProfile, fingerprint: &Value) -> Option<Value> {
+    let user_agent = Self::json_string(fingerprint, &["userAgent", "user_agent"])
+      .map(|raw| Self::normalize_user_agent_for_runtime(&raw, profile))?;
+
+    let accept_language = Self::json_languages(fingerprint);
+    let platform = Self::json_string(
+      fingerprint,
+      &["platform", "navigatorPlatform", "navigator_platform"],
+    );
+
+    let mut params = serde_json::Map::new();
+    params.insert("userAgent".to_string(), json!(user_agent));
+    if let Some(accept_language) = accept_language {
+      params.insert("acceptLanguage".to_string(), json!(accept_language));
+    }
+    if let Some(platform) = platform {
+      params.insert("platform".to_string(), json!(platform));
+    }
+
+    Some(Value::Object(params))
+  }
+
+  fn fingerprint_override_script(profile: &BrowserProfile, fingerprint: &Value) -> Option<String> {
+    let mut overrides = Vec::new();
+
+    if let Some(user_agent) = Self::json_string(fingerprint, &["userAgent", "user_agent"]) {
+      let user_agent = Self::normalize_user_agent_for_runtime(&user_agent, profile);
+      let app_version = user_agent
+        .strip_prefix("Mozilla/")
+        .unwrap_or(&user_agent)
+        .to_string();
+      let user_agent_json = serde_json::to_string(&user_agent).ok()?;
+      let app_version_json = serde_json::to_string(&app_version).ok()?;
+      overrides.push(format!(
+        "overrideValue('userAgent', {user_agent_json});overrideValue('appVersion', {app_version_json});"
+      ));
+    }
+
+    if let Some(platform) = Self::json_string(
+      fingerprint,
+      &["platform", "navigatorPlatform", "navigator_platform"],
+    ) {
+      let platform_json = serde_json::to_string(&platform).ok()?;
+      overrides.push(format!("overrideValue('platform', {platform_json});"));
+    }
+
+    if let Some(language) = Self::json_string(fingerprint, &["language", "locale"]) {
+      let language_json = serde_json::to_string(&language).ok()?;
+      overrides.push(format!("overrideValue('language', {language_json});"));
+    }
+
+    if let Some(languages) = Self::json_languages(fingerprint) {
+      let languages_vec = languages
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+      if !languages_vec.is_empty() {
+        let languages_json = serde_json::to_string(&languages_vec).ok()?;
+        overrides.push(format!("overrideValue('languages', {languages_json});"));
+      }
+    }
+
+    if let Some(hardware_concurrency) = Self::json_u32(
+      fingerprint,
+      &[
+        "hardwareConcurrency",
+        "hardware_concurrency",
+        "cpuCores",
+        "cpu_cores",
+      ],
+    ) {
+      let value = serde_json::to_string(&hardware_concurrency).ok()?;
+      overrides.push(format!("overrideValue('hardwareConcurrency', {value});"));
+    }
+
+    if let Some(device_memory) = Self::json_f64(fingerprint, &["deviceMemory", "device_memory"]) {
+      let value = serde_json::to_string(&device_memory).ok()?;
+      overrides.push(format!("overrideValue('deviceMemory', {value});"));
+    }
+
+    if overrides.is_empty() {
+      return None;
+    }
+
+    Some(format!(
+      "(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};{} }})();",
+      overrides.join("")
+    ))
+  }
+
+  async fn apply_runtime_fingerprint_overrides(
+    &self,
+    ws_url: &str,
+    profile: &BrowserProfile,
+    fingerprint: &Value,
+  ) {
+    let _ = self
+      .send_cdp_command(ws_url, "Page.enable", json!({}))
+      .await;
+    let _ = self
+      .send_cdp_command(ws_url, "Runtime.enable", json!({}))
+      .await;
+
+    if let Some(params) = Self::user_agent_override_params(profile, fingerprint) {
+      if let Err(e) = self
+        .send_cdp_command(ws_url, "Emulation.setUserAgentOverride", params)
+        .await
+      {
+        log::warn!("Failed to apply user-agent override via CDP: {e}");
+      }
+    }
+
+    if let Some(source) = Self::fingerprint_override_script(profile, fingerprint) {
+      if let Err(e) = self
+        .send_cdp_command(
+          ws_url,
+          "Page.addScriptToEvaluateOnNewDocument",
+          json!({
+            "source": source,
+            "runImmediately": true
+          }),
+        )
+        .await
+      {
+        log::warn!("Failed to inject fingerprint override script via CDP: {e}");
+      }
+    }
+  }
+
+  fn fingerprint_chromium_launch_args(
+    profile: &BrowserProfile,
+    config: &ChromiumConfig,
+  ) -> Vec<String> {
+    let fingerprint = Self::stored_fingerprint_value(config);
+
+    let mut args = Vec::new();
+
+    args.push(format!(
+      "--fingerprint={}",
+      Self::stable_fingerprint_seed(profile)
+    ));
+
+    let platform = config
+      .os
+      .clone()
+      .or_else(|| profile.resolved_os().map(ToOwned::to_owned))
+      .unwrap_or_else(|| Self::current_fingerprint_platform().to_string());
+    args.push(format!("--fingerprint-platform={platform}"));
+
+    if let Some(platform_version) = Self::json_string(
+      &fingerprint,
+      &["platformVersion", "osVersion", "platform_version"],
+    ) {
+      args.push(format!("--fingerprint-platform-version={platform_version}"));
+    }
+
+    let brand = Self::json_string(&fingerprint, &["browserBrand", "brand", "fingerprintBrand"])
+      .unwrap_or_else(|| "Chrome".to_string());
+    args.push(format!("--fingerprint-brand={brand}"));
+
+    let brand_version = Self::json_string(
+      &fingerprint,
+      &[
+        "browserVersion",
+        "brandVersion",
+        "fingerprintBrandVersion",
+        "chromeVersion",
+      ],
+    )
+    .map(|_| Self::runtime_browser_major_version(profile))
+    .unwrap_or_else(|| "142".to_string());
+    args.push(format!("--fingerprint-brand-version={brand_version}"));
+
+    let hardware_concurrency = Self::json_u32(
+      &fingerprint,
+      &[
+        "hardwareConcurrency",
+        "hardware_concurrency",
+        "cpuCores",
+        "cpu_cores",
+      ],
+    )
+    .unwrap_or(8);
+    args.push(format!(
+      "--fingerprint-hardware-concurrency={hardware_concurrency}"
+    ));
+
+    let language = Self::json_string(&fingerprint, &["language", "locale"])
+      .or_else(|| {
+        Self::json_languages(&fingerprint)
+          .and_then(|langs| langs.split(',').next().map(str::to_string))
+      })
+      .unwrap_or_else(|| "en-US".to_string());
+    args.push(format!("--lang={language}"));
+
+    let accept_language =
+      Self::json_languages(&fingerprint).unwrap_or_else(|| format!("{language},en-US,en"));
+    args.push(format!("--accept-lang={accept_language}"));
+
+    let timezone = Self::json_string(&fingerprint, &["timezone", "timeZone"])
+      .unwrap_or_else(|| "America/New_York".to_string());
+    args.push(format!("--timezone={timezone}"));
+
+    if let Some(vendor) = Self::json_string(
+      &fingerprint,
+      &["webglVendor", "webgl_vendor", "gpuVendor", "gpu_vendor"],
+    ) {
+      args.push(format!("--fingerprint-gpu-vendor={vendor}"));
+    }
+
+    if let Some(renderer) = Self::json_string(
+      &fingerprint,
+      &[
+        "webglRenderer",
+        "webgl_renderer",
+        "gpuRenderer",
+        "gpu_renderer",
+      ],
+    ) {
+      args.push(format!("--fingerprint-gpu-renderer={renderer}"));
+    }
+
+    args
   }
 
   async fn wait_for_cdp_ready(
@@ -221,287 +579,119 @@ impl WayfernManager {
     &self,
     _app_handle: &AppHandle,
     profile: &BrowserProfile,
-    config: &WayfernConfig,
+    config: &ChromiumConfig,
   ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let executable_path = BrowserRunner::instance()
-      .get_browser_executable_path(profile)
-      .map_err(|e| format!("Failed to get Wayfern executable path: {e}"))?;
-
-    let port = Self::find_free_port().await?;
-    log::info!("Launching headless Wayfern on port {port} for fingerprint generation");
-
-    let temp_profile_dir =
-      std::env::temp_dir().join(format!("wayfern_fingerprint_{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_profile_dir)?;
-
-    let mut cmd = TokioCommand::new(&executable_path);
-    cmd
-      .arg("--headless=new")
-      .arg(format!("--remote-debugging-port={port}"))
-      .arg("--remote-debugging-address=127.0.0.1")
-      .arg(format!("--user-data-dir={}", temp_profile_dir.display()))
-      .arg("--disable-gpu")
-      .arg("--no-first-run")
-      .arg("--no-default-browser-check")
-      .arg("--disable-background-mode")
-      .arg("--use-mock-keychain")
-      .arg("--password-store=basic")
-      .arg("--disable-features=DialMediaRouteProvider");
-
-    #[cfg(target_os = "linux")]
-    cmd
-      .arg("--no-sandbox")
-      .arg("--disable-setuid-sandbox")
-      .arg("--disable-dev-shm-usage");
-
-    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
-
-    let child = cmd.spawn().map_err(|e| {
-      // OS error 14001 = SxS / missing Visual C++ Redistributable
-      let hint = if e.raw_os_error() == Some(14001) {
-        ". This usually means the Visual C++ Redistributable is not installed. \
-         Download it from https://aka.ms/vs/17/release/vc_redist.x64.exe"
-      } else {
-        ""
-      };
-      format!("Failed to spawn headless Wayfern: {e}{hint}")
-    })?;
-    let child_id = child.id();
-
-    let cleanup = || async {
-      if let Some(id) = child_id {
-        #[cfg(unix)]
-        {
-          use nix::sys::signal::{kill, Signal};
-          use nix::unistd::Pid;
-          let _ = kill(Pid::from_raw(id as i32), Signal::SIGTERM);
-        }
-        #[cfg(windows)]
-        {
-          use std::os::windows::process::CommandExt;
-          const CREATE_NO_WINDOW: u32 = 0x08000000;
-          let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &id.to_string(), "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        }
-      }
-      let _ = std::fs::remove_dir_all(&temp_profile_dir);
-    };
-
-    if let Err(e) = self.wait_for_cdp_ready(port).await {
-      // Try to capture stderr from the failed process for diagnostics
-      let stderr_output = if let Some(id) = child_id {
-        // Check if process is still running
-        let is_running = sysinfo::System::new_with_specifics(
-          sysinfo::RefreshKind::nothing().with_processes(sysinfo::ProcessRefreshKind::nothing()),
-        )
-        .process(sysinfo::Pid::from(id as usize))
-        .is_some();
-
-        if !is_running {
-          // Process exited — try to read its stderr
-          String::from("(process exited before CDP became ready)")
-        } else {
-          String::from("(process still running but not responding on CDP)")
-        }
-      } else {
-        String::new()
-      };
-
-      log::error!(
-        "Fingerprint-generation Wayfern (headless, pid={child_id:?}) never became CDP-ready: {e}. {stderr_output}"
-      );
-      cleanup().await;
-      return Err(e);
-    }
-
-    let targets = match self.get_cdp_targets(port).await {
-      Ok(t) => t,
-      Err(e) => {
-        cleanup().await;
-        return Err(e);
-      }
-    };
-
-    let page_target = targets
-      .iter()
-      .find(|t| t.target_type == "page" && t.websocket_debugger_url.is_some());
-
-    let ws_url = match page_target {
-      Some(target) => target.websocket_debugger_url.as_ref().unwrap().clone(),
-      None => {
-        cleanup().await;
-        return Err("No page target found for CDP".into());
-      }
-    };
-
+    // fingerprint-chromium does not expose the proprietary legacy Chromium CDP
+    // fingerprint generation methods. Generate a stable, minimal fingerprint
+    // document for our existing config storage, then map it to command-line
+    // arguments during launch.
     let os = config
       .os
+      .clone()
+      .or_else(|| profile.resolved_os().map(ToOwned::to_owned))
+      .unwrap_or_else(|| Self::current_fingerprint_platform().to_string());
+
+    let seed = Self::stable_fingerprint_seed(profile);
+    let mut fingerprint = json!({
+      "seed": seed,
+      "platform": os,
+      "browserBrand": "Chrome",
+      "browserVersion": "142",
+      "hardwareConcurrency": 8,
+      "language": "en-US",
+      "languages": ["en-US", "en"],
+      "timezone": "America/New_York"
+    });
+
+    if let Some(existing) = config
+      .fingerprint
       .as_deref()
-      .unwrap_or(if cfg!(target_os = "macos") {
-        "macos"
-      } else if cfg!(target_os = "linux") {
-        "linux"
-      } else {
-        "windows"
-      });
-
-    // Include wayfern token if available (enables cross-OS fingerprinting for paid users)
-    let wayfern_token = crate::cloud_auth::CLOUD_AUTH.get_wayfern_token().await;
-    let mut refresh_params = json!({ "operatingSystem": os });
-    if let Some(ref token) = wayfern_token {
-      refresh_params
-        .as_object_mut()
-        .unwrap()
-        .insert("wayfernToken".to_string(), json!(token));
+      .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    {
+      let existing = existing.get("fingerprint").cloned().unwrap_or(existing);
+      if let (Some(target), Some(source)) = (fingerprint.as_object_mut(), existing.as_object()) {
+        for (key, value) in source {
+          target.insert(key.clone(), value.clone());
+        }
+      }
     }
 
-    let refresh_result = self
-      .send_cdp_command(&ws_url, "Wayfern.refreshFingerprint", refresh_params)
-      .await;
+    // Apply geolocation defaults when requested. This mirrors the old behavior
+    // without relying on proprietary legacy CDP methods.
+    let geoip_option = config.geoip.as_ref();
+    let should_geolocate = !matches!(geoip_option, Some(serde_json::Value::Bool(false)));
 
-    if let Err(e) = refresh_result {
-      cleanup().await;
-      return Err(format!("Failed to refresh fingerprint: {e}").into());
-    }
-
-    let get_result = self
-      .send_cdp_command(&ws_url, "Wayfern.getFingerprint", json!({}))
-      .await;
-
-    let fingerprint = match get_result {
-      Ok(result) => {
-        // Wayfern.getFingerprint returns { fingerprint: {...} }
-        // We need to extract just the fingerprint object
-        let fp = result.get("fingerprint").cloned().unwrap_or(result);
-        // Normalize the fingerprint: convert JSON string fields to proper types
-        let mut normalized = Self::normalize_fingerprint(fp);
-
-        // Apply geolocation based on proxy IP or geoip config
-        let geoip_option = config.geoip.as_ref();
-        let should_geolocate = match geoip_option {
-          Some(serde_json::Value::Bool(false)) => false,
-          _ => true, // Default to auto-detect
+    if should_geolocate {
+      let geo_result = async {
+        let ip = match geoip_option {
+          Some(serde_json::Value::String(ip_str)) => ip_str.clone(),
+          _ => crate::ip_utils::fetch_public_ip(config.proxy.as_deref())
+            .await
+            .map_err(|e| format!("Failed to fetch public IP: {e}"))?,
         };
 
-        if should_geolocate {
-          let geo_result = async {
-            let ip = match geoip_option {
-              Some(serde_json::Value::String(ip_str)) => ip_str.clone(),
-              _ => {
-                // Auto-detect IP, optionally through proxy
-                crate::ip_utils::fetch_public_ip(config.proxy.as_deref())
-                  .await
-                  .map_err(|e| format!("Failed to fetch public IP: {e}"))?
-              }
-            };
+        crate::camoufox::geolocation::get_geolocation(&ip)
+          .map_err(|e| format!("Failed to get geolocation for IP {ip}: {e}"))
+      }
+      .await;
 
-            crate::camoufox::geolocation::get_geolocation(&ip)
-              .map_err(|e| format!("Failed to get geolocation for IP {ip}: {e}"))
-          }
-          .await;
-
-          match geo_result {
-            Ok(geo) => {
-              if let Some(obj) = normalized.as_object_mut() {
-                obj.insert("timezone".to_string(), json!(geo.timezone));
-                // Calculate timezone offset from IANA timezone name
-                if let Ok(tz) = geo.timezone.parse::<chrono_tz::Tz>() {
-                  use chrono::Offset;
-                  let now = chrono::Utc::now().with_timezone(&tz);
-                  let offset_seconds = now.offset().fix().local_minus_utc();
-                  let offset_minutes = -(offset_seconds / 60);
-                  obj.insert("timezoneOffset".to_string(), json!(offset_minutes));
-                }
-                obj.insert("latitude".to_string(), json!(geo.latitude));
-                obj.insert("longitude".to_string(), json!(geo.longitude));
-                let locale_str = geo.locale.as_string();
-                obj.insert("language".to_string(), json!(&locale_str));
-                obj.insert(
-                  "languages".to_string(),
-                  json!([&locale_str, &geo.locale.language]),
-                );
-              }
-              log::info!(
-                "Applied geolocation to Wayfern fingerprint: {} ({})",
-                geo.locale.as_string(),
-                geo.timezone
-              );
-            }
-            Err(e) => {
-              log::warn!("Geolocation failed, using defaults: {e}");
-              if let Some(obj) = normalized.as_object_mut() {
-                if !obj.contains_key("timezone") {
-                  obj.insert("timezone".to_string(), json!("America/New_York"));
-                }
-                if !obj.contains_key("timezoneOffset") {
-                  obj.insert("timezoneOffset".to_string(), json!(300));
-                }
-              }
-            }
+      match geo_result {
+        Ok(geo) => {
+          if let Some(obj) = fingerprint.as_object_mut() {
+            obj.insert("timezone".to_string(), json!(geo.timezone));
+            let locale_str = geo.locale.as_string();
+            obj.insert("language".to_string(), json!(&locale_str));
+            obj.insert(
+              "languages".to_string(),
+              json!([&locale_str, &geo.locale.language]),
+            );
+            obj.insert("latitude".to_string(), json!(geo.latitude));
+            obj.insert("longitude".to_string(), json!(geo.longitude));
           }
         }
-
-        normalized
+        Err(e) => {
+          log::warn!("fingerprint-chromium geolocation failed, using existing/default values: {e}");
+        }
       }
-      Err(e) => {
-        cleanup().await;
-        return Err(format!("Failed to get fingerprint: {e}").into());
-      }
-    };
-
-    cleanup().await;
+    }
 
     let fingerprint_json = serde_json::to_string(&fingerprint)
       .map_err(|e| format!("Failed to serialize fingerprint: {e}"))?;
 
     log::info!(
-      "Generated Wayfern fingerprint for OS: {}, fields: {:?}",
+      "Generated fingerprint-chromium config for OS: {}, fields: {:?}",
       os,
       fingerprint
         .as_object()
         .map(|o| o.keys().collect::<Vec<_>>())
     );
 
-    // Log timezone/geolocation fields specifically for debugging
-    if let Some(obj) = fingerprint.as_object() {
-      log::info!(
-        "Generated fingerprint - timezone: {:?}, timezoneOffset: {:?}, latitude: {:?}, longitude: {:?}, language: {:?}",
-        obj.get("timezone"),
-        obj.get("timezoneOffset"),
-        obj.get("latitude"),
-        obj.get("longitude"),
-        obj.get("language")
-      );
-    }
-
     Ok(fingerprint_json)
   }
 
   #[allow(clippy::too_many_arguments)]
-  pub async fn launch_wayfern(
+  pub async fn launch_chromium(
     &self,
     _app_handle: &AppHandle,
     profile: &BrowserProfile,
     profile_path: &str,
-    config: &WayfernConfig,
+    config: &ChromiumConfig,
     url: Option<&str>,
     proxy_url: Option<&str>,
     ephemeral: bool,
     extension_paths: &[String],
     remote_debugging_port: Option<u16>,
     headless: bool,
-  ) -> Result<WayfernLaunchResult, Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<ChromiumLaunchResult, Box<dyn std::error::Error + Send + Sync>> {
     let executable_path = BrowserRunner::instance()
       .get_browser_executable_path(profile)
-      .map_err(|e| format!("Failed to get Wayfern executable path: {e}"))?;
+      .map_err(|e| format!("Failed to get Chromium executable path: {e}"))?;
 
     let port = match remote_debugging_port {
       Some(p) => p,
       None => Self::find_free_port().await?,
     };
-    log::info!("Launching Wayfern on CDP port {port} (detached)");
+    log::info!("Launching Chromium on CDP port {port} (detached)");
 
     // Diagnostic: verify critical profile files and test cookie decryption
     {
@@ -591,6 +781,8 @@ impl WayfernManager {
       }
     }
 
+    let fingerprint = Self::stored_fingerprint_value(config);
+
     let mut args = vec![
       format!("--remote-debugging-port={port}"),
       "--remote-debugging-address=127.0.0.1".to_string(),
@@ -608,7 +800,10 @@ impl WayfernManager {
       "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns".to_string(),
       "--use-mock-keychain".to_string(),
       "--password-store=basic".to_string(),
+      "--disable-non-proxied-udp".to_string(),
     ];
+
+    args.extend(Self::fingerprint_chromium_launch_args(profile, config));
 
     if headless {
       args.push("--headless=new".to_string());
@@ -629,36 +824,10 @@ impl WayfernManager {
       args.push("--disable-sync".to_string());
     }
 
-    if !extension_paths.is_empty() {
-      args.push(format!("--load-extension={}", extension_paths.join(",")));
-    }
-
-    let mut wayfern_token = crate::cloud_auth::CLOUD_AUTH.get_wayfern_token().await;
-    if wayfern_token.is_none()
-      && crate::cloud_auth::CLOUD_AUTH
-        .has_active_paid_subscription()
-        .await
-    {
-      log::info!("Wayfern token not ready for paid user, waiting...");
-      for _ in 0..15 {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        wayfern_token = crate::cloud_auth::CLOUD_AUTH.get_wayfern_token().await;
-        if wayfern_token.is_some() {
-          break;
-        }
-      }
-    }
-    if let Some(ref token) = wayfern_token {
-      args.push(format!("--wayfern-token={token}"));
-      log::info!("Wayfern token passed as CLI flag (length: {})", token.len());
-    }
+    args.extend(Self::chromium_extension_launch_args(extension_paths));
 
     if let Some(proxy) = proxy_url {
-      let pac_data = format!(
-        "data:application/x-ns-proxy-autoconfig,function FindProxyForURL(url,host){{return \"PROXY {}\";}}",
-        proxy.trim_start_matches("http://").trim_start_matches("https://")
-      );
-      args.push(format!("--proxy-pac-url={pac_data}"));
+      args.push(format!("--proxy-server={proxy}"));
       args.push("--dns-prefetch-disable".to_string());
     }
 
@@ -678,7 +847,7 @@ impl WayfernManager {
         } else {
           ""
         };
-        format!("Failed to spawn Wayfern: {e}{hint}").into()
+        format!("Failed to spawn Chromium: {e}{hint}").into()
       })?;
     let process_id = child.id();
     drop(child);
@@ -691,95 +860,24 @@ impl WayfernManager {
     let page_targets: Vec<_> = targets.iter().filter(|t| t.target_type == "page").collect();
     log::info!("Found {} page targets", page_targets.len());
 
-    // Apply fingerprint if configured
+    for target in &page_targets {
+      if let Some(ws_url) = &target.websocket_debugger_url {
+        self
+          .apply_runtime_fingerprint_overrides(ws_url, profile, &fingerprint)
+          .await;
+      }
+    }
+
+    // fingerprint-chromium consumes fingerprint data through command-line
+    // arguments. Do not call legacy proprietary CDP methods and do not inject
+    // any retired cloud token into the browser process.
     if let Some(fingerprint_json) = &config.fingerprint {
       log::info!(
-        "Applying fingerprint to Wayfern browser, fingerprint length: {} chars",
+        "fingerprint-chromium launch args were derived from stored fingerprint ({} chars)",
         fingerprint_json.len()
       );
-
-      let stored_value: serde_json::Value = serde_json::from_str(fingerprint_json)
-        .map_err(|e| format!("Failed to parse stored fingerprint JSON: {e}"))?;
-
-      // The stored fingerprint should be the fingerprint object directly (after our fix in generate_fingerprint_config)
-      // But for backwards compatibility, also handle the wrapped format
-      let mut fingerprint = if stored_value.get("fingerprint").is_some() {
-        // Old format: {"fingerprint": {...}} - extract the inner fingerprint
-        stored_value.get("fingerprint").cloned().unwrap()
-      } else {
-        // New format: fingerprint object directly {...}
-        stored_value.clone()
-      };
-
-      // Add default timezone if not present (for profiles created before timezone was added)
-      if let Some(obj) = fingerprint.as_object_mut() {
-        if !obj.contains_key("timezone") {
-          obj.insert("timezone".to_string(), json!("America/New_York"));
-          log::info!("Added default timezone to fingerprint");
-        }
-        if !obj.contains_key("timezoneOffset") {
-          obj.insert("timezoneOffset".to_string(), json!(300));
-          log::info!("Added default timezoneOffset to fingerprint");
-        }
-      }
-
-      // Denormalize fingerprint for Wayfern CDP (convert arrays/objects to JSON strings)
-      let mut fingerprint_for_cdp = Self::denormalize_fingerprint(fingerprint);
-
-      // Normalize languages: if it's a comma-separated string, convert to array
-      if let Some(obj) = fingerprint_for_cdp.as_object_mut() {
-        if let Some(serde_json::Value::String(s)) = obj.get("languages").cloned() {
-          let arr: Vec<&str> = s.split(',').map(|l| l.trim()).collect();
-          obj.insert("languages".to_string(), json!(arr));
-        }
-      }
-
-      log::info!(
-        "Fingerprint prepared for CDP command, fields: {:?}",
-        fingerprint_for_cdp
-          .as_object()
-          .map(|o| o.keys().collect::<Vec<_>>())
-      );
-
-      // Log timezone and geolocation fields specifically for debugging
-      if let Some(obj) = fingerprint_for_cdp.as_object() {
-        log::info!(
-          "Timezone/Geolocation fields - timezone: {:?}, timezoneOffset: {:?}, latitude: {:?}, longitude: {:?}, language: {:?}, languages: {:?}",
-          obj.get("timezone"),
-          obj.get("timezoneOffset"),
-          obj.get("latitude"),
-          obj.get("longitude"),
-          obj.get("language"),
-          obj.get("languages")
-        );
-      }
-
-      // Include wayfern token if available (enables cross-OS fingerprinting for paid users)
-      let wayfern_token = crate::cloud_auth::CLOUD_AUTH.get_wayfern_token().await;
-      let mut fingerprint_params = fingerprint_for_cdp.clone();
-      if let Some(ref token) = wayfern_token {
-        if let Some(obj) = fingerprint_params.as_object_mut() {
-          obj.insert("wayfernToken".to_string(), json!(token));
-        }
-      }
-
-      for target in &page_targets {
-        if let Some(ws_url) = &target.websocket_debugger_url {
-          log::info!("Applying fingerprint to target via WebSocket: {}", ws_url);
-          match self
-            .send_cdp_command(ws_url, "Wayfern.setFingerprint", fingerprint_params.clone())
-            .await
-          {
-            Ok(result) => log::info!(
-              "Successfully applied fingerprint to page target: {:?}",
-              result
-            ),
-            Err(e) => log::error!("Failed to apply fingerprint to target: {e}"),
-          }
-        }
-      }
     } else {
-      log::warn!("No fingerprint found in config, browser will use default fingerprint");
+      log::warn!("No fingerprint found in config, fingerprint-chromium will use seed defaults");
     }
 
     // Geolocation is handled internally by the browser binary.
@@ -821,7 +919,7 @@ impl WayfernManager {
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let instance = WayfernInstance {
+    let instance = ChromiumInstance {
       id: id.clone(),
       process_id,
       profile_path: Some(profile_path.to_string()),
@@ -832,7 +930,7 @@ impl WayfernManager {
     let mut inner = self.inner.lock().await;
     inner.instances.insert(id.clone(), instance);
 
-    Ok(WayfernLaunchResult {
+    Ok(ChromiumLaunchResult {
       id,
       processId: process_id,
       profilePath: Some(profile_path.to_string()),
@@ -841,14 +939,14 @@ impl WayfernManager {
     })
   }
 
-  pub async fn stop_wayfern(
+  pub async fn stop_chromium(
     &self,
     id: &str,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut inner = self.inner.lock().await;
 
     if let Some(instance) = inner.instances.remove(id) {
-      log::info!("Cleaning up Wayfern instance {}", instance.id);
+      log::info!("Cleaning up Chromium instance {}", instance.id);
       if let Some(pid) = instance.process_id {
         #[cfg(unix)]
         {
@@ -865,14 +963,14 @@ impl WayfernManager {
             .creation_flags(CREATE_NO_WINDOW)
             .output();
         }
-        log::info!("Stopped Wayfern instance {id} (PID: {pid})");
+        log::info!("Stopped Chromium instance {id} (PID: {pid})");
       }
     }
 
     Ok(())
   }
 
-  /// Opens a URL in a new tab for an existing Wayfern instance.
+  /// Opens a URL in a new tab for an existing Chromium instance.
   pub async fn open_url_in_tab(
     &self,
     profile_path: &str,
@@ -898,7 +996,7 @@ impl WayfernManager {
           .unwrap_or(false)
       })
       .and_then(|i| i.cdp_port)
-      .ok_or("Wayfern instance (with CDP port) not found for profile")?;
+      .ok_or("Chromium instance (with CDP port) not found for profile")?;
     drop(inner);
 
     // Open the URL in a new tab via the CDP HTTP convenience endpoint.
@@ -939,7 +1037,7 @@ impl WayfernManager {
     None
   }
 
-  pub async fn find_wayfern_by_profile(&self, profile_path: &str) -> Option<WayfernLaunchResult> {
+  pub async fn find_chromium_by_profile(&self, profile_path: &str) -> Option<ChromiumLaunchResult> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
     let mut inner = self.inner.lock().await;
@@ -973,7 +1071,7 @@ impl WayfernManager {
           let sysinfo_pid = sysinfo::Pid::from_u32(pid);
 
           if system.process(sysinfo_pid).is_some() {
-            return Some(WayfernLaunchResult {
+            return Some(ChromiumLaunchResult {
               id: id.clone(),
               processId: instance.process_id,
               profilePath: instance.profile_path.clone(),
@@ -982,7 +1080,7 @@ impl WayfernManager {
             });
           } else {
             log::info!(
-              "Wayfern process {} for profile {} is no longer running, cleaning up",
+              "Chromium process {} for profile {} is no longer running, cleaning up",
               pid,
               profile_path
             );
@@ -994,19 +1092,19 @@ impl WayfernManager {
     }
 
     // If not found in in-memory instances, scan system processes.
-    // This handles the case where the GUI was restarted but Wayfern is still running.
+    // This handles the case where the GUI was restarted but Chromium is still running.
     if let Some((pid, found_profile_path, cdp_port)) =
-      Self::find_wayfern_process_by_profile(&target_path)
+      Self::find_chromium_process_by_profile(&target_path)
     {
       log::info!(
-        "Found running Wayfern process (PID: {}) for profile path via system scan",
+        "Found running Chromium process (PID: {}) for profile path via system scan",
         pid
       );
 
       let instance_id = format!("recovered_{}", pid);
       inner.instances.insert(
         instance_id.clone(),
-        WayfernInstance {
+        ChromiumInstance {
           id: instance_id.clone(),
           process_id: Some(pid),
           profile_path: Some(found_profile_path.clone()),
@@ -1015,7 +1113,7 @@ impl WayfernManager {
         },
       );
 
-      return Some(WayfernLaunchResult {
+      return Some(ChromiumLaunchResult {
         id: instance_id,
         processId: Some(pid),
         profilePath: Some(found_profile_path),
@@ -1027,8 +1125,8 @@ impl WayfernManager {
     None
   }
 
-  /// Scan system processes to find a Wayfern/Chromium process using a specific profile path
-  fn find_wayfern_process_by_profile(
+  /// Scan system processes to find a Chromium process using a specific profile path
+  fn find_chromium_process_by_profile(
     target_path: &std::path::Path,
   ) -> Option<(u32, String, Option<u16>)> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
@@ -1045,10 +1143,8 @@ impl WayfernManager {
         continue;
       }
 
-      let exe_name = process.name().to_string_lossy().to_lowercase();
-      let is_chromium_like = exe_name.contains("wayfern")
-        || exe_name.contains("chromium")
-        || exe_name.contains("chrome");
+      let exe_name = process.name().to_string_lossy();
+      let is_chromium_like = crate::browser::chromium_process_name_looks_like(&exe_name);
 
       if !is_chromium_like {
         continue;
@@ -1092,27 +1188,27 @@ impl WayfernManager {
   }
 
   #[allow(dead_code)]
-  pub async fn launch_wayfern_profile(
+  pub async fn launch_chromium_profile(
     &self,
     app_handle: &AppHandle,
     profile: &BrowserProfile,
-    config: &WayfernConfig,
+    config: &ChromiumConfig,
     url: Option<&str>,
     proxy_url: Option<&str>,
-  ) -> Result<WayfernLaunchResult, Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<ChromiumLaunchResult, Box<dyn std::error::Error + Send + Sync>> {
     let profiles_dir = self.get_profiles_dir();
     let profile_path = profiles_dir.join(profile.id.to_string()).join("profile");
     let profile_path_str = profile_path.to_string_lossy().to_string();
 
     std::fs::create_dir_all(&profile_path)?;
 
-    if let Some(existing) = self.find_wayfern_by_profile(&profile_path_str).await {
-      log::info!("Stopping existing Wayfern instance for profile");
-      self.stop_wayfern(&existing.id).await?;
+    if let Some(existing) = self.find_chromium_by_profile(&profile_path_str).await {
+      log::info!("Stopping existing Chromium instance for profile");
+      self.stop_chromium(&existing.id).await?;
     }
 
     self
-      .launch_wayfern(
+      .launch_chromium(
         app_handle,
         profile,
         &profile_path_str,
@@ -1148,12 +1244,98 @@ impl WayfernManager {
     }
 
     for id in dead_ids {
-      log::info!("Cleaning up dead Wayfern instance: {id}");
+      log::info!("Cleaning up dead Chromium instance: {id}");
       inner.instances.remove(&id);
     }
   }
 }
 
+#[cfg(test)]
+mod tests {
+  use super::ChromiumManager;
+  use crate::profile::BrowserProfile;
+  use serde_json::json;
+
+  #[test]
+  fn test_chromium_extension_launch_args_empty() {
+    let args = ChromiumManager::chromium_extension_launch_args(&[]);
+    assert!(args.is_empty());
+  }
+
+  #[test]
+  fn test_chromium_extension_launch_args_includes_load_and_disable_except() {
+    let args = ChromiumManager::chromium_extension_launch_args(&[
+      "/tmp/ext-a".to_string(),
+      "/tmp/ext-b".to_string(),
+    ]);
+    assert_eq!(
+      args,
+      vec![
+        "--load-extension=/tmp/ext-a,/tmp/ext-b".to_string(),
+        "--disable-extensions-except=/tmp/ext-a,/tmp/ext-b".to_string(),
+      ]
+    );
+  }
+
+  fn test_profile() -> BrowserProfile {
+    BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "test".to_string(),
+      browser: "chromium".to_string(),
+      version: "142.0.7444.175".to_string(),
+      ..BrowserProfile::default()
+    }
+  }
+
+  #[test]
+  fn test_normalize_user_agent_for_runtime_rewrites_legacy_major_version() {
+    let profile = test_profile();
+    let raw = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+    let normalized = ChromiumManager::normalize_user_agent_for_runtime(raw, &profile);
+    assert!(normalized.contains("Chrome/142.0.0.0"));
+    assert!(!normalized.contains("Chrome/146.0.0.0"));
+  }
+
+  #[test]
+  fn test_user_agent_override_params_include_accept_language_and_platform() {
+    let profile = test_profile();
+    let params = ChromiumManager::user_agent_override_params(
+      &profile,
+      &json!({
+        "userAgent": "Mozilla/5.0 Chrome/146.0.0.0 Safari/537.36",
+        "languages": ["zh-HK", "zh"],
+        "platform": "MacIntel"
+      }),
+    )
+    .expect("override params should exist");
+
+    assert_eq!(
+      params["userAgent"],
+      "Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36"
+    );
+    assert_eq!(params["acceptLanguage"], "zh-HK,zh");
+    assert_eq!(params["platform"], "MacIntel");
+  }
+
+  #[test]
+  fn test_fingerprint_override_script_injects_device_memory() {
+    let script = ChromiumManager::fingerprint_override_script(
+      &test_profile(),
+      &json!({
+        "deviceMemory": 16,
+        "userAgent": "Mozilla/5.0 Chrome/146.0.0.0 Safari/537.36",
+        "languages": ["zh-HK", "zh"]
+      }),
+    )
+    .expect("script should be generated");
+
+    assert!(script.contains("deviceMemory"));
+    assert!(script.contains("16.0") || script.contains("16"));
+    assert!(script.contains("userAgent"));
+    assert!(script.contains("zh-HK"));
+  }
+}
+
 lazy_static::lazy_static! {
-  static ref WAYFERN_MANAGER: WayfernManager = WayfernManager::new();
+  static ref CHROMIUM_MANAGER: ChromiumManager = ChromiumManager::new();
 }

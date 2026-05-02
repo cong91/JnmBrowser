@@ -105,10 +105,12 @@ pub fn open_gui() {
 
     if let Ok(current_exe) = std::env::current_exe() {
       if let Some(exe_dir) = current_exe.parent() {
-        let app_path = exe_dir.join("donutbrowser.exe");
-        if app_path.exists() {
-          let _ = Command::new(app_path).spawn();
-          return;
+        for app_name in ["JnmBrowser.exe", "donutbrowser.exe"] {
+          let app_path = exe_dir.join(app_name);
+          if app_path.exists() {
+            let _ = Command::new(app_path).spawn();
+            return;
+          }
         }
       }
     }
@@ -130,7 +132,7 @@ pub fn open_gui() {
 
   #[cfg(target_os = "linux")]
   {
-    let _ = Command::new("donutbrowser").spawn();
+    let _ = Command::new("JnmBrowser").spawn();
   }
 }
 
@@ -205,6 +207,7 @@ pub fn quit_gui() {
 
   #[cfg(target_os = "linux")]
   {
+    let _ = Command::new("pkill").args(["-x", "JnmBrowser"]).spawn();
     let _ = Command::new("pkill").args(["-x", "donutbrowser"]).spawn();
   }
 }

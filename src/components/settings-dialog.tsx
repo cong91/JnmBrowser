@@ -40,7 +40,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { useLanguage } from "@/hooks/use-language";
 import type { PermissionType } from "@/hooks/use-permissions";
 import { usePermissions } from "@/hooks/use-permissions";
@@ -134,12 +133,7 @@ export function SettingsDialog({
     isMicrophoneAccessGranted,
     isCameraAccessGranted,
   } = usePermissions();
-  const { user: cloudUser } = useCloudAuth();
-  // Encryption is available to everyone except team members who aren't owners
-  const canUseEncryption =
-    cloudUser == null ||
-    cloudUser.plan !== "team" ||
-    cloudUser.teamRole === "owner";
+  const canUseEncryption = true;
   const {
     currentLanguage,
     changeLanguage,

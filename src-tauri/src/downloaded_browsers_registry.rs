@@ -11,6 +11,10 @@ fn startup_browser_auto_downloads_enabled() -> bool {
   false
 }
 
+fn registry_browser_keys(browser: &str) -> Vec<&str> {
+  vec![browser]
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DownloadedBrowserInfo {
   pub browser: String,
@@ -79,27 +83,41 @@ impl DownloadedBrowsersRegistry {
 
   pub fn add_browser(&self, info: DownloadedBrowserInfo) {
     let mut data = self.data.lock().unwrap();
+    let canonical_browser = crate::browser::canonical_browser_name(&info.browser).to_string();
+    let mut info = info;
+    info.browser = canonical_browser.clone();
     data
       .browsers
-      .entry(info.browser.clone())
+      .entry(canonical_browser)
       .or_default()
       .insert(info.version.clone(), info);
   }
 
   pub fn remove_browser(&self, browser: &str, version: &str) -> Option<DownloadedBrowserInfo> {
     let mut data = self.data.lock().unwrap();
-    data.browsers.get_mut(browser)?.remove(version)
+    for key in registry_browser_keys(browser) {
+      if let Some(removed) = data
+        .browsers
+        .get_mut(key)
+        .and_then(|versions| versions.remove(version))
+      {
+        return Some(removed);
+      }
+    }
+    None
   }
 
   /// Check if browser is registered in the registry (without disk validation)
   /// This method only checks the in-memory registry and does not validate file existence
   pub fn is_browser_registered(&self, browser: &str, version: &str) -> bool {
     let data = self.data.lock().unwrap();
-    data
-      .browsers
-      .get(browser)
-      .and_then(|versions| versions.get(version))
-      .is_some()
+    registry_browser_keys(browser).into_iter().any(|key| {
+      data
+        .browsers
+        .get(key)
+        .and_then(|versions| versions.get(version))
+        .is_some()
+    })
   }
 
   /// Check if browser is downloaded and files exist on disk
@@ -138,11 +156,13 @@ impl DownloadedBrowsersRegistry {
 
   pub fn get_downloaded_versions(&self, browser: &str) -> Vec<String> {
     let data = self.data.lock().unwrap();
-    data
-      .browsers
-      .get(browser)
-      .map(|versions| versions.keys().cloned().collect())
-      .unwrap_or_default()
+    let mut versions = std::collections::BTreeSet::new();
+    for key in registry_browser_keys(browser) {
+      if let Some(entries) = data.browsers.get(key) {
+        versions.extend(entries.keys().cloned());
+      }
+    }
+    versions.into_iter().collect()
   }
 
   pub fn mark_download_started(&self, browser: &str, version: &str, file_path: PathBuf) {
@@ -164,7 +184,7 @@ impl DownloadedBrowsersRegistry {
   ) -> Result<(), String> {
     // Only mark as completed after verification succeeds
     let info = DownloadedBrowserInfo {
-      browser: browser.to_string(),
+      browser: crate::browser::canonical_browser_name(browser).to_string(),
       version: version.to_string(),
       file_path,
     };
@@ -1091,6 +1111,23 @@ mod tests {
   }
 
   #[test]
+  fn test_chromium_registry_uses_canonical_keys_only() {
+    let registry = DownloadedBrowsersRegistry::new();
+
+    registry.add_browser(DownloadedBrowserInfo {
+      browser: "chromium".to_string(),
+      version: "142.0.7444.175".to_string(),
+      file_path: PathBuf::from("/test/chromium"),
+    });
+
+    assert!(registry.is_browser_registered("chromium", "142.0.7444.175"));
+    assert!(!registry.is_browser_registered("wayfern", "142.0.7444.175"));
+
+    let chromium_versions = registry.get_downloaded_versions("chromium");
+    assert_eq!(chromium_versions, vec!["142.0.7444.175".to_string()]);
+  }
+
+  #[test]
   fn test_mark_download_lifecycle() {
     let registry = DownloadedBrowsersRegistry::new();
 
@@ -1258,7 +1295,7 @@ pub async fn ensure_active_browsers_downloaded(
   let version_manager = crate::browser_version_manager::BrowserVersionManager::instance();
   let mut downloaded = Vec::new();
 
-  for browser in &["wayfern", "camoufox"] {
+  for browser in &["chromium", "camoufox"] {
     // Check if any version is already downloaded
     let existing = registry.get_downloaded_versions(browser);
     if !existing.is_empty() {

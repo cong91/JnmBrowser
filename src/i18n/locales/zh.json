@@ -156,14 +156,14 @@
       "passwordSaved": "加密密码已设置",
       "passwordMismatch": "密码不匹配",
       "passwordTooShort": "密码必须至少8个字符",
-      "requiresProOrOwner": "配置文件加密仅适用于Pro用户和团队所有者。"
+      "requiresProOrOwner": "配置文件加密可在此处管理。"
     },
     "commercial": {
-      "title": "商业许可",
-      "trialActive": "试用期：剩余 {{days}} 天 {{hours}} 小时",
-      "trialActiveDescription": "试用期内商业使用免费",
-      "trialExpired": "试用期已过期",
-      "trialExpiredDescription": "个人使用仍然免费。商业使用需要许可证。"
+      "title": "使用说明",
+      "trialActive": "所有功能均可用",
+      "trialActiveDescription": "个人和商业用途均可使用。",
+      "trialExpired": "所有功能均可用",
+      "trialExpiredDescription": "个人和商业用途均可使用。"
     },
     "advanced": {
       "title": "高级",
@@ -229,9 +229,9 @@
       "stopLeader": "停止此配置文件及其所有跟随者",
       "stopFollower": "正在跟随 {{leaderName}} 的操作",
       "desyncedTooltip": "在 {{url}} 同步失败",
-      "wayfernOnly": "只有 Wayfern 配置文件可以同步",
+      "wayfernOnly": "只有 Chromium 配置文件可以同步",
       "selectFollowers": "选择跟随者配置文件",
-      "selectFollowersDesc": "选择将复制领导者配置文件操作的配置文件。只能选择已停止的 Wayfern 配置文件。",
+      "selectFollowersDesc": "选择将复制领导者配置文件操作的配置文件。只能选择已停止的 Chromium 配置文件。",
       "leader": "领导者",
       "follower": "跟随者",
       "startSession": "开始同步会话",
@@ -273,7 +273,7 @@
     "antiDetect": {
       "title": "防检测浏览器",
       "description": "选择具有防检测功能的浏览器",
-      "chromium": "Wayfern",
+      "chromium": "Chromium",
       "firefox": "Camoufox",
       "badge": "防检测浏览器"
     },
@@ -315,7 +315,7 @@
       "preparingDownload": "正在准备下载..."
     },
     "chromiumLabel": "Chromium",
-    "chromiumSubtitle": "由 Wayfern 驱动",
+    "chromiumSubtitle": "由 Chromium 驱动",
     "firefoxLabel": "Firefox",
     "firefoxSubtitle": "由 Camoufox 驱动",
     "camoufoxWarning": "Firefox（Camoufox）由第三方组织维护。在生产环境中，请使用 Chromium。",
@@ -626,6 +626,11 @@
       "removeFromClaudeCode": "从 Claude Code 移除",
       "addedToClaudeCode": "已添加到 Claude Code",
       "removedFromClaudeCode": "已从 Claude Code 移除",
+      "codexTitle": "Codex",
+      "addToCodex": "添加到 Codex",
+      "removeFromCodex": "从 Codex 移除",
+      "addedToCodex": "已添加到 Codex",
+      "removedFromCodex": "已从 Codex 移除",
       "config": "MCP 配置",
       "copyConfig": "复制配置"
     },
@@ -649,7 +654,7 @@
     "tokenCopied": "令牌已复制",
     "mcpEnableLabel": "启用 MCP 服务器 (Model Context Protocol)",
     "mcpEnableDescription": "允许 Claude Desktop 等 AI 助手控制浏览器。",
-    "mcpAcceptTermsFirst": "(请先在设置中接受 Wayfern 条款)",
+    "mcpAcceptTermsFirst": "(请先在设置中接受 Chromium 条款)",
     "mcpStarted": "MCP 服务器已在端口 {{port}} 上启动",
     "mcpStopped": "MCP 服务器已停止",
     "mcpToggleFailed": "切换 MCP 服务器失败",
@@ -702,8 +707,8 @@
         "webgl": "阻止 WebGL"
       }
     },
-    "wayfern": {
-      "title": "Wayfern 配置",
+    "chromium": {
+      "title": "Chromium 配置",
       "fingerprint": {
         "title": "指纹",
         "randomize": "启动时随机化",
@@ -756,7 +761,7 @@
       "sourcePlaceholder": "选择要复制 Cookie 的配置文件",
       "running": "(运行中)",
       "targetProfiles": "目标配置文件 ({{count}})",
-      "noOtherTargets": "未选择其他 Wayfern/Camoufox 配置文件",
+      "noOtherTargets": "未选择其他 Chromium/Camoufox 配置文件",
       "selectSourceFirst": "请先选择源配置文件",
       "selectionStatus": "(已选择 {{selected}} / {{total}})",
       "searchPlaceholder": "搜索域名或 Cookie...",
@@ -804,7 +809,7 @@
       "preview": "找到 {{count}} 个 Cookies",
       "success": "成功导入 {{imported}} 个 Cookies（替换了 {{replaced}} 个）",
       "error": "导入 Cookies 失败",
-      "proFeature": "导入 Cookies 是 Pro 功能"
+      "proFeature": "支持导入 Cookies"
     },
     "export": {
       "title": "导出 Cookies",
@@ -881,7 +886,7 @@
     "unknownError": "发生未知错误。请重试。",
     "noProfilesForUrl": "没有可用的配置文件。请先创建配置文件再打开 URL。",
     "updateCamoufoxConfigFailed": "更新 camoufox 配置失败: {{error}}",
-    "updateWayfernConfigFailed": "更新 wayfern 配置失败: {{error}}",
+    "updateChromiumConfigFailed": "更新 chromium 配置失败: {{error}}",
     "createProfileFailed": "创建配置文件失败: {{error}}",
     "launchBrowserFailed": "启动浏览器失败: {{error}}",
     "cannotDeleteRunningProfile": "浏览器运行时无法删除配置文件。请先停止浏览器。",
@@ -889,7 +894,7 @@
     "renameProfileFailed": "重命名配置文件失败: {{error}}",
     "killBrowserFailed": "终止浏览器失败: {{error}}",
     "deleteSelectedProfilesFailed": "删除所选配置文件失败: {{error}}",
-    "cookieCopyUnsupportedBrowser": "Cookie 复制仅适用于 Wayfern 和 Camoufox 配置文件",
+    "cookieCopyUnsupportedBrowser": "Cookie 复制仅适用于 Chromium 和 Camoufox 配置文件",
     "updateSyncSettingsFailed": "更新同步设置失败",
     "cloneProfileFailed": "克隆配置文件失败: {{error}}",
     "loadSupportedBrowsersFailed": "加载受支持的浏览器失败",
@@ -906,7 +911,7 @@
   },
   "browser": {
     "camoufox": "Camoufox",
-    "wayfern": "Wayfern"
+    "chromium": "Chromium"
   },
   "fingerprint": {
     "crossOsWarning": "伪装不同操作系统的指纹不太可靠，因为不可能完美模拟所有底层组件。请谨慎使用。",
@@ -1006,7 +1011,7 @@
     "productSub": "产品子版本",
     "brand": "品牌",
     "brandVersion": "品牌版本",
-    "proFeature": "这是 Pro 功能",
+    "proFeature": "高级指纹设置可用",
     "generateFingerprint": "生成指纹",
     "refreshFingerprint": "刷新指纹",
     "canvasNoiseSeedPlaceholder": "输入用于 canvas 指纹的种子字符串",
@@ -1102,7 +1107,7 @@
     "extensionsTab": "扩展程序",
     "groupsTab": "分组",
     "managedNotice": "此处管理的扩展程序将在启动时替换配置文件中手动安装的所有扩展程序。",
-    "proRequired": "扩展程序管理是 Pro 功能",
+    "proRequired": "扩展程序管理可用",
     "empty": "尚未上传任何扩展程序。",
     "noGroups": "尚未创建任何扩展程序组。",
     "createGroup": "创建分组",
@@ -1156,12 +1161,12 @@
     "assignGroupFailed": "分配扩展组失败"
   },
   "pro": {
-    "badge": "PRO",
-    "fingerprintLocked": "指纹编辑是 Pro 功能",
-    "cookieCopyLocked": "Cookie 复制是 Pro 功能",
-    "cookieImportLocked": "Cookie 导入是 Pro 功能",
-    "cookieExportLocked": "Cookie 导出是 Pro 功能",
-    "cookieManagementLocked": "Cookie 管理是 Pro 功能"
+    "badge": "开放",
+    "fingerprintLocked": "支持指纹编辑",
+    "cookieCopyLocked": "支持 Cookie 复制",
+    "cookieImportLocked": "支持 Cookie 导入",
+    "cookieExportLocked": "支持 Cookie 导出",
+    "cookieManagementLocked": "支持 Cookie 管理"
   },
   "dnsBlocklist": {
     "title": "DNS 拦截列表",
@@ -1421,8 +1426,8 @@
     "tryAgain": "请重试"
   },
   "wayfernTerms": {
-    "title": "Wayfern 条款和条件",
-    "description": "在使用 JnmBrowser 之前,你必须阅读并同意 Wayfern 的条款和条件。",
+    "title": "Chromium 条款和条件",
+    "description": "在使用 JnmBrowser 之前,你必须阅读并同意 Chromium 的条款和条件。",
     "reviewLabel": "请查看以下条款和条件:",
     "agreeNotice": "点击「我接受」即表示你同意受这些条款约束。",
     "acceptButton": "我接受",
@@ -1431,10 +1436,10 @@
     "tryAgain": "请重试"
   },
   "commercialTrial": {
-    "title": "商业试用期已过期",
-    "description": "你的 2 周商业试用期已结束。",
-    "body": "如果你将 JnmBrowser 用于商业目的,需要购买商业许可证才能继续。你仍然可以免费用于个人用途。",
-    "understandButton": "我明白了",
+    "title": "使用说明",
+    "description": "所有功能均可用。",
+    "body": "JnmBrowser 可用于个人和商业用途。",
+    "understandButton": "知道了",
     "failed": "保存确认失败",
     "tryAgain": "请重试"
   },
@@ -1595,5 +1600,10 @@
       "upToDateDescription": "所有浏览器版本都是最新的",
       "updateAllFailed": "更新浏览器版本失败"
     }
+  },
+  "browserSupportWarning": {
+    "title": "Browser support ending soon",
+    "description": "Support for the following profiles will be removed on March 15, 2026: {{names}}. Please migrate to Chromium or Camoufox profiles.",
+    "learnMore": "Learn more"
   }
 }

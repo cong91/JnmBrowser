@@ -7,6 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::browser::GithubRelease;
 
+const FINGERPRINT_CHROMIUM_MANIFEST_URL: &str =
+  "https://raw.githubusercontent.com/JnmHub/JnmBrowser-chromium/main/fingerprint-chromium.json";
+const FINGERPRINT_CHROMIUM_MANIFEST_ENV: &str = "JNM_FINGERPRINT_CHROMIUM_MANIFEST_URL";
+const LOCAL_FINGERPRINT_CHROMIUM_MANIFEST: &str = "fingerprint-chromium.json";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionComponent {
   pub major: u32,
@@ -306,15 +311,11 @@ pub fn is_browser_version_nightly(
       is_nightly_version(version)
     }
     "chromium" => {
-      // Chromium builds are generally stable snapshots
+      // Chromium manifest/runtime releases are treated as stable
       false
     }
     "camoufox" => {
       // For Camoufox, beta versions are actually the stable releases
-      false
-    }
-    "wayfern" => {
-      // For Wayfern, all releases from version.json are stable
       false
     }
     _ => {
@@ -347,9 +348,12 @@ pub struct BrowserRelease {
   pub is_prerelease: bool,
 }
 
-/// Wayfern version info from https://donutbrowser.com/wayfern.json
+/// Chromium engine manifest.
+///
+/// Kept intentionally compatible with the original Chromium legacy manifest schema:
+/// `{ "version": "...", "downloads": { "macos-arm64": "https://...", ... } }`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct WayfernVersionInfo {
+pub struct ChromiumVersionInfo {
   pub version: String,
   pub downloads: HashMap<String, Option<String>>,
 }
@@ -367,8 +371,8 @@ struct CachedGithubData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CachedWayfernData {
-  version_info: WayfernVersionInfo,
+struct CachedChromiumData {
+  version_info: ChromiumVersionInfo,
   timestamp: u64,
 }
 
@@ -377,6 +381,7 @@ pub struct ApiClient {
   firefox_api_base: String,
   firefox_dev_api_base: String,
   github_api_base: String,
+  #[allow(dead_code)]
   chromium_api_base: String,
 }
 
@@ -921,6 +926,7 @@ impl ApiClient {
     (os.to_string(), arch.to_string())
   }
 
+  #[allow(dead_code)]
   pub async fn fetch_chromium_latest_version(
     &self,
   ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -952,6 +958,7 @@ impl ApiClient {
     Ok(version)
   }
 
+  #[allow(dead_code)]
   pub async fn fetch_chromium_releases_with_caching(
     &self,
     no_caching: bool,
@@ -1089,7 +1096,7 @@ impl ApiClient {
     Ok(compatible_releases)
   }
 
-  fn load_cached_wayfern_version(&self) -> Option<WayfernVersionInfo> {
+  fn load_cached_chromium_version(&self) -> Option<ChromiumVersionInfo> {
     let cache_dir = Self::get_cache_dir().ok()?;
     let cache_file = cache_dir.join("wayfern_version.json");
 
@@ -1098,54 +1105,113 @@ impl ApiClient {
     }
 
     let content = fs::read_to_string(&cache_file).ok()?;
-    let cached_data: CachedWayfernData = serde_json::from_str(&content).ok()?;
+    let cached_data: CachedChromiumData = serde_json::from_str(&content).ok()?;
 
-    // Always use cached Wayfern version - cache never expires, only gets updated
+    // Always use cached Chromium manifest version - cache never expires, only gets updated
     Some(cached_data.version_info)
   }
 
-  fn save_cached_wayfern_version(
+  fn save_cached_chromium_version(
     &self,
-    version_info: &WayfernVersionInfo,
+    version_info: &ChromiumVersionInfo,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cache_dir = Self::get_cache_dir()?;
     let cache_file = cache_dir.join("wayfern_version.json");
 
-    let cached_data = CachedWayfernData {
+    let cached_data = CachedChromiumData {
       version_info: version_info.clone(),
       timestamp: Self::get_current_timestamp(),
     };
 
     let content = serde_json::to_string_pretty(&cached_data)?;
     fs::write(&cache_file, content)?;
-    log::info!("Cached Wayfern version: {}", version_info.version);
+    log::info!("Cached Chromium manifest version: {}", version_info.version);
     Ok(())
   }
 
-  /// Fetch Wayfern version info from https://donutbrowser.com/wayfern.json
-  pub async fn fetch_wayfern_version_with_caching(
+  fn load_local_fingerprint_chromium_manifest(&self) -> Option<ChromiumVersionInfo> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = std::env::var("JNM_FINGERPRINT_CHROMIUM_MANIFEST_FILE") {
+      candidates.push(PathBuf::from(path));
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+      candidates.push(current_dir.join(LOCAL_FINGERPRINT_CHROMIUM_MANIFEST));
+      candidates.push(
+        current_dir
+          .join("..")
+          .join(LOCAL_FINGERPRINT_CHROMIUM_MANIFEST),
+      );
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+      if let Some(exe_dir) = exe.parent() {
+        candidates.push(exe_dir.join(LOCAL_FINGERPRINT_CHROMIUM_MANIFEST));
+      }
+    }
+
+    for path in candidates {
+      if !path.exists() {
+        continue;
+      }
+      match fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<ChromiumVersionInfo>(&content).ok())
+      {
+        Some(info) => {
+          log::info!(
+            "Loaded local fingerprint-chromium manifest from {}: {}",
+            path.display(),
+            info.version
+          );
+          return Some(info);
+        }
+        None => {
+          log::warn!(
+            "Local fingerprint-chromium manifest exists but could not be parsed: {}",
+            path.display()
+          );
+        }
+      }
+    }
+
+    None
+  }
+
+  /// Fetch the fingerprint-chromium manifest.
+  ///
+  /// The public method name is kept for compatibility with the existing Chromium legacy
+  /// call sites, but the data now comes from the JnmBrowser fingerprint-chromium
+  /// manifest. Fallback order:
+  /// remote GitHub raw -> cached manifest -> local development manifest.
+  pub async fn fetch_chromium_version_with_caching(
     &self,
     no_caching: bool,
-  ) -> Result<WayfernVersionInfo, Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<ChromiumVersionInfo, Box<dyn std::error::Error + Send + Sync>> {
     // Check cache first (unless bypassing)
     if !no_caching {
-      if let Some(cached_version) = self.load_cached_wayfern_version() {
-        log::info!("Using cached Wayfern version: {}", cached_version.version);
+      if let Some(cached_version) = self.load_cached_chromium_version() {
+        log::info!(
+          "Using cached Chromium manifest version: {}",
+          cached_version.version
+        );
         return Ok(cached_version);
       }
     }
 
-    log::info!("Fetching Wayfern version from https://donutbrowser.com/wayfern.json");
-    let url = "https://donutbrowser.com/wayfern.json";
+    let url = std::env::var(FINGERPRINT_CHROMIUM_MANIFEST_ENV)
+      .unwrap_or_else(|_| FINGERPRINT_CHROMIUM_MANIFEST_URL.to_string());
+    log::info!("Fetching fingerprint-chromium manifest from {url}");
 
     let mut last_err = None;
-    let mut version_info: Option<WayfernVersionInfo> = None;
+    let mut version_info: Option<ChromiumVersionInfo> = None;
 
     for attempt in 1..=3 {
       match self
         .client
-        .get(url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+        .get(&url)
+        .header("User-Agent", "JnmBrowser")
         .send()
         .await
       {
@@ -1153,7 +1219,7 @@ impl ApiClient {
           if !response.status().is_success() {
             last_err = Some(format!("HTTP {}", response.status()));
           } else {
-            match response.json::<WayfernVersionInfo>().await {
+            match response.json::<ChromiumVersionInfo>().await {
               Ok(info) => {
                 version_info = Some(info);
                 break;
@@ -1163,7 +1229,7 @@ impl ApiClient {
           }
         }
         Err(e) => {
-          log::warn!("Wayfern fetch attempt {attempt}/3 failed: {e}");
+          log::warn!("fingerprint-chromium manifest fetch attempt {attempt}/3 failed: {e}");
           last_err = Some(e.to_string());
         }
       }
@@ -1173,38 +1239,69 @@ impl ApiClient {
       }
     }
 
-    let version_info = version_info.ok_or_else(|| {
-      format!(
-        "Failed to fetch Wayfern version after 3 attempts: {}",
-        last_err.unwrap_or_default()
-      )
-    })?;
-    log::info!("Fetched Wayfern version: {}", version_info.version);
-
-    // Cache the results (unless bypassing cache)
-    if !no_caching {
-      if let Err(e) = self.save_cached_wayfern_version(&version_info) {
-        log::error!("Failed to cache Wayfern version: {e}");
+    let version_info = match version_info {
+      Some(info) => info,
+      None => {
+        let remote_error = last_err.unwrap_or_default();
+        if let Some(cached_version) = self.load_cached_chromium_version() {
+          log::warn!(
+            "Using cached fingerprint-chromium manifest after remote fetch failed: {remote_error}"
+          );
+          return Ok(cached_version);
+        }
+        if let Some(local_manifest) = self.load_local_fingerprint_chromium_manifest() {
+          log::warn!(
+            "Using local fingerprint-chromium manifest after remote/cache failed: {remote_error}"
+          );
+          return Ok(local_manifest);
+        }
+        return Err(format!(
+          "Failed to fetch fingerprint-chromium manifest from {url} after 3 attempts: {remote_error}"
+        )
+        .into());
       }
+    };
+    log::info!(
+      "Fetched fingerprint-chromium manifest version: {}",
+      version_info.version
+    );
+
+    // Always cache successful remote manifests so no_caching callers can still
+    // fall back when the next network request fails.
+    if let Err(e) = self.save_cached_chromium_version(&version_info) {
+      log::error!("Failed to cache fingerprint-chromium manifest: {e}");
     }
 
     Ok(version_info)
   }
 
-  /// Get the download URL for Wayfern based on current platform
-  pub fn get_wayfern_download_url(&self, version_info: &WayfernVersionInfo) -> Option<String> {
-    let (os, arch) = Self::get_platform_info();
-    let platform_key = format!("{os}-{arch}");
+  fn build_platform_key(os: &str, arch: &str) -> String {
+    format!("{os}-{arch}")
+  }
 
+  /// Get the download URL for Chromium/fingerprint-chromium for an explicit platform.
+  pub fn get_chromium_download_url_for_platform(
+    &self,
+    version_info: &ChromiumVersionInfo,
+    os: &str,
+    arch: &str,
+  ) -> Option<String> {
+    let platform_key = Self::build_platform_key(os, arch);
     version_info
       .downloads
       .get(&platform_key)
-      .and_then(|url| url.clone())
+      .and_then(Clone::clone)
   }
 
-  /// Check if Wayfern has a compatible download for current platform
-  pub fn has_wayfern_compatible_download(&self, version_info: &WayfernVersionInfo) -> bool {
-    self.get_wayfern_download_url(version_info).is_some()
+  /// Get the download URL for Chromium based on current platform
+  pub fn get_chromium_download_url(&self, version_info: &ChromiumVersionInfo) -> Option<String> {
+    let (os, arch) = Self::get_platform_info();
+    self.get_chromium_download_url_for_platform(version_info, &os, &arch)
+  }
+
+  /// Check if Chromium has a compatible download for current platform
+  pub fn has_chromium_compatible_download(&self, version_info: &ChromiumVersionInfo) -> bool {
+    self.get_chromium_download_url(version_info).is_some()
   }
 
   /// Check if a Zen twilight release has been updated by comparing file size
@@ -1622,6 +1719,65 @@ mod tests {
     assert!(!releases.is_empty());
     assert_eq!(releases[0].tag_name, "v1.81.9");
     assert!(!releases[0].is_nightly); // "Release v1.81.9 (Chromium 137.0.7151.104)" starts with "Release" so it should be stable
+  }
+
+  #[test]
+  fn test_chromium_download_url_for_platform_matrix() {
+    let client = ApiClient::new_with_base_urls(
+      "https://example.com".to_string(),
+      "https://example.com".to_string(),
+      "https://example.com".to_string(),
+      "https://example.com".to_string(),
+    );
+
+    let version_info = ChromiumVersionInfo {
+      version: "142.0.7444.175".to_string(),
+      downloads: HashMap::from([
+        (
+          "linux-x64".to_string(),
+          Some("https://example.com/linux.tar.xz".to_string()),
+        ),
+        ("linux-arm64".to_string(), None),
+        (
+          "macos-x64".to_string(),
+          Some("https://example.com/macos-x64.dmg".to_string()),
+        ),
+        (
+          "macos-arm64".to_string(),
+          Some("https://example.com/macos-arm64.dmg".to_string()),
+        ),
+        (
+          "windows-x64".to_string(),
+          Some("https://example.com/windows-x64.zip".to_string()),
+        ),
+        ("windows-arm64".to_string(), None),
+      ]),
+    };
+
+    assert_eq!(
+      client.get_chromium_download_url_for_platform(&version_info, "linux", "x64"),
+      Some("https://example.com/linux.tar.xz".to_string())
+    );
+    assert_eq!(
+      client.get_chromium_download_url_for_platform(&version_info, "macos", "x64"),
+      Some("https://example.com/macos-x64.dmg".to_string())
+    );
+    assert_eq!(
+      client.get_chromium_download_url_for_platform(&version_info, "macos", "arm64"),
+      Some("https://example.com/macos-arm64.dmg".to_string())
+    );
+    assert_eq!(
+      client.get_chromium_download_url_for_platform(&version_info, "windows", "x64"),
+      Some("https://example.com/windows-x64.zip".to_string())
+    );
+    assert_eq!(
+      client.get_chromium_download_url_for_platform(&version_info, "linux", "arm64"),
+      None
+    );
+    assert_eq!(
+      client.get_chromium_download_url_for_platform(&version_info, "windows", "arm64"),
+      None
+    );
   }
 
   #[tokio::test]

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ChromiumConfigForm } from "@/components/chromium-config-form";
 import { SharedCamoufoxConfigForm } from "@/components/shared-camoufox-config-form";
 import {
   Dialog,
@@ -11,12 +12,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { WayfernConfigForm } from "@/components/wayfern-config-form";
+import { getBrowserDisplayName, isChromiumBrowser } from "@/lib/browser-utils";
 import type {
   BrowserProfile,
   CamoufoxConfig,
   CamoufoxOS,
-  WayfernConfig,
+  ChromiumConfig,
 } from "@/types";
 
 const getCurrentOS = (): CamoufoxOS => {
@@ -35,9 +36,9 @@ interface CamoufoxConfigDialogProps {
   onClose: () => void;
   profile: BrowserProfile | null;
   onSave: (profile: BrowserProfile, config: CamoufoxConfig) => Promise<void>;
-  onSaveWayfern?: (
+  onSaveChromium?: (
     profile: BrowserProfile,
-    config: CamoufoxConfig,
+    config: ChromiumConfig,
   ) => Promise<void>;
   isRunning?: boolean;
   crossOsUnlocked?: boolean;
@@ -48,28 +49,28 @@ export function CamoufoxConfigDialog({
   onClose,
   profile,
   onSave,
-  onSaveWayfern,
+  onSaveChromium,
   isRunning = false,
   crossOsUnlocked = false,
 }: CamoufoxConfigDialogProps) {
   const { t } = useTranslation();
-  // Use union type to support both Camoufox and Wayfern configs
-  const [config, setConfig] = useState<CamoufoxConfig | WayfernConfig>(() => ({
+  // Use union type to support both Camoufox and Chromium configs
+  const [config, setConfig] = useState<CamoufoxConfig | ChromiumConfig>(() => ({
     geoip: true,
     os: getCurrentOS(),
   }));
   const [isSaving, setIsSaving] = useState(false);
 
   const isAntiDetectBrowser =
-    profile?.browser === "camoufox" || profile?.browser === "wayfern";
+    profile?.browser === "camoufox" ||
+    isChromiumBrowser(profile?.browser ?? "");
 
   // Initialize config when profile changes
   useEffect(() => {
     if (profile && isAntiDetectBrowser) {
-      const profileConfig =
-        profile.browser === "wayfern"
-          ? profile.wayfern_config
-          : profile.camoufox_config;
+      const profileConfig = isChromiumBrowser(profile.browser)
+        ? profile.chromium_config
+        : profile.camoufox_config;
       setConfig(
         profileConfig || {
           geoip: true,
@@ -80,7 +81,7 @@ export function CamoufoxConfigDialog({
   }, [profile, isAntiDetectBrowser]);
 
   const updateConfig = (
-    key: keyof CamoufoxConfig | keyof WayfernConfig,
+    key: keyof CamoufoxConfig | keyof ChromiumConfig,
     value: unknown,
   ) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
@@ -104,8 +105,8 @@ export function CamoufoxConfigDialog({
 
     setIsSaving(true);
     try {
-      if (profile.browser === "wayfern" && onSaveWayfern) {
-        await onSaveWayfern(profile, config as CamoufoxConfig);
+      if (isChromiumBrowser(profile.browser) && onSaveChromium) {
+        await onSaveChromium(profile, config as ChromiumConfig);
       } else {
         await onSave(profile, config as CamoufoxConfig);
       }
@@ -127,10 +128,9 @@ export function CamoufoxConfigDialog({
   const handleClose = () => {
     // Reset config to original when closing without saving
     if (profile && isAntiDetectBrowser) {
-      const profileConfig =
-        profile.browser === "wayfern"
-          ? profile.wayfern_config
-          : profile.camoufox_config;
+      const profileConfig = isChromiumBrowser(profile.browser)
+        ? profile.chromium_config
+        : profile.camoufox_config;
       setConfig(
         profileConfig || {
           geoip: true,
@@ -145,7 +145,7 @@ export function CamoufoxConfigDialog({
     return null;
   }
 
-  const browserName = profile.browser === "wayfern" ? "Wayfern" : "Camoufox";
+  const browserName = getBrowserDisplayName(profile.browser);
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
@@ -166,16 +166,16 @@ export function CamoufoxConfigDialog({
 
         <ScrollArea className="flex-1 h-[300px]">
           <div className="py-4">
-            {profile.browser === "wayfern" ? (
-              <WayfernConfigForm
-                config={config as WayfernConfig}
+            {isChromiumBrowser(profile.browser) ? (
+              <ChromiumConfigForm
+                config={config as ChromiumConfig}
                 onConfigChange={updateConfig}
                 forceAdvanced={true}
                 readOnly={isRunning}
                 crossOsUnlocked={crossOsUnlocked}
                 limitedMode={false}
                 profileVersion={profile.version}
-                profileBrowser="wayfern"
+                profileBrowser="chromium"
               />
             ) : (
               <SharedCamoufoxConfigForm

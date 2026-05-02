@@ -23,6 +23,14 @@ use tower_http::cors::CorsLayer;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+fn canonical_api_browser_name(browser: &str) -> &str {
+  if crate::browser::is_chromium_browser_name(browser) {
+    "chromium"
+  } else {
+    browser
+  }
+}
+
 // API Types
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ApiProfile {
@@ -37,6 +45,8 @@ pub struct ApiProfile {
   pub release_type: String,
   #[schema(value_type = Object)]
   pub camoufox_config: Option<serde_json::Value>,
+  #[schema(value_type = Object)]
+  pub chromium_config: Option<serde_json::Value>,
   pub group_id: Option<String>,
   pub tags: Vec<String>,
   pub is_running: bool,
@@ -64,8 +74,7 @@ pub struct CreateProfileRequest {
   pub release_type: Option<String>,
   #[schema(value_type = Object)]
   pub camoufox_config: Option<serde_json::Value>,
-  #[schema(value_type = Object)]
-  pub wayfern_config: Option<serde_json::Value>,
+  pub chromium_config: Option<serde_json::Value>,
   pub group_id: Option<String>,
   pub tags: Option<Vec<String>>,
 }
@@ -365,17 +374,14 @@ impl ApiServer {
       .routes(routes!(download_browser_api))
       .routes(routes!(get_browser_versions))
       .routes(routes!(check_browser_downloaded))
-      .routes(routes!(get_wayfern_token, refresh_wayfern_token))
       .split_for_parts();
 
     let api = ApiDoc::openapi();
 
-    let v1_routes = v1_routes
-      .layer(middleware::from_fn_with_state(
-        state.clone(),
-        auth_middleware,
-      ))
-      .layer(middleware::from_fn(terms_check_middleware));
+    let v1_routes = v1_routes.layer(middleware::from_fn_with_state(
+      state.clone(),
+      auth_middleware,
+    ));
 
     // Create WebSocket route with its own state (no auth required for daemon IPC)
     let ws_state = WsState::new();
@@ -418,19 +424,6 @@ impl ApiServer {
     self.port = None;
     Ok(())
   }
-}
-
-// Terms and Conditions check middleware
-async fn terms_check_middleware(
-  request: axum::extract::Request,
-  next: Next,
-) -> Result<Response, StatusCode> {
-  // Check if Wayfern terms have been accepted
-  if !crate::wayfern_terms::WayfernTermsManager::instance().is_terms_accepted() {
-    return Err(StatusCode::FORBIDDEN);
-  }
-
-  Ok(next.run(request).await)
 }
 
 // Authentication middleware
@@ -527,7 +520,7 @@ async fn get_profiles() -> Result<Json<ApiProfilesResponse>, StatusCode> {
         .map(|profile| ApiProfile {
           id: profile.id.to_string(),
           name: profile.name.clone(),
-          browser: profile.browser.clone(),
+          browser: canonical_api_browser_name(&profile.browser).to_string(),
           version: profile.version.clone(),
           proxy_id: profile.proxy_id.clone(),
           launch_hook: profile.launch_hook.clone(),
@@ -536,6 +529,10 @@ async fn get_profiles() -> Result<Json<ApiProfilesResponse>, StatusCode> {
           release_type: profile.release_type.clone(),
           camoufox_config: profile
             .camoufox_config
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+          chromium_config: profile
+            .chromium_config
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
           group_id: profile.group_id.clone(),
@@ -583,7 +580,7 @@ async fn get_profile(
           profile: ApiProfile {
             id: profile.id.to_string(),
             name: profile.name.clone(),
-            browser: profile.browser.clone(),
+            browser: canonical_api_browser_name(&profile.browser).to_string(),
             version: profile.version.clone(),
             proxy_id: profile.proxy_id.clone(),
             launch_hook: profile.launch_hook.clone(),
@@ -592,6 +589,10 @@ async fn get_profile(
             release_type: profile.release_type.clone(),
             camoufox_config: profile
               .camoufox_config
+              .as_ref()
+              .and_then(|c| serde_json::to_value(c).ok()),
+            chromium_config: profile
+              .chromium_config
               .as_ref()
               .and_then(|c| serde_json::to_value(c).ok()),
             group_id: profile.group_id.clone(),
@@ -636,8 +637,8 @@ async fn create_profile(
     None
   };
 
-  // Parse wayfern config if provided
-  let wayfern_config = if let Some(config) = &request.wayfern_config {
+  // Parse chromium config if provided.
+  let chromium_config = if let Some(config) = request.chromium_config.as_ref() {
     serde_json::from_value(config.clone()).ok()
   } else {
     None
@@ -654,7 +655,7 @@ async fn create_profile(
       request.proxy_id.clone(),
       None, // vpn_id
       camoufox_config,
-      wayfern_config,
+      chromium_config,
       request.group_id.clone(),
       false,
       None,
@@ -685,7 +686,7 @@ async fn create_profile(
         profile: ApiProfile {
           id: profile.id.to_string(),
           name: profile.name,
-          browser: profile.browser,
+          browser: canonical_api_browser_name(&profile.browser).to_string(),
           version: profile.version,
           proxy_id: profile.proxy_id,
           launch_hook: profile.launch_hook,
@@ -694,6 +695,10 @@ async fn create_profile(
           release_type: profile.release_type,
           camoufox_config: profile
             .camoufox_config
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+          chromium_config: profile
+            .chromium_config
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
           group_id: profile.group_id,
@@ -1555,13 +1560,6 @@ async fn run_profile(
   State(state): State<ApiServerState>,
   Json(request): Json<RunProfileRequest>,
 ) -> Result<Json<RunProfileResponse>, StatusCode> {
-  if !crate::cloud_auth::CLOUD_AUTH
-    .has_active_paid_subscription()
-    .await
-  {
-    return Err(StatusCode::PAYMENT_REQUIRED);
-  }
-
   let headless = request.headless.unwrap_or(false);
   let url = request.url;
 
@@ -1639,13 +1637,6 @@ async fn open_url_in_profile(
   State(state): State<ApiServerState>,
   Json(request): Json<OpenUrlRequest>,
 ) -> Result<StatusCode, StatusCode> {
-  if !crate::cloud_auth::CLOUD_AUTH
-    .has_active_paid_subscription()
-    .await
-  {
-    return Err(StatusCode::PAYMENT_REQUIRED);
-  }
-
   let browser_runner = crate::browser_runner::BrowserRunner::instance();
 
   browser_runner
@@ -1790,55 +1781,4 @@ async fn check_browser_downloaded(
 ) -> Result<Json<bool>, StatusCode> {
   let is_downloaded = crate::downloaded_browsers_registry::is_browser_downloaded(browser, version);
   Ok(Json(is_downloaded))
-}
-
-// API Handlers - Wayfern Token
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct WayfernTokenResponse {
-  pub token: Option<String>,
-}
-
-#[utoipa::path(
-  get,
-  path = "/v1/wayfern-token",
-  responses(
-    (status = 200, description = "Current wayfern token", body = WayfernTokenResponse),
-    (status = 401, description = "Unauthorized"),
-  ),
-  security(
-    ("bearer_auth" = [])
-  ),
-  tag = "wayfern"
-)]
-async fn get_wayfern_token(
-  State(_state): State<ApiServerState>,
-) -> Result<Json<WayfernTokenResponse>, StatusCode> {
-  let token = crate::cloud_auth::CLOUD_AUTH.get_wayfern_token().await;
-  Ok(Json(WayfernTokenResponse { token }))
-}
-
-#[utoipa::path(
-  post,
-  path = "/v1/wayfern-token/refresh",
-  responses(
-    (status = 200, description = "Refreshed wayfern token", body = WayfernTokenResponse),
-    (status = 401, description = "Unauthorized"),
-    (status = 500, description = "Failed to refresh token"),
-  ),
-  security(
-    ("bearer_auth" = [])
-  ),
-  tag = "wayfern"
-)]
-async fn refresh_wayfern_token(
-  State(_state): State<ApiServerState>,
-) -> Result<Json<WayfernTokenResponse>, (StatusCode, String)> {
-  crate::cloud_auth::CLOUD_AUTH
-    .request_wayfern_token()
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-  let token = crate::cloud_auth::CLOUD_AUTH.get_wayfern_token().await;
-  Ok(Json(WayfernTokenResponse { token }))
 }
