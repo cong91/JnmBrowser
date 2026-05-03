@@ -1,6 +1,6 @@
 [package]
 name = "JnmBrowser"
-version = "0.22.8"
+version = "0.22.9"
 description = "Simple Yet Powerful Anti-Detect Browser"
 authors = ["zhom@github"]
 edition = "2021"

@@ -1,5 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use std::env;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -702,35 +704,191 @@ fn find_claude_cli() -> Option<std::path::PathBuf> {
   None
 }
 
-fn find_codex_cli() -> Option<std::path::PathBuf> {
-  let mut candidates: Vec<std::path::PathBuf> = vec![
-    std::path::PathBuf::from("/usr/local/bin/codex"),
-    std::path::PathBuf::from("/opt/homebrew/bin/codex"),
+#[derive(Clone, Debug)]
+enum CodexCliKind {
+  Direct,
+  #[cfg(windows)]
+  PowerShellScript,
+}
+
+#[derive(Clone, Debug)]
+struct CodexCli {
+  path: PathBuf,
+  kind: CodexCliKind,
+}
+
+impl CodexCli {
+  fn new(path: PathBuf) -> Self {
+    #[cfg(windows)]
+    let kind = if path
+      .extension()
+      .and_then(|ext| ext.to_str())
+      .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"))
+    {
+      CodexCliKind::PowerShellScript
+    } else {
+      CodexCliKind::Direct
+    };
+
+    #[cfg(not(windows))]
+    let kind = CodexCliKind::Direct;
+
+    Self { path, kind }
+  }
+
+  fn command(&self) -> std::process::Command {
+    match self.kind {
+      CodexCliKind::Direct => std::process::Command::new(&self.path),
+      #[cfg(windows)]
+      CodexCliKind::PowerShellScript => {
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+        command.arg(&self.path);
+        command
+      }
+    }
+  }
+}
+
+#[cfg(windows)]
+fn push_unique_path(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+  if !candidates.iter().any(|existing| existing == &path) {
+    candidates.push(path);
+  }
+}
+
+#[cfg(windows)]
+fn append_codex_name_variants(candidates: &mut Vec<PathBuf>, base_dir: PathBuf) {
+  for file_name in ["codex.exe", "codex.cmd", "codex.ps1", "codex.bat", "codex"] {
+    push_unique_path(candidates, base_dir.join(file_name));
+  }
+}
+
+#[cfg(windows)]
+fn find_codex_cli_via_windows_path() -> Option<PathBuf> {
+  for name in ["codex.cmd", "codex.exe", "codex.ps1", "codex.bat", "codex"] {
+    let Ok(output) = std::process::Command::new("where.exe").arg(name).output() else {
+      continue;
+    };
+    if output.status.success() {
+      let stdout = String::from_utf8_lossy(&output.stdout);
+      for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+          continue;
+        }
+        let candidate = PathBuf::from(trimmed);
+        if candidate.exists() {
+          return Some(candidate);
+        }
+      }
+    }
+  }
+
+  let output = std::process::Command::new("powershell.exe")
+    .args([
+      "-NoProfile",
+      "-Command",
+      "(Get-Command codex -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1)",
+    ])
+    .output()
+    .ok()?;
+  if output.status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    if !trimmed.is_empty() {
+      let candidate = PathBuf::from(trimmed);
+      if candidate.exists() {
+        return Some(candidate);
+      }
+    }
+  }
+
+  None
+}
+
+#[cfg(not(windows))]
+fn find_codex_cli_via_path() -> Option<PathBuf> {
+  let output = std::process::Command::new("which")
+    .arg("codex")
+    .output()
+    .ok()?;
+  if !output.status.success() {
+    return None;
+  }
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let trimmed = stdout.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  let candidate = PathBuf::from(trimmed);
+  candidate.exists().then_some(candidate)
+}
+
+fn find_codex_cli() -> Option<CodexCli> {
+  let mut candidates: Vec<PathBuf> = vec![
+    PathBuf::from("/usr/local/bin/codex"),
+    PathBuf::from("/opt/homebrew/bin/codex"),
   ];
   if let Some(home) = dirs::home_dir() {
     candidates.insert(0, home.join("Library").join("pnpm").join("codex"));
     candidates.insert(1, home.join(".local").join("bin").join("codex"));
   }
   #[cfg(windows)]
-  if let Ok(appdata) = std::env::var("APPDATA") {
-    candidates.insert(
-      0,
-      std::path::PathBuf::from(&appdata)
-        .join("npm")
-        .join("codex.cmd"),
-    );
-    candidates.push(
-      std::path::PathBuf::from(appdata)
-        .join("Codex")
-        .join("codex.exe"),
-    );
+  {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+      append_codex_name_variants(&mut candidates, PathBuf::from(&appdata).join("npm"));
+      append_codex_name_variants(&mut candidates, PathBuf::from(&appdata).join("Codex"));
+    }
+    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+      append_codex_name_variants(&mut candidates, PathBuf::from(&local_appdata).join("pnpm"));
+      append_codex_name_variants(
+        &mut candidates,
+        PathBuf::from(&local_appdata).join("Programs").join("Codex"),
+      );
+    }
+    if let Some(home) = dirs::home_dir() {
+      append_codex_name_variants(&mut candidates, home.join(".local").join("bin"));
+      append_codex_name_variants(
+        &mut candidates,
+        home.join("AppData").join("Roaming").join("npm"),
+      );
+    }
+    for env_var in ["NVM_SYMLINK", "NVM_HOME", "PNPM_HOME", "npm_config_prefix"] {
+      if let Ok(value) = std::env::var(env_var) {
+        append_codex_name_variants(&mut candidates, PathBuf::from(value));
+      }
+    }
   }
   for p in &candidates {
     if p.exists() {
-      return Some(p.clone());
+      return Some(CodexCli::new(p.clone()));
     }
   }
+
+  #[cfg(windows)]
+  {
+    if let Some(path) = find_codex_cli_via_windows_path() {
+      return Some(CodexCli::new(path));
+    }
+  }
+
+  #[cfg(not(windows))]
+  {
+    if let Some(path) = find_codex_cli_via_path() {
+      return Some(CodexCli::new(path));
+    }
+  }
+
   None
+}
+
+fn run_codex_cli(cli: &CodexCli, args: Vec<OsString>) -> Result<std::process::Output, String> {
+  let mut command = cli.command();
+  command
+    .args(&args)
+    .output()
+    .map_err(|e| format!("Failed to run codex: {e}"))
 }
 
 #[tauri::command]
@@ -803,10 +961,7 @@ fn remove_mcp_from_claude_code() -> Result<(), String> {
 fn is_mcp_in_codex() -> Result<bool, String> {
   let cli = find_codex_cli().ok_or("Codex CLI not found")?;
   for name in [MCP_SERVER_NAME, LEGACY_MCP_SERVER_NAME] {
-    let output = std::process::Command::new(&cli)
-      .args(["mcp", "get", name])
-      .output()
-      .map_err(|e| format!("Failed to run codex: {e}"))?;
+    let output = run_codex_cli(&cli, vec!["mcp".into(), "get".into(), OsString::from(name)])?;
     if output.status.success() {
       return Ok(true);
     }
@@ -831,10 +986,10 @@ async fn add_mcp_to_codex(app_handle: tauri::AppHandle) -> Result<(), String> {
   let url = format!("http://127.0.0.1:{port}/mcp/{token}");
 
   for name in [LEGACY_MCP_SERVER_NAME, MCP_SERVER_NAME] {
-    let remove_output = std::process::Command::new(&cli)
-      .args(["mcp", "remove", name])
-      .output()
-      .map_err(|e| format!("Failed to run codex: {e}"))?;
+    let remove_output = run_codex_cli(
+      &cli,
+      vec!["mcp".into(), "remove".into(), OsString::from(name)],
+    )?;
     if !remove_output.status.success() {
       let stderr = String::from_utf8_lossy(&remove_output.stderr);
       let stderr_trimmed = stderr.trim();
@@ -844,10 +999,16 @@ async fn add_mcp_to_codex(app_handle: tauri::AppHandle) -> Result<(), String> {
     }
   }
 
-  let output = std::process::Command::new(&cli)
-    .args(["mcp", "add", MCP_SERVER_NAME, "--url", &url])
-    .output()
-    .map_err(|e| format!("Failed to run codex: {e}"))?;
+  let output = run_codex_cli(
+    &cli,
+    vec![
+      "mcp".into(),
+      "add".into(),
+      OsString::from(MCP_SERVER_NAME),
+      "--url".into(),
+      OsString::from(url),
+    ],
+  )?;
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -860,10 +1021,10 @@ async fn add_mcp_to_codex(app_handle: tauri::AppHandle) -> Result<(), String> {
 fn remove_mcp_from_codex() -> Result<(), String> {
   let cli = find_codex_cli().ok_or("Codex CLI not found")?;
   for name in [MCP_SERVER_NAME, LEGACY_MCP_SERVER_NAME] {
-    let output = std::process::Command::new(&cli)
-      .args(["mcp", "remove", name])
-      .output()
-      .map_err(|e| format!("Failed to run codex: {e}"))?;
+    let output = run_codex_cli(
+      &cli,
+      vec!["mcp".into(), "remove".into(), OsString::from(name)],
+    )?;
     if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
       let stderr_trimmed = stderr.trim();
@@ -2153,6 +2314,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
   use std::fs;
+  use std::path::PathBuf;
 
   #[test]
   fn test_no_unused_tauri_commands() {
@@ -2162,6 +2324,19 @@ mod tests {
   #[test]
   fn test_unused_tauri_commands_detailed() {
     check_unused_commands(true); // Run in verbose mode for development
+  }
+
+  #[test]
+  fn test_codex_cli_direct_detection() {
+    let cli = super::CodexCli::new(PathBuf::from("/tmp/codex"));
+    assert!(matches!(cli.kind, super::CodexCliKind::Direct));
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn test_codex_cli_powershell_script_detection() {
+    let cli = super::CodexCli::new(PathBuf::from(r"C:\nvm4w\nodejs\codex.ps1"));
+    assert!(matches!(cli.kind, super::CodexCliKind::PowerShellScript));
   }
 
   fn check_unused_commands(verbose: bool) {
