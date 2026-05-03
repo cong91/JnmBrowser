@@ -20,6 +20,7 @@ import type { TooltipContentProps } from "recharts/types/component/Tooltip";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -36,6 +37,7 @@ import {
   TooltipTrigger,
   Tooltip as UITooltip,
 } from "@/components/ui/tooltip";
+import { useElementSize } from "@/hooks/use-element-size";
 import type { FilteredTrafficStats } from "@/types";
 
 type TimePeriod =
@@ -154,6 +156,8 @@ export function TrafficDetailsDialog({
   profileName,
 }: TrafficDetailsDialogProps) {
   const { t } = useTranslation();
+  const { ref: chartRef, isReady: isChartReady } =
+    useElementSize<HTMLDivElement>();
   const [stats, setStats] = React.useState<FilteredTrafficStats | null>(null);
   const [timePeriod, setTimePeriod] = React.useState<TimePeriod>("5m");
 
@@ -266,6 +270,9 @@ export function TrafficDetailsDialog({
               </span>
             )}
           </DialogTitle>
+          <DialogDescription>
+            {t("traffic.bandwidthOverTime")}
+          </DialogDescription>
         </DialogHeader>
 
         <ScrollArea className="h-[60vh]">
@@ -302,97 +309,99 @@ export function TrafficDetailsDialog({
                 </Select>
               </div>
 
-              <div className="h-[200px] w-full">
-                <ResponsiveContainer
-                  width="100%"
-                  height="100%"
-                  minWidth={1}
-                  minHeight={1}
-                >
-                  <AreaChart
-                    data={chartData}
-                    margin={{ top: 10, right: 10, bottom: 0, left: 0 }}
+              <div ref={chartRef} className="h-[200px] w-full">
+                {isChartReady ? (
+                  <ResponsiveContainer
+                    width="100%"
+                    height="100%"
+                    minWidth={1}
+                    minHeight={1}
                   >
-                    <defs>
-                      <linearGradient
-                        id="sentGradient"
-                        x1="0"
-                        y1="0"
-                        x2="0"
-                        y2="1"
-                      >
-                        <stop
-                          offset="0%"
-                          stopColor="var(--chart-1)"
-                          stopOpacity={0.5}
-                        />
-                        <stop
-                          offset="100%"
-                          stopColor="var(--chart-1)"
-                          stopOpacity={0.1}
-                        />
-                      </linearGradient>
-                      <linearGradient
-                        id="receivedGradient"
-                        x1="0"
-                        y1="0"
-                        x2="0"
-                        y2="1"
-                      >
-                        <stop
-                          offset="0%"
-                          stopColor="var(--chart-2)"
-                          stopOpacity={0.5}
-                        />
-                        <stop
-                          offset="100%"
-                          stopColor="var(--chart-2)"
-                          stopOpacity={0.1}
-                        />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                      className="stroke-muted"
-                    />
-                    <XAxis
-                      dataKey="time"
-                      tickFormatter={(t) =>
-                        new Date(t * 1000).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })
-                      }
-                      className="text-xs"
-                      tick={{ fill: "var(--muted-foreground)" }}
-                    />
-                    <YAxis
-                      tickFormatter={(v) => formatBytesPerSecond(v)}
-                      className="text-xs"
-                      tick={{ fill: "var(--muted-foreground)" }}
-                      width={60}
-                    />
-                    <Tooltip content={renderTooltip} />
-                    <Area
-                      type="monotone"
-                      dataKey="sent"
-                      stackId="1"
-                      stroke="var(--chart-1)"
-                      fill="url(#sentGradient)"
-                      strokeWidth={1.5}
-                      isAnimationActive={false}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="received"
-                      stackId="1"
-                      stroke="var(--chart-2)"
-                      fill="url(#receivedGradient)"
-                      strokeWidth={1.5}
-                      isAnimationActive={false}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
+                    <AreaChart
+                      data={chartData}
+                      margin={{ top: 10, right: 10, bottom: 0, left: 0 }}
+                    >
+                      <defs>
+                        <linearGradient
+                          id="sentGradient"
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="0%"
+                            stopColor="var(--chart-1)"
+                            stopOpacity={0.5}
+                          />
+                          <stop
+                            offset="100%"
+                            stopColor="var(--chart-1)"
+                            stopOpacity={0.1}
+                          />
+                        </linearGradient>
+                        <linearGradient
+                          id="receivedGradient"
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="0%"
+                            stopColor="var(--chart-2)"
+                            stopOpacity={0.5}
+                          />
+                          <stop
+                            offset="100%"
+                            stopColor="var(--chart-2)"
+                            stopOpacity={0.1}
+                          />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        className="stroke-muted"
+                      />
+                      <XAxis
+                        dataKey="time"
+                        tickFormatter={(t) =>
+                          new Date(t * 1000).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
+                        }
+                        className="text-xs"
+                        tick={{ fill: "var(--muted-foreground)" }}
+                      />
+                      <YAxis
+                        tickFormatter={(v) => formatBytesPerSecond(v)}
+                        className="text-xs"
+                        tick={{ fill: "var(--muted-foreground)" }}
+                        width={60}
+                      />
+                      <Tooltip content={renderTooltip} />
+                      <Area
+                        type="monotone"
+                        dataKey="sent"
+                        stackId="1"
+                        stroke="var(--chart-1)"
+                        fill="url(#sentGradient)"
+                        strokeWidth={1.5}
+                        isAnimationActive={false}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="received"
+                        stackId="1"
+                        stroke="var(--chart-2)"
+                        fill="url(#receivedGradient)"
+                        strokeWidth={1.5}
+                        isAnimationActive={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                ) : null}
               </div>
 
               <div className="flex items-center justify-center gap-6 mt-2">

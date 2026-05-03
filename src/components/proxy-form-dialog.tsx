@@ -151,7 +151,7 @@ export function ProxyFormDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="max-w-md">
+      <DialogContent aria-describedby={undefined} className="max-w-md">
         <DialogHeader>
           <DialogTitle>
             {editingProxy ? t("proxies.edit") : t("proxies.add")}

@@ -12,10 +12,63 @@ use playwright::Error as PlaywrightError;
 use crate::camoufox::config::{CamoufoxConfigBuilder, CamoufoxLaunchConfig, ProxyConfig};
 use crate::camoufox::fingerprint::types::{Fingerprint, ScreenConstraints};
 
+lazy_static::lazy_static! {
+  static ref CAMOUFOX_LAUNCH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+}
+
+struct ProcessEnvGuard {
+  previous: Vec<(String, Option<String>)>,
+}
+
+impl ProcessEnvGuard {
+  fn apply(env: &HashMap<String, String>, cleanup_prefixes: &[&str]) -> Self {
+    let mut previous = Vec::new();
+    let existing_keys = std::env::vars().map(|(key, _)| key).collect::<Vec<_>>();
+
+    for key in existing_keys {
+      if cleanup_prefixes
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+        && !env.contains_key(&key)
+      {
+        previous.push((key.clone(), std::env::var(&key).ok()));
+        std::env::remove_var(&key);
+      }
+    }
+
+    for (key, value) in env {
+      previous.push((key.clone(), std::env::var(key).ok()));
+      std::env::set_var(key, value);
+    }
+
+    Self { previous }
+  }
+}
+
+impl Drop for ProcessEnvGuard {
+  fn drop(&mut self) {
+    for (key, previous) in self.previous.iter().rev() {
+      if let Some(previous) = previous {
+        std::env::set_var(key, previous);
+      } else {
+        std::env::remove_var(key);
+      }
+    }
+  }
+}
+
 /// Camoufox launcher for creating browser instances.
 pub struct CamoufoxLauncher {
   playwright: Arc<Playwright>,
   executable_path: PathBuf,
+}
+
+impl std::fmt::Debug for CamoufoxLauncher {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("CamoufoxLauncher")
+      .field("executable_path", &self.executable_path)
+      .finish_non_exhaustive()
+  }
 }
 
 /// Error type for launcher operations.
@@ -57,6 +110,8 @@ pub struct LaunchOptions {
   pub window: Option<(u32, u32)>,
   /// Custom fingerprint (if not provided, one will be generated)
   pub fingerprint: Option<Fingerprint>,
+  /// Prebuilt flattened Camoufox config entries to merge into launch config
+  pub extra_config: Option<HashMap<String, serde_json::Value>>,
   /// Run in headless mode
   pub headless: bool,
   /// Custom fonts to load
@@ -151,15 +206,6 @@ impl CamoufoxLauncher {
       launch_options = launch_options.args(&args);
     }
 
-    // Add environment as serde_json::Map
-    if !env.is_empty() {
-      let env_map: serde_json::Map<String, serde_json::Value> = env
-        .into_iter()
-        .map(|(k, v)| (k, serde_json::Value::String(v)))
-        .collect();
-      launch_options = launch_options.env(env_map);
-    }
-
     // Add proxy if configured
     if let Some(proxy) = &config.proxy {
       let proxy_settings = ProxySettings {
@@ -177,6 +223,9 @@ impl CamoufoxLauncher {
         firefox_prefs.into_iter().collect();
       launch_options = launch_options.firefox_user_prefs(prefs_map);
     }
+
+    let _launch_env_lock = CAMOUFOX_LAUNCH_ENV_LOCK.lock().await;
+    let _env_guard = ProcessEnvGuard::apply(&env, &["CAMOU_CONFIG_"]);
 
     // Launch the browser
     let browser = launch_options.launch().await?;
@@ -242,15 +291,6 @@ impl CamoufoxLauncher {
       context_options = context_options.args(&args);
     }
 
-    // Add environment as serde_json::Map
-    if !env.is_empty() {
-      let env_map: serde_json::Map<String, serde_json::Value> = env
-        .into_iter()
-        .map(|(k, v)| (k, serde_json::Value::String(v)))
-        .collect();
-      context_options = context_options.env(env_map);
-    }
-
     // Add proxy if configured
     if let Some(proxy) = &config.proxy {
       let proxy_settings = ProxySettings {
@@ -264,6 +304,9 @@ impl CamoufoxLauncher {
 
     // Note: PersistentContextLauncher doesn't support firefox_user_prefs
     // Firefox preferences should be set via about:config or prefs.js in the profile
+
+    let _launch_env_lock = CAMOUFOX_LAUNCH_ENV_LOCK.lock().await;
+    let _env_guard = ProcessEnvGuard::apply(&env, &["CAMOU_CONFIG_"]);
 
     // Launch the persistent context
     let context = context_options.launch().await?;
@@ -285,6 +328,12 @@ impl CamoufoxLauncher {
 
     if let Some(fingerprint) = &options.fingerprint {
       builder = builder.fingerprint(fingerprint.clone());
+    }
+
+    if let Some(extra_config) = &options.extra_config {
+      for (key, value) in extra_config {
+        builder = builder.extra_config(key, value.clone());
+      }
     }
 
     builder = builder.block_images(options.block_images);

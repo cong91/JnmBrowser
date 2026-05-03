@@ -216,7 +216,10 @@ export function IntegrationsDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="max-w-xl max-h-[80vh] my-8 flex flex-col">
+      <DialogContent
+        aria-describedby={undefined}
+        className="max-w-xl max-h-[80vh] my-8 flex flex-col"
+      >
         <DialogHeader className="shrink-0">
           <DialogTitle>{t("integrations.title")}</DialogTitle>
         </DialogHeader>

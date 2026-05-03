@@ -163,7 +163,7 @@ export function ProfileSelectorDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-md">
+      <DialogContent aria-describedby={undefined} className="max-w-md">
         <DialogHeader>
           <DialogTitle>{t("profileSelector.chooseProfileTitle")}</DialogTitle>
         </DialogHeader>

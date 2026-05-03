@@ -654,7 +654,7 @@
     "tokenCopied": "トークンをコピーしました",
     "mcpEnableLabel": "MCP サーバーを有効にする (Model Context Protocol)",
     "mcpEnableDescription": "Claude Desktop などの AI アシスタントがブラウザを制御できます。",
-    "mcpAcceptTermsFirst": "(設定で先に Chromium の規約に同意してください)",
+    "mcpAcceptTermsFirst": "(先に設定で JnmBrowser の規約に同意してください)",
     "mcpStarted": "MCP サーバーをポート {{port}} で起動しました",
     "mcpStopped": "MCP サーバーを停止しました",
     "mcpToggleFailed": "MCP サーバーの切り替えに失敗しました",
@@ -919,7 +919,7 @@
     "osLabel": "オペレーティングシステムのフィンガープリント",
     "selectOSPlaceholder": "オペレーティングシステムを選択",
     "generateRandomOnLaunch": "起動ごとにランダムなフィンガープリントを生成",
-    "generateRandomDescription": "有効にすると、ブラウザの起動ごとに新しいフィンガープリントが生成されます。",
+    "generateRandomDescription": "有効にすると、起動のたびに新しい seed ベースのフィンガープリントが生成されますが、対応済みの固定設定は引き続き有効です。",
     "generateRandomDescriptionAuto": "有効にすると、ブラウザの起動ごとに新しいフィンガープリントが生成されます。生成されたフィンガープリントは参照用に保存されます。",
     "autoLocationDescription": "プロキシ設定に基づいて位置情報を自動的に設定します。プロキシが提供されていない場合は接続情報を使用します。",
     "editingDisabledRunning": "プロファイルが現在実行中のため、フィンガープリントの編集は無効です。変更するにはプロファイルを停止してください。",
@@ -1016,7 +1016,10 @@
     "refreshFingerprint": "フィンガープリントを更新",
     "canvasNoiseSeedPlaceholder": "キャンバスフィンガープリント用のシード文字列を入力",
     "addFontsPlaceholder": "フォントを追加...",
-    "enterAsJson": "{{title}} を JSON で入力"
+    "enterAsJson": "{{title}} を JSON で入力",
+    "chromiumAutomaticDescription": "Chromium は、少数の固定設定だけを持つランダム指紋モードで使うのが最適です。ほとんどの対検知特性は実行時に seed から自動派生されます。",
+    "chromiumManualDescription": "このページは少量の固定上書きにのみ向いています。多くの項目が空でも正常です。canvas、audio、WebGL、レイアウト関連の多くの特性は静的値として保存されず、実行時に seed から生成されます。",
+    "chromiumSupportedFixedSettingsDescription": "ここには、現在の Chromium 経路で実際に配線済みの固定設定だけを残しています。起動ごとランダムを有効にしても、これらの値は維持され、より深い特性は引き続き seed から生成されます。"
   },
   "warnings": {
     "windowResizeTitle": "カスタムウィンドウサイズ",
@@ -1426,8 +1429,8 @@
     "tryAgain": "もう一度お試しください"
   },
   "wayfernTerms": {
-    "title": "Chromium 利用規約",
-    "description": "JnmBrowser を使用する前に、Chromium の利用規約を読み、同意する必要があります。",
+    "title": "JnmBrowser 利用規約",
+    "description": "JnmBrowser を使用する前に、JnmBrowser の利用規約を読み、同意する必要があります。",
     "reviewLabel": "次の URL で利用規約をご確認ください:",
     "agreeNotice": "「同意します」をクリックすると、これらの条項に拘束されることに同意します。",
     "acceptButton": "同意します",

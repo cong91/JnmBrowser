@@ -1,13 +1,14 @@
 use crate::browser_runner::BrowserRunner;
+use crate::camoufox::launcher::{CamoufoxLauncher, LaunchOptions};
 use crate::camoufox::{CamoufoxConfigBuilder, GeoIPOption, ScreenConstraints};
 use crate::profile::BrowserProfile;
+use playwright::api::{BrowserContext, Page};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
-use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +59,12 @@ pub struct CamoufoxLaunchResult {
 }
 
 #[derive(Debug)]
+struct CamoufoxAutomationState {
+  active_page: Page,
+  selected_tab_index: usize,
+}
+
+#[derive(Debug)]
 struct CamoufoxInstance {
   #[allow(dead_code)]
   id: String,
@@ -65,6 +72,9 @@ struct CamoufoxInstance {
   profile_path: Option<String>,
   url: Option<String>,
   cdp_port: Option<u16>,
+  automation: Option<Arc<AsyncMutex<CamoufoxAutomationState>>>,
+  #[allow(dead_code)]
+  launcher: Option<Arc<CamoufoxLauncher>>,
 }
 
 struct CamoufoxManagerInner {
@@ -76,6 +86,138 @@ pub struct CamoufoxManager {
 }
 
 impl CamoufoxManager {
+  fn config_string(config: &HashMap<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+      config
+        .get(*key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+    })
+  }
+
+  fn config_u32(config: &HashMap<String, serde_json::Value>, keys: &[&str]) -> Option<u32> {
+    keys.iter().find_map(|key| {
+      config
+        .get(*key)
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+    })
+  }
+
+  fn config_languages(config: &HashMap<String, serde_json::Value>) -> Option<Vec<String>> {
+    if let Some(values) = config
+      .get("navigator.languages")
+      .and_then(|value| value.as_array())
+    {
+      let parsed = values
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+      if !parsed.is_empty() {
+        return Some(parsed);
+      }
+    }
+
+    let language = Self::config_string(config, &["navigator.language", "locale:language"])?;
+    let region = Self::config_string(config, &["locale:region"]);
+    let primary = match region {
+      Some(region) => format!("{}-{}", language, region.to_uppercase()),
+      None => language.clone(),
+    };
+
+    let mut languages = vec![primary];
+    if !languages.iter().any(|value| value == &language) {
+      languages.push(language);
+    }
+    Some(languages)
+  }
+
+  fn runtime_override_script(config: &HashMap<String, serde_json::Value>) -> Option<String> {
+    let mut entries = Vec::new();
+
+    if let Some(user_agent) = Self::config_string(config, &["navigator.userAgent"]) {
+      let serialized = serde_json::to_string(&user_agent).ok()?;
+      entries.push(("userAgent".to_string(), serialized));
+    }
+
+    if let Some(platform) = Self::config_string(config, &["navigator.platform"]) {
+      let serialized = serde_json::to_string(&platform).ok()?;
+      entries.push(("platform".to_string(), serialized));
+    }
+
+    if let Some(language) = Self::config_string(config, &["navigator.language"])
+      .or_else(|| Self::config_languages(config).and_then(|languages| languages.into_iter().next()))
+    {
+      let serialized = serde_json::to_string(&language).ok()?;
+      entries.push(("language".to_string(), serialized));
+    }
+
+    if let Some(languages) = Self::config_languages(config) {
+      let serialized = serde_json::to_string(&languages).ok()?;
+      entries.push(("languages".to_string(), serialized));
+    }
+
+    if let Some(hardware_concurrency) = Self::config_u32(
+      config,
+      &["navigator.hardwareConcurrency", "hardwareConcurrency"],
+    ) {
+      let serialized = serde_json::to_string(&hardware_concurrency).ok()?;
+      entries.push(("hardwareConcurrency".to_string(), serialized));
+    }
+
+    if let Some(timezone) = Self::config_string(config, &["timezone"]) {
+      let serialized = serde_json::to_string(&timezone).ok()?;
+      entries.push(("timezone".to_string(), serialized));
+    }
+
+    if entries.is_empty() {
+      return None;
+    }
+
+    let overrides_object = entries
+      .iter()
+      .map(|(key, value)| {
+        serde_json::to_string(key)
+          .ok()
+          .map(|serialized_key| format!("{serialized_key}:{value}"))
+      })
+      .collect::<Option<Vec<_>>>()?
+      .join(",");
+
+    Some(format!(
+      r#"(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const overrides={{{overrides_object}}};const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};for(const [key,value] of Object.entries(overrides)){{if(key!=="timezone"){{overrideValue(key,value);}}}}const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(key!=="timezone"&&!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone"){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);if(typeof overrides.timezone==='string'&&overrides.timezone){{const OriginalDateTimeFormat=Intl.DateTimeFormat;const originalResolvedOptions=OriginalDateTimeFormat.prototype.resolvedOptions;Object.defineProperty(OriginalDateTimeFormat.prototype,'resolvedOptions',{{configurable:true,writable:true,value:function(...args){{const options=originalResolvedOptions.apply(this,args);return Object.assign({{}},options,{{timeZone:overrides.timezone}});}}}});Object.defineProperty(Intl,'DateTimeFormat',{{configurable:true,writable:true,value:function(...args){{return new OriginalDateTimeFormat(...args);}}}});Intl.DateTimeFormat.prototype=OriginalDateTimeFormat.prototype;}}return true;}})()"#
+    ))
+  }
+
+  async fn apply_runtime_overrides(
+    context: &BrowserContext,
+    pages: &[Page],
+    config: &HashMap<String, serde_json::Value>,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(script) = Self::runtime_override_script(config) else {
+      return Ok(());
+    };
+
+    context
+      .add_init_script(&script)
+      .await
+      .map_err(|e| format!("Failed to register Camoufox runtime override init script: {e}"))?;
+
+    for page in pages {
+      page
+        .eval::<serde_json::Value>(&script)
+        .await
+        .map_err(|e| format!("Failed to apply Camoufox runtime overrides to active page: {e}"))?;
+    }
+
+    Ok(())
+  }
+
   fn new() -> Self {
     Self {
       inner: Arc::new(AsyncMutex::new(CamoufoxManagerInner {
@@ -86,13 +228,6 @@ impl CamoufoxManager {
 
   pub fn instance() -> &'static CamoufoxManager {
     &CAMOUFOX_LAUNCHER
-  }
-
-  async fn find_free_port() -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
   }
 
   #[allow(dead_code)]
@@ -117,6 +252,307 @@ impl CamoufoxManager {
 
   pub fn get_profiles_dir(&self) -> PathBuf {
     crate::app_dirs::profiles_dir()
+  }
+
+  async fn wait_for_camoufox_process_by_profile(
+    &self,
+    target_path: &std::path::Path,
+  ) -> Option<(u32, String, Option<u16>)> {
+    for _ in 0..20 {
+      if let Some(found) = self.find_camoufox_process_by_profile(target_path) {
+        return Some(found);
+      }
+      tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    None
+  }
+
+  async fn get_automation_state(
+    &self,
+    profile_path: &str,
+  ) -> Result<Arc<AsyncMutex<CamoufoxAutomationState>>, Box<dyn std::error::Error + Send + Sync>>
+  {
+    let target_path = std::path::Path::new(profile_path)
+      .canonicalize()
+      .unwrap_or_else(|_| std::path::Path::new(profile_path).to_path_buf());
+
+    let inner = self.inner.lock().await;
+    for instance in inner.instances.values() {
+      if let Some(instance_profile_path) = &instance.profile_path {
+        let instance_path = std::path::Path::new(instance_profile_path)
+          .canonicalize()
+          .unwrap_or_else(|_| std::path::Path::new(instance_profile_path).to_path_buf());
+        if instance_path == target_path {
+          if let Some(automation) = &instance.automation {
+            return Ok(automation.clone());
+          }
+          return Err(
+            "Camoufox automation session is unavailable for this profile. Relaunch the profile from the current app session.".into(),
+          );
+        }
+      }
+    }
+
+    Err("No running Camoufox automation session found for the requested profile".into())
+  }
+
+  fn tab_id_from_index(index: usize) -> String {
+    format!("camoufox-tab-{index}")
+  }
+
+  fn parse_tab_index_from_id(tab_id: &str) -> Option<usize> {
+    tab_id
+      .strip_prefix("camoufox-tab-")
+      .and_then(|value| value.parse::<usize>().ok())
+  }
+
+  async fn list_pages_from_state(
+    state: &mut CamoufoxAutomationState,
+  ) -> Result<Vec<Page>, Box<dyn std::error::Error + Send + Sync>> {
+    let pages = state
+      .active_page
+      .context()
+      .pages()
+      .map_err(|e| format!("Failed to list Camoufox pages: {e}"))?;
+
+    if pages.is_empty() {
+      return Err("Camoufox browser context has no open pages".into());
+    }
+
+    if state.selected_tab_index >= pages.len() {
+      state.selected_tab_index = pages.len().saturating_sub(1);
+    }
+    state.active_page = pages[state.selected_tab_index].clone();
+    Ok(pages)
+  }
+
+  pub async fn get_active_page(
+    &self,
+    profile_path: &str,
+  ) -> Result<Page, Box<dyn std::error::Error + Send + Sync>> {
+    let state = self.get_automation_state(profile_path).await?;
+    let mut guard = state.lock().await;
+    let pages = Self::list_pages_from_state(&mut guard).await?;
+    Ok(pages[guard.selected_tab_index].clone())
+  }
+
+  pub async fn list_pages(
+    &self,
+    profile_path: &str,
+  ) -> Result<(Vec<Page>, usize), Box<dyn std::error::Error + Send + Sync>> {
+    let state = self.get_automation_state(profile_path).await?;
+    let mut guard = state.lock().await;
+    let pages = Self::list_pages_from_state(&mut guard).await?;
+    Ok((pages, guard.selected_tab_index))
+  }
+
+  pub async fn set_selected_tab(
+    &self,
+    profile_path: &str,
+    selector_by: &str,
+    selector_value: Option<&str>,
+  ) -> Result<(Vec<Page>, usize), Box<dyn std::error::Error + Send + Sync>> {
+    let state = self.get_automation_state(profile_path).await?;
+    let mut guard = state.lock().await;
+    let pages = Self::list_pages_from_state(&mut guard).await?;
+
+    let selected_index = match selector_by {
+      "index" => selector_value
+        .ok_or_else(|| "Camoufox tab selector by=index requires value".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "Camoufox tab selector by=index requires an integer value".to_string())?,
+      "id" => {
+        let value =
+          selector_value.ok_or_else(|| "Camoufox tab selector by=id requires value".to_string())?;
+        Self::parse_tab_index_from_id(value)
+          .ok_or_else(|| format!("Unsupported Camoufox tab id: {value}"))?
+      }
+      "url" => {
+        let value = selector_value
+          .ok_or_else(|| "Camoufox tab selector by=url requires value".to_string())?;
+        pages
+          .iter()
+          .position(|page| page.url().map(|url| url.contains(value)).unwrap_or(false))
+          .ok_or_else(|| format!("No Camoufox tab matched url {value}"))?
+      }
+      "title" => {
+        let value = selector_value
+          .ok_or_else(|| "Camoufox tab selector by=title requires value".to_string())?;
+        let mut matched_index = None;
+        for (index, page) in pages.iter().enumerate() {
+          let title = page
+            .title()
+            .await
+            .map_err(|e| format!("Failed to read Camoufox tab title: {e}"))?;
+          if title.contains(value) {
+            matched_index = Some(index);
+            break;
+          }
+        }
+        matched_index.ok_or_else(|| format!("No Camoufox tab matched title {value}"))?
+      }
+      other => {
+        return Err(format!("Unsupported Camoufox tab selector strategy: {other}").into());
+      }
+    };
+
+    if selected_index >= pages.len() {
+      return Err(
+        format!(
+          "Camoufox tab index {selected_index} is out of range ({} tabs)",
+          pages.len()
+        )
+        .into(),
+      );
+    }
+
+    let selected_page = pages[selected_index].clone();
+    selected_page
+      .bring_to_front()
+      .await
+      .map_err(|e| format!("Failed to activate Camoufox tab: {e}"))?;
+    guard.selected_tab_index = selected_index;
+    guard.active_page = selected_page;
+    Ok((pages, selected_index))
+  }
+
+  pub async fn new_tab(
+    &self,
+    profile_path: &str,
+    url: Option<&str>,
+  ) -> Result<(Vec<Page>, usize), Box<dyn std::error::Error + Send + Sync>> {
+    let state = self.get_automation_state(profile_path).await?;
+    let mut guard = state.lock().await;
+    let context = guard.active_page.context();
+    let new_page = context
+      .new_page()
+      .await
+      .map_err(|e| format!("Failed to create Camoufox tab: {e}"))?;
+    if let Some(target_url) = url {
+      new_page
+        .goto_builder(target_url)
+        .goto()
+        .await
+        .map_err(|e| format!("Failed to navigate new Camoufox tab: {e}"))?;
+    }
+    new_page
+      .bring_to_front()
+      .await
+      .map_err(|e| format!("Failed to activate new Camoufox tab: {e}"))?;
+    let pages = context
+      .pages()
+      .map_err(|e| format!("Failed to list Camoufox tabs after creation: {e}"))?;
+    let selected_tab_index = pages.len().saturating_sub(1);
+    guard.selected_tab_index = selected_tab_index;
+    guard.active_page = new_page;
+    Ok((pages, selected_tab_index))
+  }
+
+  pub async fn close_tab(
+    &self,
+    profile_path: &str,
+    selector_by: Option<&str>,
+    selector_value: Option<&str>,
+  ) -> Result<(Vec<Page>, Option<usize>), Box<dyn std::error::Error + Send + Sync>> {
+    let state = self.get_automation_state(profile_path).await?;
+    let mut guard = state.lock().await;
+    let context = guard.active_page.context();
+    let pages = context
+      .pages()
+      .map_err(|e| format!("Failed to list Camoufox tabs before close: {e}"))?;
+
+    if pages.is_empty() {
+      return Err("Camoufox browser context has no open pages".into());
+    }
+
+    let target_index = match selector_by {
+      Some("index") => selector_value
+        .ok_or_else(|| "Camoufox tab selector by=index requires value".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "Camoufox tab selector by=index requires an integer value".to_string())?,
+      Some("id") => {
+        let value =
+          selector_value.ok_or_else(|| "Camoufox tab selector by=id requires value".to_string())?;
+        Self::parse_tab_index_from_id(value)
+          .ok_or_else(|| format!("Unsupported Camoufox tab id: {value}"))?
+      }
+      Some("url") => {
+        let value = selector_value
+          .ok_or_else(|| "Camoufox tab selector by=url requires value".to_string())?;
+        pages
+          .iter()
+          .position(|page| page.url().map(|url| url.contains(value)).unwrap_or(false))
+          .ok_or_else(|| format!("No Camoufox tab matched url {value}"))?
+      }
+      Some("title") => {
+        let value = selector_value
+          .ok_or_else(|| "Camoufox tab selector by=title requires value".to_string())?;
+        let mut matched_index = None;
+        for (index, page) in pages.iter().enumerate() {
+          let title = page
+            .title()
+            .await
+            .map_err(|e| format!("Failed to read Camoufox tab title: {e}"))?;
+          if title.contains(value) {
+            matched_index = Some(index);
+            break;
+          }
+        }
+        matched_index.ok_or_else(|| format!("No Camoufox tab matched title {value}"))?
+      }
+      Some(other) => {
+        return Err(format!("Unsupported Camoufox tab selector strategy: {other}").into());
+      }
+      None => guard.selected_tab_index,
+    };
+
+    if target_index >= pages.len() {
+      return Err(
+        format!(
+          "Camoufox tab index {target_index} is out of range ({} tabs)",
+          pages.len()
+        )
+        .into(),
+      );
+    }
+
+    let target_page = pages[target_index].clone();
+    target_page
+      .close(None)
+      .await
+      .map_err(|e| format!("Failed to close Camoufox tab: {e}"))?;
+
+    let remaining_pages = context
+      .pages()
+      .map_err(|e| format!("Failed to list Camoufox tabs after close: {e}"))?;
+
+    if remaining_pages.is_empty() {
+      guard.selected_tab_index = 0;
+      guard.active_page = target_page;
+      return Ok((remaining_pages, None));
+    }
+
+    let next_index = target_index.min(remaining_pages.len().saturating_sub(1));
+    let next_page = remaining_pages[next_index].clone();
+    next_page
+      .bring_to_front()
+      .await
+      .map_err(|e| format!("Failed to activate Camoufox tab after close: {e}"))?;
+    guard.selected_tab_index = next_index;
+    guard.active_page = next_page;
+    Ok((remaining_pages, Some(next_index)))
+  }
+
+  pub fn camoufox_tab_id(index: usize) -> String {
+    Self::tab_id_from_index(index)
+  }
+
+  async fn is_automation_running(
+    &self,
+    automation: &Arc<AsyncMutex<CamoufoxAutomationState>>,
+  ) -> bool {
+    let mut guard = automation.lock().await;
+    Self::list_pages_from_state(&mut guard).await.is_ok()
   }
 
   /// Generate Camoufox fingerprint configuration during profile creation
@@ -221,78 +657,120 @@ impl CamoufoxManager {
       .get_browser_executable_path(profile)
       .map_err(|e| format!("Failed to get Camoufox executable path: {e}"))?;
 
-    // Parse the fingerprint config JSON
     let fingerprint_config: HashMap<String, serde_json::Value> =
       serde_json::from_str(&custom_config)
         .map_err(|e| format!("Failed to parse fingerprint config: {e}"))?;
 
-    // Convert to environment variables using CAMOU_CONFIG chunking
-    let env_vars = crate::camoufox::env_vars::config_to_env_vars(&fingerprint_config)
-      .map_err(|e| format!("Failed to convert config to env vars: {e}"))?;
+    let screen = if config.screen_min_width.is_some()
+      || config.screen_max_width.is_some()
+      || config.screen_min_height.is_some()
+      || config.screen_max_height.is_some()
+    {
+      Some(ScreenConstraints {
+        min_width: config.screen_min_width,
+        max_width: config.screen_max_width,
+        min_height: config.screen_min_height,
+        max_height: config.screen_max_height,
+      })
+    } else {
+      None
+    };
 
-    // Build command arguments
-    // Note: We intentionally do NOT use -no-remote to allow opening URLs in existing instances
-    // via Firefox's remote messaging mechanism. This enables "open in new tab" functionality
-    // when Donut is set as the default browser.
-    let mut args = vec![
-      "-profile".to_string(),
-      std::path::Path::new(profile_path)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::Path::new(profile_path).to_path_buf())
-        .to_string_lossy()
-        .to_string(),
-    ];
+    let proxy = config
+      .proxy
+      .as_deref()
+      .map(crate::camoufox::ProxyConfig::from_url)
+      .transpose()
+      .map_err(|e| format!("Failed to parse proxy URL: {e}"))?;
 
-    let cdp_port = Self::find_free_port().await?;
-    args.push(format!("--remote-debugging-port={cdp_port}"));
+    let canonical_profile_path = std::path::Path::new(profile_path)
+      .canonicalize()
+      .unwrap_or_else(|_| std::path::Path::new(profile_path).to_path_buf());
 
-    // Add URL if provided
-    if let Some(url) = url {
-      args.push("-new-tab".to_string());
-      args.push(url.to_string());
-    }
-
-    // Add headless flag when requested via the API or via the CAMOUFOX_HEADLESS
-    // env var (used by integration tests)
-    if headless || std::env::var("CAMOUFOX_HEADLESS").is_ok() {
-      args.push("--headless".to_string());
-    }
-
-    log::info!(
-      "Launching Camoufox: {:?} with args: {:?}",
-      executable_path,
-      args
+    let launcher = Arc::new(
+      CamoufoxLauncher::new(&executable_path)
+        .await
+        .map_err(|e| format!("Failed to initialize Camoufox launcher: {e}"))?,
     );
 
-    // Spawn the browser process
-    let mut command = TokioCommand::new(&executable_path);
-    command
-      .args(&args)
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null());
+    let effective_headless = headless || std::env::var("CAMOUFOX_HEADLESS").is_ok();
+    let context = launcher
+      .launch_persistent_context(
+        &canonical_profile_path,
+        LaunchOptions {
+          os: config.os.clone(),
+          block_images: config.block_images.unwrap_or(false),
+          block_webrtc: config.block_webrtc.unwrap_or(false),
+          block_webgl: config.block_webgl.unwrap_or(false),
+          screen,
+          fingerprint: None,
+          extra_config: Some(fingerprint_config.clone()),
+          headless: effective_headless,
+          proxy,
+          debug: false,
+          ..Default::default()
+        },
+      )
+      .await
+      .map_err(|e| format!("Failed to launch Camoufox persistent context: {e}"))?;
 
-    // Add environment variables
-    for (key, value) in &env_vars {
-      command.env(key, value);
+    let _ = context.set_default_timeout(30_000).await;
+    let _ = context.set_default_navigation_timeout(30_000).await;
+
+    let initial_pages = context
+      .pages()
+      .map_err(|e| format!("Failed to list Camoufox pages after launch: {e}"))?;
+    Self::apply_runtime_overrides(&context, &initial_pages, &fingerprint_config).await?;
+
+    let mut pages = context
+      .pages()
+      .map_err(|e| format!("Failed to list Camoufox pages after launch: {e}"))?;
+    let selected_tab_index = if pages.is_empty() {
+      0
+    } else {
+      pages.len().saturating_sub(1)
+    };
+
+    let page = if pages.is_empty() {
+      let page = context
+        .new_page()
+        .await
+        .map_err(|e| format!("Failed to create initial Camoufox page: {e}"))?;
+      pages.push(page.clone());
+      page
+    } else {
+      pages[selected_tab_index].clone()
+    };
+
+    if let Some(target_url) = url {
+      page
+        .goto_builder(target_url)
+        .goto()
+        .await
+        .map_err(|e| format!("Failed to navigate initial Camoufox page: {e}"))?;
     }
 
-    // Handle fontconfig on Linux
-    if cfg!(target_os = "linux") {
-      let target_os = config.os.as_deref().unwrap_or("linux");
-      if let Some(fontconfig_path) =
-        crate::camoufox::env_vars::get_fontconfig_env(target_os, &executable_path)
-      {
-        command.env("FONTCONFIG_PATH", fontconfig_path);
-      }
-    }
+    page
+      .bring_to_front()
+      .await
+      .map_err(|e| format!("Failed to activate initial Camoufox page: {e}"))?;
 
-    let child = command
-      .spawn()
-      .map_err(|e| format!("Failed to spawn Camoufox process: {e}"))?;
-
-    let process_id = child.id();
-    let instance_id = format!("camoufox_{}", process_id.unwrap_or(0));
+    let process_id = self
+      .wait_for_camoufox_process_by_profile(&canonical_profile_path)
+      .await
+      .map(|(pid, _, _)| pid);
+    let instance_id = format!(
+      "camoufox_{}",
+      process_id.map_or_else(
+        || {
+          SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().to_string())
+            .unwrap_or_else(|_| "0".to_string())
+        },
+        |pid| pid.to_string()
+      )
+    );
 
     log::info!("Camoufox launched with PID: {:?}", process_id);
 
@@ -302,7 +780,12 @@ impl CamoufoxManager {
       process_id,
       profile_path: Some(profile_path.to_string()),
       url: url.map(String::from),
-      cdp_port: Some(cdp_port),
+      cdp_port: None,
+      automation: Some(Arc::new(AsyncMutex::new(CamoufoxAutomationState {
+        active_page: page.clone(),
+        selected_tab_index,
+      }))),
+      launcher: Some(launcher),
     };
 
     let launch_result = CamoufoxLaunchResult {
@@ -310,7 +793,7 @@ impl CamoufoxManager {
       processId: process_id,
       profilePath: Some(profile_path.to_string()),
       url: url.map(String::from),
-      cdp_port: Some(cdp_port),
+      cdp_port: None,
     };
 
     {
@@ -328,13 +811,19 @@ impl CamoufoxManager {
     id: &str,
   ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Get the process ID from our tracking
-    let process_id = {
+    let (process_id, automation) = {
       let inner = self.inner.lock().await;
-      inner
-        .instances
-        .get(id)
-        .and_then(|instance| instance.process_id)
+      inner.instances.get(id).map_or((None, None), |instance| {
+        (instance.process_id, instance.automation.clone())
+      })
     };
+
+    if let Some(ref automation) = automation {
+      let active_page = automation.lock().await.active_page.clone();
+      if let Err(error) = active_page.context().close().await {
+        log::warn!("Failed to close Camoufox browser context for {id}: {error}");
+      }
+    }
 
     if let Some(pid) = process_id {
       // Kill the process
@@ -349,10 +838,10 @@ impl CamoufoxManager {
 
       Ok(success)
     } else {
-      // No process ID found, just remove from tracking
+      // No process ID found, fall back to automation/context closure tracking
       let mut inner = self.inner.lock().await;
       inner.instances.remove(id);
-      Ok(true)
+      Ok(automation.is_some())
     }
   }
 
@@ -419,18 +908,26 @@ impl CamoufoxManager {
             .unwrap_or_else(|_| std::path::Path::new(instance_profile_path).to_path_buf());
 
           if instance_path == target_path {
-            // Verify the server is actually running by checking the process
-            if let Some(process_id) = instance.process_id {
-              if self.is_server_running(process_id).await {
-                // Found running Camoufox instance
-                return Ok(Some(CamoufoxLaunchResult {
-                  id: id.clone(),
-                  processId: instance.process_id,
-                  profilePath: instance.profile_path.clone(),
-                  url: instance.url.clone(),
-                  cdp_port: instance.cdp_port,
-                }));
-              }
+            let automation_running = if let Some(automation) = &instance.automation {
+              self.is_automation_running(automation).await
+            } else {
+              false
+            };
+
+            let process_running = if let Some(process_id) = instance.process_id {
+              self.is_server_running(process_id).await
+            } else {
+              false
+            };
+
+            if automation_running || process_running {
+              return Ok(Some(CamoufoxLaunchResult {
+                id: id.clone(),
+                processId: instance.process_id,
+                profilePath: instance.profile_path.clone(),
+                url: instance.url.clone(),
+                cdp_port: instance.cdp_port,
+              }));
             }
           }
         }
@@ -458,6 +955,8 @@ impl CamoufoxManager {
           profile_path: Some(found_profile_path.clone()),
           url: None,
           cdp_port,
+          automation: None,
+          launcher: None,
         },
       );
 
@@ -556,17 +1055,19 @@ impl CamoufoxManager {
       let inner = self.inner.lock().await;
 
       for (id, instance) in inner.instances.iter() {
-        if let Some(process_id) = instance.process_id {
-          // Check if the process is still alive
-          if !self.is_server_running(process_id).await {
-            // Process is dead
-            // Camoufox instance is no longer running
-            dead_instances.push(id.clone());
-            instances_to_remove.push(id.clone());
-          }
+        let automation_running = if let Some(automation) = &instance.automation {
+          self.is_automation_running(automation).await
         } else {
-          // No process_id means it's likely a dead instance
-          // Camoufox instance has no PID, marking as dead
+          false
+        };
+
+        let process_running = if let Some(process_id) = instance.process_id {
+          self.is_server_running(process_id).await
+        } else {
+          false
+        };
+
+        if !automation_running && !process_running {
           dead_instances.push(id.clone());
           instances_to_remove.push(id.clone());
         }
@@ -740,6 +1241,48 @@ mod tests {
     assert_eq!(default_config.fingerprint, None);
     assert_eq!(default_config.randomize_fingerprint_on_launch, None);
     assert_eq!(default_config.os, None);
+  }
+
+  #[test]
+  fn test_config_languages_falls_back_to_locale() {
+    let config = HashMap::from([
+      ("locale:language".to_string(), serde_json::json!("zh")),
+      ("locale:region".to_string(), serde_json::json!("CN")),
+    ]);
+
+    let languages =
+      CamoufoxManager::config_languages(&config).expect("languages should derive from locale");
+    assert_eq!(languages, vec!["zh-CN".to_string(), "zh".to_string()]);
+  }
+
+  #[test]
+  fn test_runtime_override_script_contains_expected_fingerprint_fields() {
+    let config = HashMap::from([
+      (
+        "navigator.userAgent".to_string(),
+        serde_json::json!(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0"
+        ),
+      ),
+      ("navigator.platform".to_string(), serde_json::json!("Win32")),
+      (
+        "navigator.hardwareConcurrency".to_string(),
+        serde_json::json!(4),
+      ),
+      ("locale:language".to_string(), serde_json::json!("zh")),
+      ("locale:region".to_string(), serde_json::json!("CN")),
+      ("timezone".to_string(), serde_json::json!("Asia/Shanghai")),
+    ]);
+
+    let script = CamoufoxManager::runtime_override_script(&config)
+      .expect("runtime override script should be generated");
+
+    assert!(script.contains("Firefox/146.0"));
+    assert!(script.contains("Win32"));
+    assert!(script.contains("\"zh-CN\""));
+    assert!(script.contains("hardwareConcurrency"));
+    assert!(script.contains("Asia/Shanghai"));
+    assert!(script.contains("resolvedOptions"));
   }
 }
 

@@ -62,6 +62,7 @@ export function WindowResizeWarningDialog({
   return (
     <Dialog open={isOpen}>
       <DialogContent
+        aria-describedby={undefined}
         className="sm:max-w-sm"
         onEscapeKeyDown={(e) => {
           e.preventDefault();

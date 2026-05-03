@@ -382,19 +382,20 @@ impl BrowserRunner {
           format!("Failed to launch Camoufox: {e}").into()
         })?;
 
-      // For server-based Camoufox, we use the process_id
-      let process_id = camoufox_result.processId.unwrap_or(0);
-      log::info!("Camoufox launched successfully with PID: {process_id}");
+      let process_id = camoufox_result.processId;
+      log::info!("Camoufox launched successfully with PID: {:?}", process_id);
 
       // Update profile with the process info from camoufox result
-      updated_profile.process_id = Some(process_id);
+      updated_profile.process_id = process_id;
       updated_profile.last_launch = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
 
       // Update the proxy manager with the correct PID
-      if let Err(e) = PROXY_MANAGER.update_proxy_pid(0, process_id) {
-        log::warn!("Warning: Failed to update proxy PID mapping: {e}");
-      } else {
-        log::info!("Updated proxy PID mapping from temp (0) to actual PID: {process_id}");
+      if let Some(process_id) = process_id {
+        if let Err(e) = PROXY_MANAGER.update_proxy_pid(0, process_id) {
+          log::warn!("Warning: Failed to update proxy PID mapping: {e}");
+        } else {
+          log::info!("Updated proxy PID mapping from temp (0) to actual PID: {process_id}");
+        }
       }
 
       // Save the updated profile (includes new fingerprint if randomize is enabled)
@@ -558,14 +559,10 @@ impl BrowserRunner {
           profile.name
         );
 
-        // Create a config copy without the existing fingerprint to force generation of a new one
-        let mut config_for_generation = chromium_config.clone();
-        config_for_generation.fingerprint = None;
-
         // Generate a new fingerprint
         let new_fingerprint = self
           .chromium_manager
-          .generate_fingerprint_config(&app_handle, profile, &config_for_generation)
+          .generate_fingerprint_config(&app_handle, profile, &chromium_config)
           .await
           .map_err(|e| format!("Failed to generate random fingerprint: {e}"))?;
 

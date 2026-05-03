@@ -2,7 +2,7 @@
   "name": "JnmBrowser",
   "private": true,
   "license": "AGPL-3.0",
-  "version": "0.22.7",
+  "version": "0.22.8",
   "type": "module",
   "scripts": {
     "dev": "next dev --turbopack -p 12341",

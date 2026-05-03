@@ -654,7 +654,7 @@
     "tokenCopied": "Token copiado",
     "mcpEnableLabel": "Ativar servidor MCP (Model Context Protocol)",
     "mcpEnableDescription": "Permite que assistentes de IA como o Claude Desktop controlem navegadores.",
-    "mcpAcceptTermsFirst": "(Aceite primeiro os termos da Chromium nas Configurações)",
+    "mcpAcceptTermsFirst": "(Aceite primeiro os termos do JnmBrowser nas Configurações)",
     "mcpStarted": "Servidor MCP iniciado na porta {{port}}",
     "mcpStopped": "Servidor MCP parado",
     "mcpToggleFailed": "Falha ao alternar o servidor MCP",
@@ -919,7 +919,7 @@
     "osLabel": "Impressão Digital do Sistema Operacional",
     "selectOSPlaceholder": "Selecionar sistema operacional",
     "generateRandomOnLaunch": "Gerar impressão digital aleatória a cada inicialização",
-    "generateRandomDescription": "Quando ativado, uma nova impressão digital será gerada cada vez que o navegador for iniciado.",
+    "generateRandomDescription": "Quando ativado, uma nova impressão digital baseada em seed será gerada a cada inicialização, enquanto as configurações fixas suportadas continuarão valendo.",
     "generateRandomDescriptionAuto": "Quando ativado, uma nova impressão digital será gerada cada vez que o navegador for iniciado. A impressão digital gerada é salva para referência.",
     "autoLocationDescription": "Configurar automaticamente as informações de localização com base na configuração do proxy ou na sua conexão se nenhum proxy for fornecido",
     "editingDisabledRunning": "A edição de impressão digital está desativada porque o perfil está em execução. Pare o perfil para fazer alterações.",
@@ -1016,7 +1016,10 @@
     "refreshFingerprint": "Atualizar Impressão Digital",
     "canvasNoiseSeedPlaceholder": "Insira uma string seed para a impressão digital do canvas",
     "addFontsPlaceholder": "Adicionar fontes...",
-    "enterAsJson": "Insira {{title}} como JSON"
+    "enterAsJson": "Insira {{title}} como JSON",
+    "chromiumAutomaticDescription": "O Chromium funciona melhor no modo de impressão digital aleatória com apenas algumas configurações fixas. A maioria dos traços anti-detecção é derivada da seed em tempo de execução.",
+    "chromiumManualDescription": "Esta página serve apenas para algumas substituições fixas limitadas. É normal ver muitos campos vazios: muitos traços de canvas, áudio, WebGL e layout são gerados a partir da seed em tempo de execução, em vez de serem salvos como valores estáticos.",
+    "chromiumSupportedFixedSettingsDescription": "Aqui mantemos apenas as configurações fixas que já estão realmente conectadas ao fluxo atual do Chromium. Com a randomização a cada inicialização ativada, esses valores continuam valendo, enquanto os traços mais profundos seguem sendo derivados da seed."
   },
   "warnings": {
     "windowResizeTitle": "Dimensões de janela personalizadas",
@@ -1426,8 +1429,8 @@
     "tryAgain": "Tente novamente"
   },
   "wayfernTerms": {
-    "title": "Termos e condições da Chromium",
-    "description": "Antes de usar o JnmBrowser, você deve ler e concordar com os Termos e Condições da Chromium.",
+    "title": "Termos e Condições do JnmBrowser",
+    "description": "Antes de usar o JnmBrowser, você deve ler e concordar com os Termos e Condições do JnmBrowser.",
     "reviewLabel": "Por favor, revise os Termos e Condições em:",
     "agreeNotice": "Ao clicar em \"Aceito\", você concorda em ficar vinculado a esses termos.",
     "acceptButton": "Aceito",

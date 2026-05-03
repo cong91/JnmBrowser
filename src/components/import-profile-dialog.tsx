@@ -293,7 +293,10 @@ export function ImportProfileDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl max-h-[80vh] my-8 flex flex-col">
+      <DialogContent
+        aria-describedby={undefined}
+        className="max-w-2xl max-h-[80vh] my-8 flex flex-col"
+      >
         <DialogHeader className="flex-shrink-0">
           <DialogTitle>{t("importProfile.title")}</DialogTitle>
         </DialogHeader>

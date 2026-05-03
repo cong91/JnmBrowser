@@ -654,7 +654,7 @@
     "tokenCopied": "Token copiado",
     "mcpEnableLabel": "Activar servidor MCP (Model Context Protocol)",
     "mcpEnableDescription": "Permite que asistentes IA como Claude Desktop controlen los navegadores.",
-    "mcpAcceptTermsFirst": "(Acepta primero los términos de Chromium en Configuración)",
+    "mcpAcceptTermsFirst": "(Acepta primero los términos de JnmBrowser en Configuración)",
     "mcpStarted": "Servidor MCP iniciado en puerto {{port}}",
     "mcpStopped": "Servidor MCP detenido",
     "mcpToggleFailed": "Error al alternar el servidor MCP",
@@ -919,7 +919,7 @@
     "osLabel": "Huella digital del sistema operativo",
     "selectOSPlaceholder": "Seleccionar sistema operativo",
     "generateRandomOnLaunch": "Generar huella digital aleatoria en cada inicio",
-    "generateRandomDescription": "Cuando está activado, se generará una nueva huella digital cada vez que se inicie el navegador.",
+    "generateRandomDescription": "Cuando está activado, se generará una nueva huella basada en seed en cada inicio, mientras que las opciones fijas compatibles seguirán teniendo efecto.",
     "generateRandomDescriptionAuto": "Cuando está activado, se generará una nueva huella digital cada vez que se inicie el navegador. La huella digital generada se guarda como referencia.",
     "autoLocationDescription": "Configurar automáticamente la información de ubicación basándose en la configuración del proxy o en su conexión si no se proporciona un proxy",
     "editingDisabledRunning": "La edición de huellas digitales está desactivada porque el perfil se está ejecutando actualmente. Detenga el perfil para realizar cambios.",
@@ -1016,7 +1016,10 @@
     "refreshFingerprint": "Actualizar Huella Digital",
     "canvasNoiseSeedPlaceholder": "Introduce una semilla para la huella digital del canvas",
     "addFontsPlaceholder": "Agregar fuentes...",
-    "enterAsJson": "Ingresa {{title}} como JSON"
+    "enterAsJson": "Ingresa {{title}} como JSON",
+    "chromiumAutomaticDescription": "Chromium funciona mejor en modo de huella aleatoria con solo unas pocas opciones fijas. La mayoría de los rasgos anti-detección se derivan de la semilla en tiempo de ejecución.",
+    "chromiumManualDescription": "Esta página solo sirve para algunas anulaciones fijas limitadas. Es normal que haya campos vacíos: muchos rasgos de canvas, audio, WebGL y diseño se generan a partir de la semilla en tiempo de ejecución en lugar de guardarse como valores estáticos.",
+    "chromiumSupportedFixedSettingsDescription": "Aquí solo se conservan las opciones fijas que ya están conectadas de verdad en la ruta actual de Chromium. Si activas el aleatorio en cada inicio, estos valores seguirán aplicándose y los rasgos más profundos seguirán derivándose de la semilla."
   },
   "warnings": {
     "windowResizeTitle": "Dimensiones de ventana personalizadas",
@@ -1426,8 +1429,8 @@
     "tryAgain": "Por favor, inténtalo de nuevo"
   },
   "wayfernTerms": {
-    "title": "Términos y condiciones de Chromium",
-    "description": "Antes de usar JnmBrowser, debes leer y aceptar los Términos y Condiciones de Chromium.",
+    "title": "Términos y Condiciones de JnmBrowser",
+    "description": "Antes de usar JnmBrowser, debes leer y aceptar los Términos y Condiciones de JnmBrowser.",
     "reviewLabel": "Por favor, revisa los Términos y Condiciones en:",
     "agreeNotice": "Al hacer clic en \"Acepto\", aceptas estos términos.",
     "acceptButton": "Acepto",

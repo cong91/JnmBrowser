@@ -9,6 +9,7 @@ use axum::{
 };
 use base64::Engine;
 use futures_util::{stream, StreamExt};
+use playwright::api::{Page, Request as PlaywrightRequest};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -107,6 +108,13 @@ fn serialize_profile_for_mcp(profile: &BrowserProfile) -> serde_json::Value {
     );
   }
   value
+}
+
+fn mcp_profile_path(profile: &BrowserProfile) -> String {
+  profile
+    .get_profile_data_path(&ProfileManager::instance().get_profiles_dir())
+    .to_string_lossy()
+    .to_string()
 }
 
 impl McpError {
@@ -441,9 +449,11 @@ impl McpTabRef {
   fn validate(&self) -> Result<(), McpError> {
     match (&self.by, &self.value) {
       (McpTabBy::Index, Some(McpTabValue::Index(_))) => Ok(()),
-      (McpTabBy::Index, Some(McpTabValue::Text(_))) => Err(McpError::invalid_params(
-        "Tab selector by=index requires an integer value",
-      )),
+      (McpTabBy::Index, Some(McpTabValue::Text(value))) => value
+        .trim()
+        .parse::<usize>()
+        .map(|_| ())
+        .map_err(|_| McpError::invalid_params("Tab selector by=index requires an integer value")),
       (McpTabBy::Index, None) => Err(McpError::invalid_params(
         "Tab selector by=index requires value",
       )),
@@ -468,6 +478,7 @@ impl McpTabRef {
     match (&self.by, &self.value) {
       (McpTabBy::Id, Some(McpTabValue::Text(value))) => format!("tab id {value}"),
       (McpTabBy::Index, Some(McpTabValue::Index(index))) => format!("tab index {index}"),
+      (McpTabBy::Index, Some(McpTabValue::Text(value))) => format!("tab index {value}"),
       (McpTabBy::Url, Some(McpTabValue::Text(value))) => format!("tab url {value}"),
       (McpTabBy::Title, Some(McpTabValue::Text(value))) => format!("tab title {value}"),
       _ => format!("tab {}", self.by.as_str()),
@@ -913,6 +924,7 @@ struct LocatorReadArgs {
   #[serde(alias = "profileId")]
   profile_id: String,
   locator: McpLocator,
+  frame: Option<McpFrameRef>,
   #[serde(flatten)]
   options: McpCommonOptions,
 }
@@ -922,6 +934,7 @@ struct QueryElementsArgs {
   #[serde(alias = "profileId")]
   profile_id: String,
   locator: McpLocator,
+  frame: Option<McpFrameRef>,
   limit: Option<usize>,
   #[serde(flatten)]
   options: McpCommonOptions,
@@ -1852,8 +1865,20 @@ impl McpServer {
     expression: &str,
   ) -> Result<serde_json::Value, McpError> {
     let profile = self.get_running_profile(profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      return self.evaluate_camoufox_page_value(&page, expression).await;
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
+    crate::chromium_manager::ChromiumManager::instance()
+      .refresh_runtime_fingerprint_overrides_for_target(&profile, &ws_url)
+      .await
+      .map_err(|error| {
+        McpError::internal(format!(
+          "Failed to refresh Chromium runtime fingerprint overrides: {error}"
+        ))
+      })?;
     self.evaluate_runtime_value(&ws_url, expression, None).await
   }
 
@@ -2496,6 +2521,11 @@ impl McpServer {
     match (&selector.by, &selector.value) {
       (McpTabBy::Id, Some(McpTabValue::Text(value))) => tab.id == *value,
       (McpTabBy::Index, Some(McpTabValue::Index(index))) => tab.index == *index,
+      (McpTabBy::Index, Some(McpTabValue::Text(value))) => value
+        .trim()
+        .parse::<usize>()
+        .map(|index| tab.index == index)
+        .unwrap_or(false),
       (McpTabBy::Url, Some(McpTabValue::Text(value))) => tab.url.contains(value),
       (McpTabBy::Title, Some(McpTabValue::Text(value))) => tab.title.contains(value),
       _ => false,
@@ -3201,6 +3231,7 @@ impl McpServer {
     ))
   }
 
+  #[allow(dead_code)]
   async fn evaluate_locator_snapshot(
     &self,
     profile_id: &str,
@@ -3232,6 +3263,7 @@ impl McpServer {
     Self::parse_locator_resolution_snapshot(value)
   }
 
+  #[allow(dead_code)]
   async fn evaluate_locator_collection(
     &self,
     profile_id: &str,
@@ -3246,6 +3278,7 @@ impl McpServer {
       .await
   }
 
+  #[allow(dead_code)]
   async fn evaluate_locator_collection_in_context(
     &self,
     ws_url: &str,
@@ -3826,6 +3859,267 @@ impl McpServer {
       }
       _ => {}
     }
+  }
+
+  #[allow(dead_code)]
+  async fn run_camoufox_console_capture(
+    profile_id: String,
+    page: Page,
+    shared: ConsoleCaptureShared,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ready_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+  ) {
+    let mut ready_tx = Some(ready_tx);
+    let mut stream = match page.subscribe_event() {
+      Ok(stream) => stream,
+      Err(error) => {
+        let message =
+          format!("Failed to subscribe Camoufox console capture for profile {profile_id}: {error}");
+        Self::set_console_capture_error(&shared, message.clone()).await;
+        Self::notify_capture_ready(&mut ready_tx, Err(message));
+        return;
+      }
+    };
+    Self::notify_capture_ready(&mut ready_tx, Ok(()));
+
+    let mut shutdown_rx = shutdown_rx;
+    loop {
+      let next_event = tokio::select! {
+        _ = &mut shutdown_rx => {
+          break;
+        }
+        event = stream.next() => event,
+      };
+
+      let Some(event) = next_event else {
+        break;
+      };
+
+      let event = match event {
+        Ok(event) => event,
+        Err(error) => {
+          Self::set_console_capture_error(
+            &shared,
+            format!("Camoufox console capture stream error for profile {profile_id}: {error}"),
+          )
+          .await;
+          return;
+        }
+      };
+
+      if let playwright::api::page::Event::Console(message) = event {
+        let location = message.location().ok();
+        let entry = ConsoleLogEntry {
+          timestamp: Some(
+            std::time::SystemTime::now()
+              .duration_since(std::time::UNIX_EPOCH)
+              .map(|duration| duration.as_secs_f64())
+              .unwrap_or_default(),
+          ),
+          source: "console".to_string(),
+          level: message.r#type().unwrap_or_else(|_| "log".to_string()),
+          text: message.text().unwrap_or_default(),
+          url: location.as_ref().map(|location| location.url.clone()),
+          line_number: location.map(|location| location.line_number as i64),
+        };
+        Self::push_console_log(&shared, entry).await;
+      }
+    }
+
+    shared.running.store(false, Ordering::SeqCst);
+  }
+
+  #[allow(dead_code)]
+  async fn run_camoufox_network_capture(
+    profile_id: String,
+    page: Page,
+    shared: NetworkCaptureShared,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ready_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+  ) {
+    let mut ready_tx = Some(ready_tx);
+    let mut stream = match page.subscribe_event() {
+      Ok(stream) => stream,
+      Err(error) => {
+        let message =
+          format!("Failed to subscribe Camoufox network capture for profile {profile_id}: {error}");
+        Self::set_network_capture_error(&shared, message.clone()).await;
+        Self::notify_capture_ready(&mut ready_tx, Err(message));
+        return;
+      }
+    };
+    Self::notify_capture_ready(&mut ready_tx, Ok(()));
+
+    let mut request_ids: Vec<(PlaywrightRequest, String)> = Vec::new();
+    let mut shutdown_rx = shutdown_rx;
+
+    loop {
+      let next_event = tokio::select! {
+        _ = &mut shutdown_rx => {
+          break;
+        }
+        event = stream.next() => event,
+      };
+
+      let Some(event) = next_event else {
+        break;
+      };
+
+      let event = match event {
+        Ok(event) => event,
+        Err(error) => {
+          Self::set_network_capture_error(
+            &shared,
+            format!("Camoufox network capture stream error for profile {profile_id}: {error}"),
+          )
+          .await;
+          return;
+        }
+      };
+
+      match event {
+        playwright::api::page::Event::Request(request) => {
+          let request_id = Uuid::new_v4().to_string();
+          let url = request.url().unwrap_or_default();
+          let method = request.method().unwrap_or_default();
+          let resource_type = request.resource_type().ok();
+          let initiator_type = Some(
+            if request.is_navigation_request().unwrap_or(false) {
+              "navigation"
+            } else {
+              "page"
+            }
+            .to_string(),
+          );
+          let start_timestamp = request
+            .timing()
+            .ok()
+            .flatten()
+            .map(|timing| timing.start_time / 1000.0)
+            .or_else(|| {
+              std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs_f64())
+            });
+          let request_headers =
+            Self::playwright_headers_to_json(request.headers().unwrap_or_default());
+          let post_data = request
+            .post_data()
+            .ok()
+            .flatten()
+            .map(|body| String::from_utf8_lossy(&body).to_string());
+
+          request_ids.push((request.clone(), request_id.clone()));
+          Self::update_network_request(&shared, &request_id, move |entry| {
+            entry.url = url;
+            entry.method = method;
+            entry.resource_type = resource_type;
+            entry.initiator_type = initiator_type;
+            entry.start_timestamp = start_timestamp;
+            entry.request_headers = request_headers;
+            entry.post_data = post_data;
+            entry.failed = false;
+            entry.error_text = None;
+            entry.blocked_reason = None;
+            entry.has_response_body = false;
+          })
+          .await;
+        }
+        playwright::api::page::Event::Response(response) => {
+          let request = response.request();
+          let request_id =
+            Self::camoufox_find_request_id(&request_ids, &request).unwrap_or_else(|| {
+              let request_id = Uuid::new_v4().to_string();
+              request_ids.push((request.clone(), request_id.clone()));
+              request_id
+            });
+          let status = response.status().ok().map(|value| value as i64);
+          let status_text = response.status_text().ok();
+          let headers_vec = response.headers().await.unwrap_or_default();
+          let response_headers = Self::playwright_headers_to_json(
+            headers_vec
+              .into_iter()
+              .map(|header| (header.name, header.value)),
+          );
+          let mime_type = Self::response_mime_type_from_headers(&response_headers);
+          let url = response.url().unwrap_or_default();
+
+          Self::update_network_request(&shared, &request_id, move |entry| {
+            entry.status = status;
+            entry.status_text = status_text;
+            entry.response_headers = response_headers;
+            entry.mime_type = mime_type;
+            if entry.url.is_empty() {
+              entry.url = url;
+            }
+          })
+          .await;
+        }
+        playwright::api::page::Event::RequestFinished(request) => {
+          let request_id = match Self::camoufox_find_request_id(&request_ids, &request) {
+            Some(request_id) => request_id,
+            None => continue,
+          };
+          let response = request.response().await.ok().flatten();
+          let response_end_ms = request.response_end().ok().flatten();
+          let end_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs_f64());
+
+          Self::update_network_request(&shared, &request_id, move |entry| {
+            entry.end_timestamp = end_timestamp;
+            entry.duration_ms = response_end_ms.or({
+              match (entry.start_timestamp, end_timestamp) {
+                (Some(start), Some(end)) if end >= start => Some((end - start) * 1000.0),
+                _ => None,
+              }
+            });
+          })
+          .await;
+
+          if let Some(response) = response {
+            match response.body().await {
+              Ok(body) => {
+                let (body, base64_encoded) = match String::from_utf8(body.clone()) {
+                  Ok(text) => (text, false),
+                  Err(_) => (base64::engine::general_purpose::STANDARD.encode(body), true),
+                };
+                Self::set_network_request_body(&shared, &request_id, body, base64_encoded).await;
+              }
+              Err(error) => {
+                Self::update_network_request(&shared, &request_id, move |entry| {
+                  entry.has_response_body = false;
+                  entry.error_text.get_or_insert_with(|| error.to_string());
+                })
+                .await;
+              }
+            }
+          }
+        }
+        playwright::api::page::Event::RequestFailed(request) => {
+          let request_id = match Self::camoufox_find_request_id(&request_ids, &request) {
+            Some(request_id) => request_id,
+            None => continue,
+          };
+          let error_text = request.failure().ok().flatten();
+          let end_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs_f64());
+          Self::update_network_request(&shared, &request_id, move |entry| {
+            entry.failed = true;
+            entry.error_text = error_text;
+            entry.end_timestamp = end_timestamp;
+          })
+          .await;
+        }
+        _ => {}
+      }
+    }
+
+    shared.running.store(false, Ordering::SeqCst);
   }
 
   async fn run_network_capture(
@@ -5581,6 +5875,7 @@ impl McpServer {
               "description": "The UUID of the running profile"
             },
             "locator": Self::locator_input_schema("Locator definition to check for existence."),
+            "frame": Self::frame_ref_input_schema("Optional frame selector. If provided, existence checking runs inside that frame."),
             "auto_wait": {
               "type": "boolean",
               "description": "Whether to use built-in auto-wait before returning. Default is true."
@@ -5604,6 +5899,7 @@ impl McpServer {
               "description": "The UUID of the running profile"
             },
             "locator": Self::locator_input_schema("Locator definition for the element whose text should be returned."),
+            "frame": Self::frame_ref_input_schema("Optional frame selector. If provided, text is read inside that frame."),
             "auto_wait": {
               "type": "boolean",
               "description": "Whether to use built-in auto-wait before returning text. Default is true."
@@ -5673,6 +5969,7 @@ impl McpServer {
               "description": "The UUID of the running profile"
             },
             "locator": Self::locator_input_schema("Locator definition for the elements to enumerate."),
+            "frame": Self::frame_ref_input_schema("Optional frame selector. If provided, querying runs inside that frame."),
             "limit": {
               "type": "integer",
               "description": "Maximum number of element summaries to return. Default is 20, max is 100."
@@ -9066,6 +9363,615 @@ impl McpServer {
 
   // --- CDP utility methods for browser interaction ---
 
+  fn camoufox_not_supported_for_frames(
+    frame: Option<&McpFrameRef>,
+    tool_name: &str,
+  ) -> Result<(), McpError> {
+    if frame.is_some() {
+      return Err(McpError::invalid_params(format!(
+        "{tool_name} does not yet support frame selection on Camoufox profiles"
+      )));
+    }
+    Ok(())
+  }
+
+  fn camoufox_error(context: &str, error: impl std::fmt::Display) -> McpError {
+    McpError::internal(format!("Camoufox {context} failed: {error}"))
+  }
+
+  async fn get_camoufox_active_page(&self, profile: &BrowserProfile) -> Result<Page, McpError> {
+    crate::camoufox_manager::CamoufoxManager::instance()
+      .get_active_page(&mcp_profile_path(profile))
+      .await
+      .map_err(|error| Self::camoufox_error("automation session lookup", error))
+  }
+
+  async fn get_camoufox_pages(
+    &self,
+    profile: &BrowserProfile,
+  ) -> Result<(Vec<Page>, usize), McpError> {
+    crate::camoufox_manager::CamoufoxManager::instance()
+      .list_pages(&mcp_profile_path(profile))
+      .await
+      .map_err(|error| Self::camoufox_error("tab listing", error))
+  }
+
+  async fn build_camoufox_tab_nodes(
+    &self,
+    pages: Vec<Page>,
+    active_index: usize,
+  ) -> Result<Vec<McpTabNode>, McpError> {
+    let mut tabs = Vec::with_capacity(pages.len());
+    for (index, page) in pages.into_iter().enumerate() {
+      let title = page
+        .title()
+        .await
+        .map_err(|error| Self::camoufox_error("tab title lookup", error))?;
+      let url = page
+        .url()
+        .map_err(|error| Self::camoufox_error("tab URL lookup", error))?;
+      tabs.push(McpTabNode {
+        id: crate::camoufox_manager::CamoufoxManager::camoufox_tab_id(index),
+        index,
+        title,
+        url,
+        target_type: "page".to_string(),
+        active: index == active_index,
+      });
+    }
+    Ok(tabs)
+  }
+
+  async fn evaluate_camoufox_page_value(
+    &self,
+    page: &Page,
+    expression: &str,
+  ) -> Result<serde_json::Value, McpError> {
+    page
+      .eval::<serde_json::Value>(expression)
+      .await
+      .map_err(|error| Self::camoufox_error("page evaluation", error))
+  }
+
+  fn camoufox_target_payload(
+    selector: Option<&str>,
+    locator: Option<&McpLocator>,
+  ) -> serde_json::Value {
+    if let Some(selector) = selector {
+      serde_json::json!({
+        "type": "selector",
+        "selector": selector,
+      })
+    } else if let Some(locator) = locator {
+      serde_json::json!({
+        "type": "locator",
+        "locator": locator,
+      })
+    } else {
+      serde_json::Value::Null
+    }
+  }
+
+  fn camoufox_typing_delay_ms(wpm: Option<f64>) -> Option<f64> {
+    let wpm = wpm?;
+    if !wpm.is_finite() || wpm <= 0.0 {
+      return None;
+    }
+    Some((60_000.0 / (wpm * 5.0)).clamp(10.0, 400.0))
+  }
+
+  async fn wait_for_camoufox_element_actionable(
+    &self,
+    page: &Page,
+    selector: Option<&str>,
+    locator: Option<&McpLocator>,
+    mode: &str,
+    timeout_ms: u64,
+  ) -> Result<serde_json::Value, McpError> {
+    let expression = Self::build_element_actionability_expression(selector, locator, mode)?;
+    let last_observed = Arc::new(Mutex::new(None::<serde_json::Value>));
+
+    self
+      .wait_with_timeout(
+        timeout_ms,
+        || {
+          let expression = expression.clone();
+          let page = page.clone();
+          let last_observed = last_observed.clone();
+          async move {
+            let value = self
+              .evaluate_camoufox_page_value(&page, &expression)
+              .await?;
+            *last_observed
+              .lock()
+              .expect("camoufox actionability lock poisoned") = Some(value.clone());
+
+            if let Some(error) = value.get("error").and_then(|value| value.as_str()) {
+              return Err(McpError::invalid_params(error));
+            }
+
+            if value.get("ready").and_then(|value| value.as_bool()) == Some(true) {
+              Ok(Some(value))
+            } else {
+              Ok(None)
+            }
+          }
+        },
+        || {
+          let last_observed = last_observed
+            .lock()
+            .expect("camoufox actionability lock poisoned")
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+          format!(
+            "Timed out after {timeout_ms}ms waiting for {mode} target to become actionable. Last observed state: {}",
+            serde_json::to_string(&last_observed).unwrap_or_else(|_| "null".to_string())
+          )
+        },
+      )
+      .await
+  }
+
+  async fn evaluate_camoufox_element_action(
+    &self,
+    page: &Page,
+    selector: Option<&str>,
+    locator: Option<&McpLocator>,
+    action_body: &str,
+  ) -> Result<serde_json::Value, McpError> {
+    let expression = Self::build_element_target_expression(selector, locator, action_body)?;
+    self.evaluate_camoufox_page_value(page, &expression).await
+  }
+
+  #[allow(dead_code)]
+  fn camoufox_find_request_id(
+    request_ids: &[(PlaywrightRequest, String)],
+    request: &PlaywrightRequest,
+  ) -> Option<String> {
+    request_ids
+      .iter()
+      .find(|(candidate, _)| candidate == request)
+      .map(|(_, request_id)| request_id.clone())
+  }
+
+  #[allow(dead_code)]
+  fn playwright_headers_to_json(
+    headers: impl IntoIterator<Item = (String, String)>,
+  ) -> serde_json::Value {
+    let map = headers
+      .into_iter()
+      .fold(serde_json::Map::new(), |mut acc, (name, value)| {
+        acc.insert(name, serde_json::Value::String(value));
+        acc
+      });
+    serde_json::Value::Object(map)
+  }
+
+  #[allow(dead_code)]
+  fn response_mime_type_from_headers(headers: &serde_json::Value) -> Option<String> {
+    headers
+      .get("content-type")
+      .and_then(|value| value.as_str())
+      .and_then(|value| value.split(';').next())
+      .map(str::trim)
+      .filter(|value| !value.is_empty())
+      .map(ToString::to_string)
+  }
+
+  fn camoufox_console_capture_bootstrap_script(reset: bool) -> String {
+    format!(
+      r#"
+      (() => {{
+        const reset = {reset_flag};
+        const storageKey = "__jnm_mcp_console_capture";
+        const state = window.__jnmMcpConsoleCapture || {{
+          logs: [],
+          installed: false,
+        }};
+        const persist = () => {{
+          try {{
+            sessionStorage.setItem(storageKey, JSON.stringify({{ logs: state.logs }}));
+          }} catch (_error) {{}}
+        }};
+        if (reset) {{
+          state.logs = [];
+          try {{
+            sessionStorage.removeItem(storageKey);
+          }} catch (_error) {{}}
+        }}
+        if (!state.installed) {{
+          const push = (level, args) => {{
+            state.logs.push({{
+              timestamp: Date.now() / 1000,
+              source: "console",
+              level,
+              text: args.map((value) => {{
+                if (typeof value === "string") return value;
+                try {{
+                  return JSON.stringify(value);
+                }} catch (_error) {{
+                  return String(value);
+                }}
+              }}).join(" "),
+              url: window.location.href,
+              lineNumber: null,
+            }});
+            persist();
+          }};
+          for (const level of ["log", "info", "warn", "error", "debug"]) {{
+            const original = console[level];
+            console[level] = function (...args) {{
+              push(level === "warn" ? "warning" : level, args);
+              return original.apply(this, args);
+            }};
+          }}
+          window.addEventListener("error", (event) => {{
+            state.logs.push({{
+              timestamp: Date.now() / 1000,
+              source: "pageerror",
+              level: "error",
+              text: event.message || "Unknown error",
+              url: event.filename || window.location.href,
+              lineNumber: Number.isFinite(event.lineno) ? event.lineno : null,
+            }});
+            persist();
+          }});
+          window.addEventListener("unhandledrejection", (event) => {{
+            const reason = event.reason;
+            state.logs.push({{
+              timestamp: Date.now() / 1000,
+              source: "pageerror",
+              level: "error",
+              text: reason && reason.message ? reason.message : String(reason),
+              url: window.location.href,
+              lineNumber: null,
+            }});
+            persist();
+          }});
+          state.installed = true;
+        }}
+        window.__jnmMcpConsoleCapture = state;
+        persist();
+        return true;
+      }})()
+      "#,
+      reset_flag = if reset { "true" } else { "false" }
+    )
+  }
+
+  fn camoufox_network_capture_bootstrap_script(reset: bool) -> String {
+    format!(
+      r#"
+      (() => {{
+        const reset = {reset_flag};
+        const storageKey = "__jnm_mcp_network_capture";
+        const state = window.__jnmMcpNetworkCapture || {{
+          requests: [],
+          nextId: 1,
+          installed: false,
+        }};
+        const persist = () => {{
+          try {{
+            sessionStorage.setItem(storageKey, JSON.stringify({{
+              requests: state.requests,
+              nextId: state.nextId,
+            }}));
+          }} catch (_error) {{}}
+        }};
+        if (reset) {{
+          state.requests = [];
+          state.nextId = 1;
+          try {{
+            sessionStorage.removeItem(storageKey);
+          }} catch (_error) {{}}
+        }}
+        const toHeadersObject = (headers) => {{
+          const result = {{}};
+          if (!headers) return result;
+          try {{
+            if (typeof headers.forEach === "function") {{
+              headers.forEach((value, key) => {{
+                result[String(key).toLowerCase()] = String(value);
+              }});
+              return result;
+            }}
+          }} catch (_error) {{}}
+          if (Array.isArray(headers)) {{
+            for (const [key, value] of headers) {{
+              result[String(key).toLowerCase()] = String(value);
+            }}
+          }} else if (typeof headers === "object") {{
+            for (const [key, value] of Object.entries(headers)) {{
+              result[String(key).toLowerCase()] = String(value);
+            }}
+          }}
+          return result;
+        }};
+        const bodyToString = async (body) => {{
+          if (body == null) return null;
+          if (typeof body === "string") return body;
+          if (body instanceof URLSearchParams) return body.toString();
+          if (body instanceof FormData) {{
+            return JSON.stringify(Array.from(body.entries()));
+          }}
+          if (body instanceof Blob) {{
+            return await body.text();
+          }}
+          if (body instanceof ArrayBuffer) {{
+            return btoa(String.fromCharCode(...new Uint8Array(body)));
+          }}
+          try {{
+            return JSON.stringify(body);
+          }} catch (_error) {{
+            return String(body);
+          }}
+        }};
+        if (!state.installed) {{
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = async (input, init = undefined) => {{
+            const requestId = `fetch-${{state.nextId++}}`;
+            const url = typeof input === "string" ? input : (input && input.url) ? input.url : String(input);
+            const method = (init && init.method) || (input && input.method) || "GET";
+            const requestHeaders = toHeadersObject((init && init.headers) || (input && input.headers));
+            const postData = await bodyToString(init && init.body);
+            const startedAt = Date.now();
+            const entry = {{
+              requestId,
+              url,
+              method,
+              resourceType: "fetch",
+              initiatorType: "fetch",
+              startTimestamp: startedAt / 1000,
+              endTimestamp: null,
+              durationMs: null,
+              status: null,
+              statusText: null,
+              mimeType: null,
+              requestHeaders,
+              responseHeaders: {{}},
+              postData,
+              encodedDataLength: null,
+              failed: false,
+              errorText: null,
+              blockedReason: null,
+              hasResponseBody: false,
+              responseBody: null,
+              responseBodyBase64Encoded: false,
+            }};
+            state.requests.push(entry);
+            persist();
+            try {{
+              const response = await originalFetch(input, init);
+              const clone = response.clone();
+              const responseText = await clone.text().catch(() => null);
+              const responseHeaders = toHeadersObject(response.headers);
+              entry.status = response.status;
+              entry.statusText = response.statusText;
+              entry.responseHeaders = responseHeaders;
+              entry.mimeType = responseHeaders["content-type"] ? responseHeaders["content-type"].split(";")[0].trim() : null;
+              entry.responseBody = responseText;
+              entry.responseBodyBase64Encoded = false;
+              entry.hasResponseBody = responseText !== null;
+              entry.encodedDataLength = responseText ? responseText.length : null;
+              entry.endTimestamp = Date.now() / 1000;
+              entry.durationMs = Date.now() - startedAt;
+              persist();
+              return response;
+            }} catch (error) {{
+              entry.failed = true;
+              entry.errorText = error && error.message ? error.message : String(error);
+              entry.endTimestamp = Date.now() / 1000;
+              entry.durationMs = Date.now() - startedAt;
+              persist();
+              throw error;
+            }}
+          }};
+          state.installed = true;
+        }}
+        window.__jnmMcpNetworkCapture = state;
+        persist();
+        return true;
+      }})()
+      "#,
+      reset_flag = if reset { "true" } else { "false" }
+    )
+  }
+
+  async fn ensure_camoufox_console_capture(
+    &self,
+    page: &Page,
+    reset: bool,
+  ) -> Result<(), McpError> {
+    let script = Self::camoufox_console_capture_bootstrap_script(reset);
+    page
+      .add_init_script(&script)
+      .await
+      .map_err(|error| Self::camoufox_error("console capture bootstrap", error))?;
+    page
+      .evaluate::<String, serde_json::Value>(
+        r#"source => {
+          const script = document.createElement("script");
+          script.type = "text/javascript";
+          script.textContent = source;
+          document.documentElement.appendChild(script);
+          script.remove();
+          return true;
+        }"#,
+        script,
+      )
+      .await
+      .map_err(|error| Self::camoufox_error("console capture install", error))?;
+    Ok(())
+  }
+
+  async fn ensure_camoufox_network_capture(
+    &self,
+    page: &Page,
+    reset: bool,
+  ) -> Result<(), McpError> {
+    let script = Self::camoufox_network_capture_bootstrap_script(reset);
+    page
+      .add_init_script(&script)
+      .await
+      .map_err(|error| Self::camoufox_error("network capture bootstrap", error))?;
+    page
+      .evaluate::<String, serde_json::Value>(
+        r#"source => {
+          const script = document.createElement("script");
+          script.type = "text/javascript";
+          script.textContent = source;
+          document.documentElement.appendChild(script);
+          script.remove();
+          return true;
+        }"#,
+        script,
+      )
+      .await
+      .map_err(|error| Self::camoufox_error("network capture install", error))?;
+    Ok(())
+  }
+
+  async fn wait_for_camoufox_locator_snapshot(
+    &self,
+    page: &Page,
+    locator: &McpLocator,
+    timeout_ms: u64,
+  ) -> Result<(LocatorResolutionSnapshot, bool), McpError> {
+    let expression = Self::build_locator_resolution_expression(locator)?;
+    let last_observed = Arc::new(Mutex::new(None::<serde_json::Value>));
+
+    match self
+      .wait_with_timeout(
+        timeout_ms,
+        || {
+          let last_observed = last_observed.clone();
+          let expression = expression.clone();
+          let page = page.clone();
+          async move {
+            let value = self
+              .evaluate_camoufox_page_value(&page, &expression)
+              .await?;
+            *last_observed
+              .lock()
+              .expect("camoufox locator snapshot lock poisoned") = Some(value.clone());
+
+            if let Some(error) = value.get("error").and_then(|value| value.as_str()) {
+              return Err(McpError::invalid_params(error));
+            }
+
+            let snapshot = Self::parse_locator_resolution_snapshot(value)?;
+            if snapshot.exists {
+              Ok(Some(snapshot))
+            } else {
+              Ok(None)
+            }
+          }
+        },
+        || {
+          let last_observed = last_observed
+            .lock()
+            .expect("camoufox locator snapshot lock poisoned")
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+          format!(
+            "Timed out after {timeout_ms}ms waiting for locator {:?}. Last observed state: {}",
+            locator,
+            serde_json::to_string(&last_observed).unwrap_or_else(|_| "null".to_string())
+          )
+        },
+      )
+      .await
+    {
+      Ok(snapshot) => Ok((snapshot, false)),
+      Err(error) if error.code == MCP_ERROR_TIMEOUT => {
+        let fallback = last_observed
+          .lock()
+          .expect("camoufox locator snapshot lock poisoned")
+          .clone()
+          .unwrap_or_else(|| {
+            serde_json::json!({
+              "locator": locator,
+              "strategy": locator.by.as_str(),
+              "index": locator.nth.unwrap_or(0),
+              "count": 0,
+              "exists": false,
+              "visible": false,
+              "text": "",
+              "matchedTexts": [],
+            })
+          });
+        let snapshot = Self::parse_locator_resolution_snapshot(fallback)?;
+        Ok((snapshot, true))
+      }
+      Err(error) => Err(error),
+    }
+  }
+
+  async fn wait_for_camoufox_locator_collection(
+    &self,
+    page: &Page,
+    locator: &McpLocator,
+    limit: usize,
+    timeout_ms: u64,
+  ) -> Result<(serde_json::Value, bool), McpError> {
+    let expression = Self::build_locator_collection_expression(locator, limit)?;
+    let last_observed = Arc::new(Mutex::new(None::<serde_json::Value>));
+
+    match self
+      .wait_with_timeout(
+        timeout_ms,
+        || {
+          let last_observed = last_observed.clone();
+          let expression = expression.clone();
+          let page = page.clone();
+          async move {
+            let value = self.evaluate_camoufox_page_value(&page, &expression).await?;
+            *last_observed
+              .lock()
+              .expect("camoufox locator collection lock poisoned") = Some(value.clone());
+
+            if let Some(error) = value.get("error").and_then(|value| value.as_str()) {
+              return Err(McpError::invalid_params(error));
+            }
+
+            let count = value.get("count").and_then(|value| value.as_u64()).unwrap_or(0);
+            if count > 0 { Ok(Some(value)) } else { Ok(None) }
+          }
+        },
+        || {
+          let last_observed = last_observed
+            .lock()
+            .expect("camoufox locator collection lock poisoned")
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+          format!(
+            "Timed out after {timeout_ms}ms waiting for locator {:?} to return any elements. Last observed state: {}",
+            locator,
+            serde_json::to_string(&last_observed).unwrap_or_else(|_| "null".to_string())
+          )
+        },
+      )
+      .await
+    {
+      Ok(value) => Ok((value, false)),
+      Err(error) if error.code == MCP_ERROR_TIMEOUT => {
+        let fallback = last_observed
+          .lock()
+          .expect("camoufox locator collection lock poisoned")
+          .clone()
+          .unwrap_or_else(|| {
+            serde_json::json!({
+              "locator": locator,
+              "count": 0,
+              "elements": [],
+            })
+          });
+        Ok((fallback, true))
+      }
+      Err(error) => Err(error),
+    }
+  }
+
   async fn get_cdp_port_for_profile(&self, profile: &BrowserProfile) -> Result<u16, McpError> {
     let profiles_dir = ProfileManager::instance().get_profiles_dir();
     let profile_path = profile.get_profile_data_path(&profiles_dir);
@@ -9959,8 +10865,22 @@ impl McpServer {
     profile_id: &str,
     url: &reqwest::Url,
   ) -> Result<Option<String>, McpError> {
-    let cookies = crate::cookie_manager::CookieManager::read_cookies(profile_id)
-      .map_err(|e| McpError::internal(format!("Failed to read profile cookies: {e}")))?;
+    let cookies = match crate::cookie_manager::CookieManager::read_cookies(profile_id) {
+      Ok(cookies) => cookies,
+      Err(error) if Self::can_fallback_to_empty_cookie_header(&error) => {
+        log::warn!(
+          "[mcp] Falling back to download without cookies for profile {}: {}",
+          profile_id,
+          error
+        );
+        return Ok(None);
+      }
+      Err(error) => {
+        return Err(McpError::internal(format!(
+          "Failed to read profile cookies: {error}"
+        )));
+      }
+    };
     let header = cookies
       .domains
       .into_iter()
@@ -9975,6 +10895,13 @@ impl McpServer {
     } else {
       Ok(Some(header))
     }
+  }
+
+  fn can_fallback_to_empty_cookie_header(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("database is locked")
+      || normalized.contains("database table is locked")
+      || normalized.contains("resource temporarily unavailable")
   }
 
   async fn get_download_record(&self, download_id: &str) -> Result<DownloadRecord, McpError> {
@@ -10021,6 +10948,21 @@ impl McpServer {
       })?;
 
     let profile = self.get_running_profile(profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      page
+        .goto_builder(url)
+        .goto()
+        .await
+        .map_err(|error| Self::camoufox_error("navigation", error))?;
+
+      return Ok(serde_json::json!({
+        "content": [{
+          "type": "text",
+          "text": format!("Navigated to {url}")
+        }]
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
 
@@ -10063,6 +11005,47 @@ impl McpServer {
       .unwrap_or(false);
 
     let profile = self.get_running_profile(profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let mut builder = page.screenshot_builder().timeout(30_000.0);
+
+      match format {
+        "png" => {}
+        "jpeg" | "jpg" | "webp" => {
+          return Err(McpError::invalid_params(
+            "Camoufox screenshots currently support png output only",
+          ));
+        }
+        other => {
+          return Err(McpError::invalid_params(format!(
+            "Unsupported screenshot format: {other}"
+          )));
+        }
+      }
+
+      if quality.is_some() {
+        return Err(McpError::invalid_params(
+          "Camoufox png screenshots do not support quality tuning",
+        ));
+      }
+
+      if full_page {
+        builder = builder.full_page(true);
+      }
+
+      let image = builder
+        .screenshot()
+        .await
+        .map_err(|error| Self::camoufox_error("screenshot capture", error))?;
+      let data = base64::engine::general_purpose::STANDARD.encode(image);
+      return Ok(serde_json::json!({
+        "content": [{
+          "type": "image",
+          "data": data,
+          "mimeType": "image/png"
+        }]
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
 
@@ -10119,8 +11102,35 @@ impl McpServer {
     let wait_for_load = args.wait_for_load.unwrap_or(false);
 
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "evaluate_javascript")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let result = self
+        .evaluate_camoufox_page_value(&page, &args.expression)
+        .await?;
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "awaitPromise": await_promise,
+        "waitForLoad": wait_for_load,
+        "result": {
+          "value": result,
+          "type": serde_json::Value::Null,
+        },
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
+    crate::chromium_manager::ChromiumManager::instance()
+      .refresh_runtime_fingerprint_overrides_for_target(&profile, &ws_url)
+      .await
+      .map_err(|error| {
+        McpError::internal(format!(
+          "Failed to refresh Chromium runtime fingerprint overrides: {error}"
+        ))
+      })?;
 
     let resolved_frame = if let Some(frame) = args.frame.as_ref() {
       Some(
@@ -10205,6 +11215,69 @@ impl McpServer {
       frame.validate()?;
     }
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "click_element")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_element_actionable(
+            &page,
+            args.selector.as_deref(),
+            args.locator.as_ref(),
+            "click",
+            timeout_ms,
+          )
+          .await?
+      } else {
+        serde_json::json!({
+          "enabled": false,
+          "skipped": true,
+        })
+      };
+
+      if let Some(selector) = args.selector.as_deref() {
+        page
+          .click_builder(selector)
+          .timeout(timeout_ms as f64)
+          .click()
+          .await
+          .map_err(|error| Self::camoufox_error("click", error))?;
+      } else {
+        let payload = self
+          .evaluate_camoufox_element_action(
+            &page,
+            None,
+            args.locator.as_ref(),
+            r#"
+              element.scrollIntoView({ block: "center" });
+              element.click();
+              return {
+                ok: true,
+                target,
+                text: getInnerText(element),
+              };
+            "#,
+          )
+          .await?;
+        if payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+          let message = payload
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Click failed");
+          return Err(McpError::internal(message));
+        }
+      }
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": readiness,
+        "target": Self::camoufox_target_payload(args.selector.as_deref(), args.locator.as_ref()),
+        "clicked": true,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
     let (frame_selector, resolved_frame, context_id) = self
@@ -10293,6 +11366,96 @@ impl McpServer {
       frame.validate()?;
     }
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "type_text")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_element_actionable(
+            &page,
+            args.selector.as_deref(),
+            args.locator.as_ref(),
+            "type",
+            timeout_ms,
+          )
+          .await?
+      } else {
+        serde_json::json!({
+          "enabled": false,
+          "skipped": true,
+        })
+      };
+
+      let focus_payload = self
+        .evaluate_camoufox_element_action(
+          &page,
+          args.selector.as_deref(),
+          args.locator.as_ref(),
+          if clear_first {
+            r#"
+              element.scrollIntoView({ block: "center" });
+              element.focus();
+              if ("value" in element) {
+                element.value = "";
+              }
+              element.dispatchEvent(new Event("input", { bubbles: true }));
+              return {
+                ok: true,
+                target,
+                text: getInnerText(element),
+                cleared: true,
+              };
+            "#
+          } else {
+            r#"
+              element.scrollIntoView({ block: "center" });
+              element.focus();
+              return {
+                ok: true,
+                target,
+                text: getInnerText(element),
+                cleared: false,
+              };
+            "#
+          },
+        )
+        .await?;
+
+      if focus_payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        let message = focus_payload
+          .get("error")
+          .and_then(|value| value.as_str())
+          .unwrap_or("Focus failed");
+        return Err(McpError::internal(message));
+      }
+
+      if instant {
+        page
+          .keyboard
+          .input_text(&args.text)
+          .await
+          .map_err(|error| Self::camoufox_error("text insertion", error))?;
+      } else {
+        page
+          .keyboard
+          .r#type(&args.text, Self::camoufox_typing_delay_ms(args.wpm))
+          .await
+          .map_err(|error| Self::camoufox_error("typing", error))?;
+      }
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": readiness,
+        "target": focus_payload.get("target").cloned().unwrap_or_else(|| Self::camoufox_target_payload(args.selector.as_deref(), args.locator.as_ref())),
+        "textLength": args.text.chars().count(),
+        "clearFirst": clear_first,
+        "instant": instant,
+        "typed": true,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
     let (frame_selector, resolved_frame, context_id) = self
@@ -10331,6 +11494,7 @@ impl McpServer {
             ok: true,
             target,
             text: getInnerText(element),
+            value: "value" in element ? String(element.value ?? "") : String(getInnerText(element)),
             cleared: true,
           };
         "#,
@@ -10346,6 +11510,7 @@ impl McpServer {
             ok: true,
             target,
             text: getInnerText(element),
+            value: "value" in element ? String(element.value ?? "") : String(getInnerText(element)),
             cleared: false,
           };
         "#,
@@ -10378,6 +11543,13 @@ impl McpServer {
       return Err(McpError::internal(message));
     }
 
+    let initial_value = focus_payload
+      .get("value")
+      .and_then(|value| value.as_str())
+      .or_else(|| focus_payload.get("text").and_then(|value| value.as_str()))
+      .unwrap_or_default()
+      .to_string();
+
     if instant {
       self
         .send_cdp(
@@ -10392,6 +11564,73 @@ impl McpServer {
         .await?;
     }
 
+    let expected_value = if clear_first {
+      args.text.clone()
+    } else {
+      format!("{initial_value}{}", args.text)
+    };
+    let expected_value_literal = serde_json::to_string(&expected_value).map_err(|error| {
+      McpError::internal(format!("Failed to serialize expected typed value: {error}"))
+    })?;
+    let verification_expression = Self::build_element_target_expression(
+      args.selector.as_deref(),
+      args.locator.as_ref(),
+      &format!(
+        r#"
+          const expectedValue = {expected_value_literal};
+          const readValue = () => {{
+            if ("value" in element) {{
+              return String(element.value ?? "");
+            }}
+            if (element.isContentEditable) {{
+              return String(element.innerText || element.textContent || "");
+            }}
+            return String(getInnerText(element));
+          }};
+
+          let currentValue = readValue();
+          let fallbackApplied = false;
+          if (currentValue !== expectedValue) {{
+            if ("value" in element) {{
+              element.value = expectedValue;
+            }} else if (element.isContentEditable) {{
+              element.textContent = expectedValue;
+            }} else {{
+              return {{
+                ok: false,
+                target,
+                error: "Element does not expose a writable text value",
+                value: currentValue,
+                expected: expectedValue,
+              }};
+            }}
+            element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+            element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+            currentValue = readValue();
+            fallbackApplied = true;
+          }}
+
+          return {{
+            ok: currentValue === expectedValue,
+            target,
+            value: currentValue,
+            expected: expectedValue,
+            fallbackApplied,
+          }};
+      "#
+      ),
+    )?;
+    let verification = self
+      .evaluate_runtime_value(&ws_url, &verification_expression, context_id)
+      .await?;
+    if verification.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+      let message = verification
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Typed text did not persist on the target element");
+      return Err(McpError::internal(message));
+    }
+
     Self::json_tool_result(&serde_json::json!({
       "profileId": args.profile_id,
       "frame": frame_selector,
@@ -10399,6 +11638,8 @@ impl McpServer {
       "timeoutMs": timeout_ms,
       "autoWait": readiness,
       "target": focus_payload.get("target").cloned().unwrap_or(serde_json::Value::Null),
+      "value": verification.get("value").cloned().unwrap_or(serde_json::Value::Null),
+      "fallbackApplied": verification.get("fallbackApplied").cloned().unwrap_or(serde_json::json!(false)),
       "textLength": args.text.chars().count(),
       "clearFirst": clear_first,
       "instant": instant,
@@ -10411,6 +11652,9 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: ElementInteractionArgs = Self::parse_arguments(arguments)?;
+    if let Some(frame) = args.frame.as_ref() {
+      frame.validate()?;
+    }
     Self::validate_element_target(
       args.selector.as_deref(),
       args.locator.as_ref(),
@@ -10418,6 +11662,73 @@ impl McpServer {
     )?;
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "hover_element")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_element_actionable(
+            &page,
+            args.selector.as_deref(),
+            args.locator.as_ref(),
+            "click",
+            timeout_ms,
+          )
+          .await?
+      } else {
+        serde_json::json!({
+          "enabled": false,
+          "skipped": true,
+        })
+      };
+
+      if let Some(selector) = args.selector.as_deref() {
+        page
+          .hover_builder(selector)
+          .timeout(timeout_ms as f64)
+          .goto()
+          .await
+          .map_err(|error| Self::camoufox_error("hover", error))?;
+      } else {
+        let payload = self
+          .evaluate_camoufox_element_action(
+            &page,
+            None,
+            args.locator.as_ref(),
+            r#"
+              element.scrollIntoView({ block: "center", inline: "center" });
+              ["mouseover", "mouseenter", "mousemove"].forEach((eventName) => {
+                element.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, view: window }));
+              });
+              return {
+                ok: true,
+                target,
+                hovered: true,
+                text: getInnerText(element),
+              };
+            "#,
+          )
+          .await?;
+        if payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+          let message = payload
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Hover failed");
+          return Err(McpError::internal(message));
+        }
+      }
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": readiness,
+        "target": Self::camoufox_target_payload(args.selector.as_deref(), args.locator.as_ref()),
+        "hovered": true,
+      }));
+    }
     let js = Self::build_element_target_expression(
       args.selector.as_deref(),
       args.locator.as_ref(),
@@ -10476,6 +11787,9 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: ElementInteractionArgs = Self::parse_arguments(arguments)?;
+    if let Some(frame) = args.frame.as_ref() {
+      frame.validate()?;
+    }
     Self::validate_element_target(
       args.selector.as_deref(),
       args.locator.as_ref(),
@@ -10483,6 +11797,80 @@ impl McpServer {
     )?;
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "focus_element")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_element_actionable(
+            &page,
+            args.selector.as_deref(),
+            args.locator.as_ref(),
+            "type",
+            timeout_ms,
+          )
+          .await?
+      } else {
+        serde_json::json!({
+          "enabled": false,
+          "skipped": true,
+        })
+      };
+
+      let payload = if let Some(selector) = args.selector.as_deref() {
+        page
+          .focus(selector, Some(timeout_ms as f64))
+          .await
+          .map_err(|error| Self::camoufox_error("focus", error))?;
+        serde_json::json!({
+          "ok": true,
+          "target": {
+            "type": "selector",
+            "selector": selector,
+          },
+          "focused": true,
+        })
+      } else {
+        self
+          .evaluate_camoufox_element_action(
+            &page,
+            None,
+            args.locator.as_ref(),
+            r#"
+              element.scrollIntoView({ block: "center", inline: "center" });
+              if (typeof element.focus === "function") {
+                element.focus();
+              }
+              return {
+                ok: document.activeElement === element,
+                target,
+                focused: document.activeElement === element,
+                error: document.activeElement === element ? null : "focus_failed",
+              };
+            "#,
+          )
+          .await?
+      };
+
+      if payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        let message = payload
+          .get("error")
+          .and_then(|value| value.as_str())
+          .unwrap_or("Focus failed");
+        return Err(McpError::internal(message));
+      }
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": readiness,
+        "target": payload.get("target").cloned().unwrap_or_else(|| Self::camoufox_target_payload(args.selector.as_deref(), args.locator.as_ref())),
+        "focused": true,
+      }));
+    }
     let js = Self::build_element_target_expression(
       args.selector.as_deref(),
       args.locator.as_ref(),
@@ -10551,6 +11939,29 @@ impl McpServer {
       )));
     }
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "scroll_to")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let x = args.x.unwrap_or(0.0);
+      let y = args.y.unwrap_or(0.0);
+      let expression = format!(
+        "(() => {{ window.scrollTo({{ left: {}, top: {}, behavior: {} }}); return {{ x: window.scrollX, y: window.scrollY }}; }})()",
+        serde_json::to_string(&x).map_err(|e| McpError::internal(format!("Failed to serialize x: {e}")))?,
+        serde_json::to_string(&y).map_err(|e| McpError::internal(format!("Failed to serialize y: {e}")))?,
+        serde_json::to_string(behavior).map_err(|e| McpError::internal(format!("Failed to serialize behavior: {e}")))?,
+      );
+      let position = self
+        .evaluate_camoufox_page_value(&page, &expression)
+        .await?;
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "behavior": behavior,
+        "position": position,
+        "scrolled": true,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
     let (frame_selector, resolved_frame, context_id) = self
@@ -10582,6 +11993,9 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: ElementInteractionArgs = Self::parse_arguments(arguments)?;
+    if let Some(frame) = args.frame.as_ref() {
+      frame.validate()?;
+    }
     Self::validate_element_target(
       args.selector.as_deref(),
       args.locator.as_ref(),
@@ -10589,6 +12003,60 @@ impl McpServer {
     )?;
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "scroll_element_into_view")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_element_actionable(
+            &page,
+            args.selector.as_deref(),
+            args.locator.as_ref(),
+            "click",
+            timeout_ms,
+          )
+          .await?
+      } else {
+        serde_json::json!({
+          "enabled": false,
+          "skipped": true,
+        })
+      };
+      let payload = self
+        .evaluate_camoufox_element_action(
+          &page,
+          args.selector.as_deref(),
+          args.locator.as_ref(),
+          r#"
+            element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+            return {
+              ok: true,
+              target,
+              scrolled: true,
+              rect: element.getBoundingClientRect(),
+            };
+          "#,
+        )
+        .await?;
+      if payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        let message = payload
+          .get("error")
+          .and_then(|value| value.as_str())
+          .unwrap_or("Scroll into view failed");
+        return Err(McpError::internal(message));
+      }
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": readiness,
+        "target": payload.get("target").cloned().unwrap_or_else(|| Self::camoufox_target_payload(args.selector.as_deref(), args.locator.as_ref())),
+        "rect": payload.get("rect").cloned().unwrap_or(serde_json::Value::Null),
+        "scrolled": true,
+      }));
+    }
     let js = Self::build_element_target_expression(
       args.selector.as_deref(),
       args.locator.as_ref(),
@@ -10649,6 +12117,29 @@ impl McpServer {
       frame.validate()?;
     }
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "press_key")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      page
+        .keyboard
+        .down(&args.key)
+        .await
+        .map_err(|error| Self::camoufox_error("key down", error))?;
+      page
+        .keyboard
+        .up(&args.key)
+        .await
+        .map_err(|error| Self::camoufox_error("key up", error))?;
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "key": args.key,
+        "code": args.code,
+        "text": args.text,
+        "pressed": true,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
     let (frame_selector, resolved_frame, context_id) = self
@@ -10698,6 +12189,31 @@ impl McpServer {
       frame.validate()?;
     }
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "press_hotkey")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      for key in &args.keys {
+        page
+          .keyboard
+          .down(key)
+          .await
+          .map_err(|error| Self::camoufox_error("hotkey keyDown", error))?;
+      }
+      for key in args.keys.iter().rev() {
+        page
+          .keyboard
+          .up(key)
+          .await
+          .map_err(|error| Self::camoufox_error("hotkey keyUp", error))?;
+      }
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "keys": args.keys,
+        "pressed": true,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
     let (frame_selector, resolved_frame, context_id) = self
@@ -10739,6 +12255,126 @@ impl McpServer {
     Self::validate_select_option_args(&args)?;
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "select_option")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_element_actionable(
+            &page,
+            args.selector.as_deref(),
+            args.locator.as_ref(),
+            "click",
+            timeout_ms,
+          )
+          .await?
+      } else {
+        serde_json::json!({
+          "enabled": false,
+          "skipped": true,
+        })
+      };
+
+      let payload = if let Some(selector) = args.selector.as_deref() {
+        let mut builder = page
+          .select_option_builder(selector)
+          .timeout(timeout_ms as f64);
+        if let Some(value) = &args.value {
+          builder = builder.add_value(value.clone());
+        } else if let Some(label) = &args.label {
+          builder = builder.add_label(label.clone());
+        } else if let Some(index) = args.index {
+          builder = builder.add_index(index);
+        }
+        builder
+          .select_option()
+          .await
+          .map_err(|error| Self::camoufox_error("select option", error))?;
+
+        let value = page
+          .evaluate_on_selector::<serde_json::Value, serde_json::Value>(
+            selector,
+            "element => ({ selectedIndex: element.selectedIndex, value: element.value, label: element.options[element.selectedIndex]?.label ?? element.options[element.selectedIndex]?.text ?? null })",
+            None::<serde_json::Value>,
+          )
+          .await
+          .map_err(|error| Self::camoufox_error("selected option readback", error))?;
+        serde_json::json!({
+          "ok": true,
+          "target": {
+            "type": "selector",
+            "selector": selector,
+          },
+          "selectedIndex": value.get("selectedIndex").cloned().unwrap_or(serde_json::Value::Null),
+          "value": value.get("value").cloned().unwrap_or(serde_json::Value::Null),
+          "label": value.get("label").cloned().unwrap_or(serde_json::Value::Null),
+        })
+      } else {
+        self
+          .evaluate_camoufox_element_action(
+            &page,
+            None,
+            args.locator.as_ref(),
+            &format!(
+              r#"
+                if (!(element instanceof HTMLSelectElement)) {{
+                  return {{ ok: false, error: "Target is not a <select> element", target }};
+                }}
+                const wantedValue = {};
+                const wantedLabel = {};
+                const wantedIndex = {};
+                let matchedIndex = -1;
+                if (typeof wantedValue === "string") {{
+                  matchedIndex = Array.from(element.options).findIndex((option) => option.value === wantedValue);
+                }} else if (typeof wantedLabel === "string") {{
+                  matchedIndex = Array.from(element.options).findIndex((option) => option.label === wantedLabel || option.text === wantedLabel);
+                }} else if (Number.isInteger(wantedIndex)) {{
+                  matchedIndex = wantedIndex;
+                }}
+                if (matchedIndex < 0 || matchedIndex >= element.options.length) {{
+                  return {{ ok: false, error: "Requested option was not found", target }};
+                }}
+                element.selectedIndex = matchedIndex;
+                element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                return {{
+                  ok: true,
+                  target,
+                  selectedIndex: element.selectedIndex,
+                  value: element.value,
+                  label: element.options[element.selectedIndex]?.label ?? element.options[element.selectedIndex]?.text ?? null,
+                }};
+              "#,
+              serde_json::to_string(&args.value).map_err(|e| McpError::internal(format!("Failed to serialize select value: {e}")))?,
+              serde_json::to_string(&args.label).map_err(|e| McpError::internal(format!("Failed to serialize select label: {e}")))?,
+              serde_json::to_string(&args.index).map_err(|e| McpError::internal(format!("Failed to serialize select index: {e}")))?,
+            ),
+          )
+          .await?
+      };
+
+      if payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        let message = payload
+          .get("error")
+          .and_then(|value| value.as_str())
+          .unwrap_or("Select option failed");
+        return Err(McpError::internal(message));
+      }
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": readiness,
+        "target": payload.get("target").cloned().unwrap_or_else(|| Self::camoufox_target_payload(args.selector.as_deref(), args.locator.as_ref())),
+        "selectedIndex": payload.get("selectedIndex").cloned().unwrap_or(serde_json::Value::Null),
+        "value": payload.get("value").cloned().unwrap_or(serde_json::Value::Null),
+        "label": payload.get("label").cloned().unwrap_or(serde_json::Value::Null),
+        "selected": true,
+      }));
+    }
     let value_literal = serde_json::to_string(&args.value)
       .map_err(|e| McpError::internal(format!("Failed to serialize select value: {e}")))?;
     let label_literal = serde_json::to_string(&args.label)
@@ -10844,9 +12480,118 @@ impl McpServer {
     } else {
       "uncheck_checkbox"
     };
+    if let Some(frame) = args.frame.as_ref() {
+      frame.validate()?;
+    }
     Self::validate_element_target(args.selector.as_deref(), args.locator.as_ref(), tool_name)?;
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), tool_name)?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_element_actionable(
+            &page,
+            args.selector.as_deref(),
+            args.locator.as_ref(),
+            "click",
+            timeout_ms,
+          )
+          .await?
+      } else {
+        serde_json::json!({
+          "enabled": false,
+          "skipped": true,
+        })
+      };
+
+      let payload = if let Some(selector) = args.selector.as_deref() {
+        if desired_checked {
+          page
+            .check_builder(selector)
+            .timeout(timeout_ms as f64)
+            .check()
+            .await
+            .map_err(|error| Self::camoufox_error("checkbox check", error))?;
+        } else {
+          page
+            .uncheck_builder(selector)
+            .timeout(timeout_ms as f64)
+            .uncheck()
+            .await
+            .map_err(|error| Self::camoufox_error("checkbox uncheck", error))?;
+        }
+        let checked = page
+          .evaluate_on_selector::<serde_json::Value, bool>(
+            selector,
+            "element => !!element.checked",
+            None::<serde_json::Value>,
+          )
+          .await
+          .map_err(|error| Self::camoufox_error("checkbox state readback", error))?;
+        serde_json::json!({
+          "ok": true,
+          "target": {
+            "type": "selector",
+            "selector": selector,
+          },
+          "changed": true,
+          "checked": checked,
+        })
+      } else {
+        self
+          .evaluate_camoufox_element_action(
+            &page,
+            None,
+            args.locator.as_ref(),
+            &format!(
+              r#"
+                const desiredChecked = {};
+                const isCheckboxInput = element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio");
+                if (!isCheckboxInput) {{
+                  return {{ ok: false, error: "Target is not a checkbox or radio input", target }};
+                }}
+                if (element.type === "radio" && desiredChecked === false) {{
+                  return {{ ok: false, error: "Cannot uncheck a radio input directly", target }};
+                }}
+                const before = !!element.checked;
+                if (before !== desiredChecked) {{
+                  element.click();
+                }}
+                return {{
+                  ok: true,
+                  target,
+                  changed: before !== !!element.checked,
+                  checked: !!element.checked,
+                }};
+              "#,
+              if desired_checked { "true" } else { "false" }
+            ),
+          )
+          .await?
+      };
+
+      if payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        let message = payload
+          .get("error")
+          .and_then(|value| value.as_str())
+          .unwrap_or("Checkbox toggle failed");
+        return Err(McpError::internal(message));
+      }
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": readiness,
+        "target": payload.get("target").cloned().unwrap_or_else(|| Self::camoufox_target_payload(args.selector.as_deref(), args.locator.as_ref())),
+        "changed": payload.get("changed").cloned().unwrap_or(serde_json::Value::Bool(true)),
+        "checked": payload.get("checked").cloned().unwrap_or(serde_json::Value::Bool(desired_checked)),
+      }));
+    }
     let desired_literal = if desired_checked { "true" } else { "false" };
     let js = Self::build_element_target_expression(
       args.selector.as_deref(),
@@ -10920,16 +12665,65 @@ impl McpServer {
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "element_exists")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let (snapshot, timed_out) = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_locator_snapshot(&page, &args.locator, timeout_ms)
+          .await?
+      } else {
+        (
+          Self::parse_locator_resolution_snapshot(
+            self
+              .evaluate_camoufox_page_value(
+                &page,
+                &Self::build_locator_resolution_expression(&args.locator)?,
+              )
+              .await?,
+          )?,
+          false,
+        )
+      };
+      let locator = args.locator.clone();
+      let first_match_text = snapshot.text.clone();
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": args.frame,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": {
+          "enabled": auto_wait_enabled,
+          "satisfied": !timed_out && snapshot.exists,
+          "timedOut": auto_wait_enabled && timed_out,
+          "state": {
+            "locator": locator,
+            "exists": snapshot.exists,
+            "visible": snapshot.visible,
+            "count": snapshot.count,
+            "firstMatchText": first_match_text,
+          }
+        },
+        "locator": args.locator,
+        "exists": snapshot.exists,
+        "visible": snapshot.visible,
+        "count": snapshot.count,
+        "firstMatchText": snapshot.text,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
+    let (frame_selector, resolved_frame, context_id) = self
+      .resolve_frame_context(&args.profile_id, &ws_url, args.frame.as_ref())
+      .await?;
     let (snapshot, timed_out) = if auto_wait_enabled {
       self
-        .wait_for_locator_snapshot(&ws_url, &args.locator, None, timeout_ms)
+        .wait_for_locator_snapshot(&ws_url, &args.locator, context_id, timeout_ms)
         .await?
     } else {
       (
         self
-          .evaluate_locator_snapshot(&args.profile_id, &args.locator)
+          .evaluate_locator_snapshot_in_context(&ws_url, &args.locator, context_id)
           .await?,
         false,
       )
@@ -10938,6 +12732,8 @@ impl McpServer {
     let first_match_text = snapshot.text.clone();
     Self::json_tool_result(&serde_json::json!({
       "profileId": args.profile_id,
+      "frame": frame_selector,
+      "resolvedFrame": resolved_frame,
       "timeoutMs": timeout_ms,
       "autoWait": {
         "enabled": auto_wait_enabled,
@@ -10968,16 +12764,85 @@ impl McpServer {
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "get_element_text")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let (snapshot, timed_out) = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_locator_snapshot(&page, &args.locator, timeout_ms)
+          .await?
+      } else {
+        (
+          Self::parse_locator_resolution_snapshot(
+            self
+              .evaluate_camoufox_page_value(
+                &page,
+                &Self::build_locator_resolution_expression(&args.locator)?,
+              )
+              .await?,
+          )?,
+          false,
+        )
+      };
+      let locator = args.locator.clone();
+      let first_match_text = snapshot.text.clone();
+      if !snapshot.exists {
+        if timed_out {
+          return Err(McpError::timeout(format!(
+            "Timed out after {timeout_ms}ms waiting for text target {:?}. Last observed state: {}",
+            args.locator,
+            serde_json::to_string(&serde_json::json!({
+              "locator": locator,
+              "exists": snapshot.exists,
+              "visible": snapshot.visible,
+              "count": snapshot.count,
+              "firstMatchText": first_match_text,
+            }))
+            .unwrap_or_else(|_| "null".to_string())
+          )));
+        }
+        return Err(McpError::not_found(format!(
+          "No element found for locator {:?}",
+          args.locator
+        )));
+      }
+      Self::ensure_single_target_locator(&args.locator, &snapshot, "get_element_text")?;
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": args.frame,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": {
+          "enabled": auto_wait_enabled,
+          "satisfied": true,
+          "timedOut": false,
+          "state": {
+            "locator": locator,
+            "exists": snapshot.exists,
+            "visible": snapshot.visible,
+            "count": snapshot.count,
+            "firstMatchText": first_match_text,
+          }
+        },
+        "locator": args.locator,
+        "text": snapshot.text,
+        "visible": snapshot.visible,
+        "count": snapshot.count,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
+    let (frame_selector, resolved_frame, context_id) = self
+      .resolve_frame_context(&args.profile_id, &ws_url, args.frame.as_ref())
+      .await?;
     let (snapshot, timed_out) = if auto_wait_enabled {
       self
-        .wait_for_locator_snapshot(&ws_url, &args.locator, None, timeout_ms)
+        .wait_for_locator_snapshot(&ws_url, &args.locator, context_id, timeout_ms)
         .await?
     } else {
       (
         self
-          .evaluate_locator_snapshot(&args.profile_id, &args.locator)
+          .evaluate_locator_snapshot_in_context(&ws_url, &args.locator, context_id)
           .await?,
         false,
       )
@@ -11008,6 +12873,8 @@ impl McpServer {
 
     Self::json_tool_result(&serde_json::json!({
       "profileId": args.profile_id,
+      "frame": frame_selector,
+      "resolvedFrame": resolved_frame,
       "timeoutMs": timeout_ms,
       "autoWait": {
         "enabled": auto_wait_enabled,
@@ -11299,16 +13166,74 @@ impl McpServer {
     let auto_wait_enabled = args.options.auto_wait.unwrap_or(true);
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "query_elements")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let (value, timed_out) = if auto_wait_enabled {
+        self
+          .wait_for_camoufox_locator_collection(&page, &args.locator, limit, timeout_ms)
+          .await?
+      } else {
+        (
+          self
+            .evaluate_camoufox_page_value(
+              &page,
+              &Self::build_locator_collection_expression(&args.locator, limit)?,
+            )
+            .await?,
+          false,
+        )
+      };
+      let count = value.get("count").cloned().unwrap_or(serde_json::json!(0));
+      let elements = value
+        .get("elements")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+      let returned = elements
+        .as_array()
+        .map(|elements| elements.len())
+        .unwrap_or(0);
+      let locator = args.locator.clone();
+      let count_for_wait = count.clone();
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": args.frame,
+        "resolvedFrame": serde_json::Value::Null,
+        "timeoutMs": timeout_ms,
+        "autoWait": {
+          "enabled": auto_wait_enabled,
+          "satisfied": !timed_out && count.as_u64().unwrap_or(0) > 0,
+          "timedOut": auto_wait_enabled && timed_out,
+          "state": {
+            "locator": locator,
+            "count": count_for_wait,
+            "returned": returned,
+          }
+        },
+        "locator": args.locator,
+        "count": count,
+        "returned": returned,
+        "limit": limit,
+        "elements": elements,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
+    let (frame_selector, resolved_frame, context_id) = self
+      .resolve_frame_context(&args.profile_id, &ws_url, args.frame.as_ref())
+      .await?;
     let (value, timed_out) = if auto_wait_enabled {
       self
-        .wait_for_locator_collection(&ws_url, &args.locator, limit, None, timeout_ms)
+        .wait_for_locator_collection(&ws_url, &args.locator, limit, context_id, timeout_ms)
         .await?
     } else {
       (
         self
-          .evaluate_locator_collection(&args.profile_id, &args.locator, limit)
+          .evaluate_runtime_value(
+            &ws_url,
+            &Self::build_locator_collection_expression(&args.locator, limit)?,
+            context_id,
+          )
           .await?,
         false,
       )
@@ -11327,6 +13252,8 @@ impl McpServer {
 
     Self::json_tool_result(&serde_json::json!({
       "profileId": args.profile_id,
+      "frame": frame_selector,
+      "resolvedFrame": resolved_frame,
       "timeoutMs": timeout_ms,
       "autoWait": {
         "enabled": auto_wait_enabled,
@@ -11382,6 +13309,49 @@ impl McpServer {
     let selector = args.selector.as_deref();
 
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), "get_page_content")?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let content = if let Some(selector) = selector {
+        let selector_literal = serde_json::to_string(selector)
+          .map_err(|error| McpError::internal(format!("Failed to serialize selector: {error}")))?;
+        let expression = if format == "html" {
+          format!(
+            r#"(() => {{
+              const element = document.querySelector({selector_literal});
+              return element ? element.outerHTML : null;
+            }})()"#
+          )
+        } else {
+          format!(
+            r#"(() => {{
+              const element = document.querySelector({selector_literal});
+              return element ? String(element.innerText || element.textContent || "") : null;
+            }})()"#
+          )
+        };
+        self
+          .evaluate_camoufox_page_value(&page, &expression)
+          .await?
+      } else if format == "html" {
+        self
+          .evaluate_camoufox_page_value(&page, "document.documentElement.outerHTML")
+          .await?
+      } else {
+        self
+          .evaluate_camoufox_page_value(&page, "document.body ? document.body.innerText : ''")
+          .await?
+      };
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": args.frame,
+        "resolvedFrame": serde_json::Value::Null,
+        "format": format,
+        "selector": args.selector,
+        "content": content,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
     let (frame_selector, resolved_frame, context_id) = self
@@ -11440,6 +13410,23 @@ impl McpServer {
       })?;
 
     let profile = self.get_running_profile(profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let info = serde_json::json!({
+        "url": page.url().map_err(|error| Self::camoufox_error("page URL lookup", error))?,
+        "title": page.title().await.map_err(|error| Self::camoufox_error("page title lookup", error))?,
+        "readyState": self
+          .evaluate_camoufox_page_value(&page, "document.readyState")
+          .await?,
+      });
+
+      return Ok(serde_json::json!({
+        "content": [{
+          "type": "text",
+          "text": serde_json::to_string_pretty(&info).unwrap_or_default()
+        }]
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
 
@@ -11476,6 +13463,18 @@ impl McpServer {
   ) -> Result<serde_json::Value, McpError> {
     let args: TabTreeArgs = Self::parse_arguments(arguments)?;
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let (pages, active_index) = self.get_camoufox_pages(&profile).await?;
+      let tabs = self.build_camoufox_tab_nodes(pages, active_index).await?;
+      let active_tab_id = tabs.iter().find(|tab| tab.active).map(|tab| tab.id.clone());
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "total": tabs.len(),
+        "activeTabId": active_tab_id,
+        "tabs": tabs,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let page_targets = self.get_cdp_page_targets(cdp_port).await?;
     let active_tab_id = self.resolve_active_tab_id(cdp_port, &page_targets).await;
@@ -11495,6 +13494,19 @@ impl McpServer {
   ) -> Result<serde_json::Value, McpError> {
     let args: TabTreeArgs = Self::parse_arguments(arguments)?;
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let (pages, active_index) = self.get_camoufox_pages(&profile).await?;
+      let tabs = self.build_camoufox_tab_nodes(pages, active_index).await?;
+      let active_tab = tabs
+        .into_iter()
+        .find(|tab| tab.active)
+        .ok_or_else(|| McpError::not_found("No tab is currently available"))?;
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "tab": active_tab,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let page_targets = self.get_cdp_page_targets(cdp_port).await?;
     let active_tab_id = self
@@ -11521,6 +13533,31 @@ impl McpServer {
     args.tab.validate()?;
 
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let selector_value_owned = match &args.tab.value {
+        Some(McpTabValue::Text(value)) => Some(value.clone()),
+        Some(McpTabValue::Index(index)) => Some(index.to_string()),
+        None => None,
+      };
+      let (pages, active_index) = crate::camoufox_manager::CamoufoxManager::instance()
+        .set_selected_tab(
+          &mcp_profile_path(&profile),
+          args.tab.by.as_str(),
+          selector_value_owned.as_deref(),
+        )
+        .await
+        .map_err(|error| Self::camoufox_error("tab switching", error))?;
+      let tabs = self.build_camoufox_tab_nodes(pages, active_index).await?;
+      let selected_tab = tabs
+        .into_iter()
+        .find(|tab| tab.active)
+        .ok_or_else(|| McpError::internal("Active Camoufox tab disappeared during switch"))?;
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "tab": selected_tab,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let page_targets = self.get_cdp_page_targets(cdp_port).await?;
     let active_tab_id = self.resolve_active_tab_id(cdp_port, &page_targets).await;
@@ -11548,6 +13585,25 @@ impl McpServer {
     }
 
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let requested_url = args.url.unwrap_or_else(|| "about:blank".to_string());
+      let (pages, active_index) = crate::camoufox_manager::CamoufoxManager::instance()
+        .new_tab(&mcp_profile_path(&profile), Some(requested_url.as_str()))
+        .await
+        .map_err(|error| Self::camoufox_error("new tab creation", error))?;
+      let tabs = self.build_camoufox_tab_nodes(pages, active_index).await?;
+      let tab = tabs
+        .iter()
+        .find(|tab| tab.active)
+        .cloned()
+        .ok_or_else(|| McpError::internal("New Camoufox tab disappeared after creation"))?;
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "requestedUrl": requested_url,
+        "tab": tab,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let requested_url = args.url.unwrap_or_else(|| "about:blank".to_string());
     let created_tab = self.create_tab_target(cdp_port, &requested_url).await?;
@@ -11590,6 +13646,53 @@ impl McpServer {
     }
 
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let (pages_before, active_before) = self.get_camoufox_pages(&profile).await?;
+      let tabs_before = self
+        .build_camoufox_tab_nodes(pages_before, active_before)
+        .await?;
+      let tab_to_close = if let Some(tab) = args.tab.as_ref() {
+        Self::resolve_tab_selector(&tabs_before, tab)?
+      } else {
+        tabs_before
+          .iter()
+          .find(|tab| tab.active)
+          .cloned()
+          .ok_or_else(|| McpError::not_found("No active tab is currently available"))?
+      };
+      let selector_by = args.tab.as_ref().map(|tab| tab.by.as_str());
+      let selector_value_owned = args.tab.as_ref().and_then(|tab| match &tab.value {
+        Some(McpTabValue::Text(value)) => Some(value.clone()),
+        Some(McpTabValue::Index(index)) => Some(index.to_string()),
+        None => None,
+      });
+      let (remaining_pages, next_active_index) =
+        crate::camoufox_manager::CamoufoxManager::instance()
+          .close_tab(
+            &mcp_profile_path(&profile),
+            selector_by,
+            selector_value_owned.as_deref(),
+          )
+          .await
+          .map_err(|error| Self::camoufox_error("tab close", error))?;
+      let active_index = next_active_index.unwrap_or(0);
+      let tabs = if remaining_pages.is_empty() {
+        Vec::new()
+      } else {
+        self
+          .build_camoufox_tab_nodes(remaining_pages, active_index)
+          .await?
+      };
+      let active_tab_id = tabs.iter().find(|tab| tab.active).map(|tab| tab.id.clone());
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "closedTab": tab_to_close,
+        "remaining": tabs.len(),
+        "activeTabId": active_tab_id,
+        "tabs": tabs,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let page_targets = self.get_cdp_page_targets(cdp_port).await?;
     let active_tab_id = self.resolve_active_tab_id(cdp_port, &page_targets).await;
@@ -11630,6 +13733,106 @@ impl McpServer {
     let timeout_ms = args.options.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
 
     let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      Self::camoufox_not_supported_for_frames(args.frame.as_ref(), action_name)?;
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let readiness_expression = Self::build_file_input_readiness_expression(
+        args.selector.as_deref(),
+        args.locator.as_ref(),
+      )?;
+      let readiness = if auto_wait_enabled {
+        self
+          .wait_with_timeout(
+            timeout_ms,
+            || {
+              let page = page.clone();
+              let readiness_expression = readiness_expression.clone();
+              async move {
+                let value = self
+                  .evaluate_camoufox_page_value(&page, &readiness_expression)
+                  .await?;
+                if value.get("ok").and_then(|value| value.as_bool()) == Some(true) {
+                  Ok(Some(value))
+                } else {
+                  Ok(None)
+                }
+              }
+            },
+            || format!("Timed out after {timeout_ms}ms waiting for file input to become ready"),
+          )
+          .await?
+      } else {
+        self
+          .evaluate_camoufox_page_value(&page, &readiness_expression)
+          .await?
+      };
+
+      if readiness.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        return Err(McpError::invalid_params(
+          readiness
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("File input is not ready"),
+        ));
+      }
+
+      let files_payload = Self::build_dom_file_payloads(&resolved_paths)?;
+      let files_payload_literal = serde_json::to_string(&files_payload).map_err(|error| {
+        McpError::internal(format!("Failed to serialize upload files: {error}"))
+      })?;
+      let assign_expression = Self::build_element_target_expression(
+        args.selector.as_deref(),
+        args.locator.as_ref(),
+        &format!(
+          r#"
+          const files = {files_payload_literal};
+          const dataTransfer = new DataTransfer();
+          for (const file of files) {{
+            const binary = atob(file.base64);
+            const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+            dataTransfer.items.add(new File([bytes], file.name, {{
+              type: file.mime,
+              lastModified: file.lastModified,
+            }}));
+          }}
+          element.files = dataTransfer.files;
+          element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+          element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+          return {{
+            ok: true,
+            target,
+            count: element.files ? element.files.length : 0,
+            multiple: !!element.multiple,
+            files: Array.from(element.files || []).map((file) => ({{
+              name: file.name,
+              size: file.size,
+              type: file.type,
+            }})),
+          }};
+      "#
+        ),
+      )?;
+      let snapshot = self
+        .evaluate_camoufox_page_value(&page, &assign_expression)
+        .await?;
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "frame": serde_json::Value::Null,
+        "resolvedFrame": serde_json::Value::Null,
+        "selector": args.selector,
+        "locator": args.locator,
+        "files": resolved_paths
+          .iter()
+          .map(|path| path.to_string_lossy().to_string())
+          .collect::<Vec<_>>(),
+        "timeoutMs": timeout_ms,
+        "autoWait": auto_wait_enabled,
+        "readiness": readiness,
+        "result": snapshot,
+        "action": action_name,
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let ws_url = self.get_cdp_ws_url(cdp_port).await?;
     let (frame_selector, resolved_frame, context_id) = self
@@ -11695,16 +13898,106 @@ impl McpServer {
       .iter()
       .map(|path| path.to_string_lossy().to_string())
       .collect::<Vec<_>>();
-    self
+    let set_files_result = match self
       .send_cdp(
         &ws_url,
-        "DOM.setFileInputFiles",
+        "DOM.requestNode",
         serde_json::json!({
-          "objectId": object_id,
-          "files": files,
+          "objectId": object_id.clone(),
         }),
       )
-      .await?;
+      .await
+    {
+      Ok(node_result) => {
+        let node_id = node_result
+          .get("nodeId")
+          .and_then(|value| value.as_i64())
+          .ok_or_else(|| McpError::internal("DOM.requestNode did not return a nodeId"))?;
+        self
+          .send_cdp(
+            &ws_url,
+            "DOM.setFileInputFiles",
+            serde_json::json!({
+              "nodeId": node_id,
+              "files": files.clone(),
+            }),
+          )
+          .await
+      }
+      Err(error) => {
+        log::warn!(
+          "[mcp] DOM.requestNode failed for {} on profile {}: {}",
+          action_name,
+          args.profile_id,
+          error.message
+        );
+        self
+          .send_cdp(
+            &ws_url,
+            "DOM.setFileInputFiles",
+            serde_json::json!({
+              "objectId": object_id.clone(),
+              "files": files.clone(),
+            }),
+          )
+          .await
+      }
+    };
+
+    if let Err(error) = set_files_result {
+      log::warn!(
+        "[mcp] DOM.setFileInputFiles failed for {} on profile {}: {}. Falling back to DOM injection.",
+        action_name,
+        args.profile_id,
+        error.message
+      );
+      let files_payload = Self::build_dom_file_payloads(&resolved_paths)?;
+      let files_payload_literal = serde_json::to_string(&files_payload).map_err(|error| {
+        McpError::internal(format!("Failed to serialize upload files: {error}"))
+      })?;
+      let assign_expression = Self::build_element_target_expression(
+        args.selector.as_deref(),
+        args.locator.as_ref(),
+        &format!(
+          r#"
+          const files = {files_payload_literal};
+          const dataTransfer = new DataTransfer();
+          for (const file of files) {{
+            const binary = atob(file.base64);
+            const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+            dataTransfer.items.add(new File([bytes], file.name, {{
+              type: file.mime,
+              lastModified: file.lastModified,
+            }}));
+          }}
+          element.files = dataTransfer.files;
+          element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+          element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+          return {{
+            ok: true,
+            target,
+            count: element.files ? element.files.length : 0,
+            multiple: !!element.multiple,
+            files: Array.from(element.files || []).map((file) => ({{
+              name: file.name,
+              size: file.size,
+              type: file.type,
+            }})),
+          }};
+      "#
+        ),
+      )?;
+      let fallback_snapshot = self
+        .evaluate_runtime_value(&ws_url, &assign_expression, context_id)
+        .await?;
+      if fallback_snapshot
+        .get("ok")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+      {
+        return Err(error);
+      }
+    }
 
     let snapshot_expression = Self::build_element_target_expression(
       args.selector.as_deref(),
@@ -11739,6 +14032,43 @@ impl McpServer {
       "result": snapshot,
       "action": action_name,
     }))
+  }
+
+  fn build_dom_file_payloads(
+    resolved_paths: &[std::path::PathBuf],
+  ) -> Result<Vec<serde_json::Value>, McpError> {
+    resolved_paths
+      .iter()
+      .map(|path| {
+        let body = std::fs::read(path).map_err(|error| {
+          McpError::internal(format!(
+            "Failed to read upload file {}: {error}",
+            path.display()
+          ))
+        })?;
+        let name = path
+          .file_name()
+          .and_then(|value| value.to_str())
+          .unwrap_or("upload.bin")
+          .to_string();
+        let mime = mime_guess::from_path(path)
+          .first_or_octet_stream()
+          .essence_str()
+          .to_string();
+        let last_modified = std::fs::metadata(path)
+          .and_then(|metadata| metadata.modified())
+          .ok()
+          .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+          .map(|duration| duration.as_millis() as u64)
+          .unwrap_or(0);
+        Ok(serde_json::json!({
+          "name": name,
+          "mime": mime,
+          "base64": base64::engine::general_purpose::STANDARD.encode(body),
+          "lastModified": last_modified,
+        }))
+      })
+      .collect()
   }
 
   async fn handle_set_file_input(
@@ -12062,16 +14392,70 @@ impl McpServer {
   ) -> Result<serde_json::Value, McpError> {
     let args: StartConsoleCaptureArgs = Self::parse_arguments(arguments)?;
     let profile = self.get_running_profile(&args.profile_id)?;
+    let timeout_ms = args
+      .options
+      .timeout_ms
+      .unwrap_or(DEFAULT_CONSOLE_CAPTURE_TIMEOUT_MS);
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let target_title = page
+        .title()
+        .await
+        .map_err(|error| Self::camoufox_error("tab title lookup", error))?;
+      let target_url = page
+        .url()
+        .map_err(|error| Self::camoufox_error("tab URL lookup", error))?;
+      self.ensure_camoufox_console_capture(&page, true).await?;
+
+      let mut inner = self.inner.lock().await;
+      if let Some(existing) = inner.console_captures.get_mut(&args.profile_id) {
+        if existing.shared.running.load(Ordering::SeqCst) {
+          return Ok(Self::text_tool_result(format!(
+            "Console capture is already active for profile '{}'",
+            profile.name
+          )));
+        }
+
+        if let Some(tx) = existing.shutdown_tx.take() {
+          let _ = tx.send(());
+        }
+      }
+
+      let shared = ConsoleCaptureShared {
+        logs: Arc::new(AsyncMutex::new(VecDeque::new())),
+        running: Arc::new(AtomicBool::new(true)),
+        last_error: Arc::new(AsyncMutex::new(None)),
+      };
+      let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+      inner.console_captures.insert(
+        args.profile_id.clone(),
+        ConsoleCaptureState {
+          shared: shared.clone(),
+          shutdown_tx: Some(shutdown_tx),
+        },
+      );
+      drop(inner);
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "status": "started",
+        "timeoutMs": timeout_ms,
+        "bufferSize": MAX_CONSOLE_LOG_ENTRIES,
+        "target": {
+          "id": "camoufox-active-tab",
+          "title": target_title,
+          "url": target_url,
+          "type": "page",
+        },
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let target = self.get_cdp_active_page_target(cdp_port).await?;
     let ws_url = target
       .web_socket_debugger_url
       .clone()
       .ok_or_else(|| McpError::internal("Selected tab is missing webSocketDebuggerUrl"))?;
-    let timeout_ms = args
-      .options
-      .timeout_ms
-      .unwrap_or(DEFAULT_CONSOLE_CAPTURE_TIMEOUT_MS);
 
     let mut inner = self.inner.lock().await;
     if let Some(existing) = inner.console_captures.get_mut(&args.profile_id) {
@@ -12170,38 +14554,68 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: GetConsoleLogsArgs = Self::parse_arguments(arguments)?;
-    let capture = {
+    let buffered_capture = {
       let inner = self.inner.lock().await;
       inner
         .console_captures
         .get(&args.profile_id)
         .map(|state| state.shared.clone())
-        .ok_or_else(|| {
-          McpError::not_found(format!(
-            "Console capture not found for profile {}",
-            args.profile_id
-          ))
-        })?
     };
+    if let Some(capture) = buffered_capture {
+      let logs = capture.logs.lock().await;
+      let total = logs.len();
+      let limit = args.limit.unwrap_or(DEFAULT_CONSOLE_LOG_LIMIT).max(1);
+      let entries: Vec<ConsoleLogEntry> = logs.iter().rev().take(limit).cloned().collect();
+      drop(logs);
+      let mut entries = entries;
+      entries.reverse();
 
-    let logs = capture.logs.lock().await;
-    let total = logs.len();
-    let limit = args.limit.unwrap_or(DEFAULT_CONSOLE_LOG_LIMIT).max(1);
-    let entries: Vec<ConsoleLogEntry> = logs.iter().rev().take(limit).cloned().collect();
-    drop(logs);
-    let mut entries = entries;
-    entries.reverse();
+      let last_error = capture.last_error.lock().await.clone();
 
-    let last_error = capture.last_error.lock().await.clone();
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "running": capture.running.load(Ordering::SeqCst),
+        "total": total,
+        "returned": entries.len(),
+        "lastError": last_error,
+        "logs": entries,
+      }));
+    }
 
-    Self::json_tool_result(&serde_json::json!({
-      "profileId": args.profile_id,
-      "running": capture.running.load(Ordering::SeqCst),
-      "total": total,
-      "returned": entries.len(),
-      "lastError": last_error,
-      "logs": entries,
-    }))
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let limit = args.limit.unwrap_or(DEFAULT_CONSOLE_LOG_LIMIT).max(1);
+      let value = self
+        .evaluate_camoufox_page_value(
+          &page,
+          &format!(
+            r#"(() => {{
+              const raw = sessionStorage.getItem("__jnm_mcp_console_capture");
+              const parsed = raw ? JSON.parse(raw) : {{ logs: [] }};
+              const logs = Array.isArray(parsed.logs) ? parsed.logs : [];
+              return {{
+                total: logs.length,
+                logs: logs.slice(Math.max(0, logs.length - {})),
+              }};
+            }})()"#,
+            limit
+          ),
+        )
+        .await?;
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "running": true,
+        "total": value.get("total").cloned().unwrap_or(serde_json::json!(0)),
+        "returned": value.get("logs").and_then(|logs| logs.as_array()).map(|logs| logs.len()).unwrap_or(0),
+        "lastError": serde_json::Value::Null,
+        "logs": value.get("logs").cloned().unwrap_or_else(|| serde_json::json!([])),
+      }));
+    }
+    Err(McpError::not_found(format!(
+      "Console capture not found for profile {}",
+      args.profile_id
+    )))
   }
 
   async fn handle_clear_console_logs(
@@ -12209,30 +14623,52 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: ClearConsoleLogsArgs = Self::parse_arguments(arguments)?;
-    let capture = {
+    let buffered_capture = {
       let inner = self.inner.lock().await;
       inner
         .console_captures
         .get(&args.profile_id)
         .map(|state| state.shared.clone())
-        .ok_or_else(|| {
-          McpError::not_found(format!(
-            "Console capture not found for profile {}",
-            args.profile_id
-          ))
-        })?
     };
+    if let Some(capture) = buffered_capture {
+      let mut logs = capture.logs.lock().await;
+      let cleared = logs.len();
+      logs.clear();
+      drop(logs);
 
-    let mut logs = capture.logs.lock().await;
-    let cleared = logs.len();
-    logs.clear();
-    drop(logs);
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "cleared": cleared,
+        "running": capture.running.load(Ordering::SeqCst),
+      }));
+    }
 
-    Self::json_tool_result(&serde_json::json!({
-      "profileId": args.profile_id,
-      "cleared": cleared,
-      "running": capture.running.load(Ordering::SeqCst),
-    }))
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let value = self
+        .evaluate_camoufox_page_value(
+          &page,
+          r#"(() => {
+            const raw = sessionStorage.getItem("__jnm_mcp_console_capture");
+            const parsed = raw ? JSON.parse(raw) : { logs: [] };
+            const logs = Array.isArray(parsed.logs) ? parsed.logs : [];
+            const cleared = logs.length;
+            sessionStorage.removeItem("__jnm_mcp_console_capture");
+            return { cleared };
+          })()"#,
+        )
+        .await?;
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "cleared": value.get("cleared").cloned().unwrap_or(serde_json::json!(0)),
+        "running": true,
+      }));
+    }
+    Err(McpError::not_found(format!(
+      "Console capture not found for profile {}",
+      args.profile_id
+    )))
   }
 
   async fn handle_start_network_capture(
@@ -12241,16 +14677,73 @@ impl McpServer {
   ) -> Result<serde_json::Value, McpError> {
     let args: StartNetworkCaptureArgs = Self::parse_arguments(arguments)?;
     let profile = self.get_running_profile(&args.profile_id)?;
+    let timeout_ms = args
+      .options
+      .timeout_ms
+      .unwrap_or(DEFAULT_NETWORK_CAPTURE_TIMEOUT_MS);
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let target_title = page
+        .title()
+        .await
+        .map_err(|error| Self::camoufox_error("tab title lookup", error))?;
+      let target_url = page
+        .url()
+        .map_err(|error| Self::camoufox_error("tab URL lookup", error))?;
+      self.ensure_camoufox_network_capture(&page, true).await?;
+
+      let mut inner = self.inner.lock().await;
+      if let Some(existing) = inner.network_captures.get_mut(&args.profile_id) {
+        if existing.shared.running.load(Ordering::SeqCst) {
+          return Ok(Self::text_tool_result(format!(
+            "Network capture is already active for profile '{}'",
+            profile.name
+          )));
+        }
+
+        if let Some(tx) = existing.shutdown_tx.take() {
+          let _ = tx.send(());
+        }
+      }
+
+      let shared = NetworkCaptureShared {
+        requests: Arc::new(AsyncMutex::new(VecDeque::new())),
+        running: Arc::new(AtomicBool::new(true)),
+        last_error: Arc::new(AsyncMutex::new(None)),
+      };
+      let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+      let (body_request_tx, body_request_rx) = mpsc::channel(1);
+      drop(body_request_rx);
+
+      inner.network_captures.insert(
+        args.profile_id.clone(),
+        NetworkCaptureState {
+          shared: shared.clone(),
+          shutdown_tx: Some(shutdown_tx),
+          body_request_tx,
+        },
+      );
+      drop(inner);
+
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "status": "started",
+        "timeoutMs": timeout_ms,
+        "bufferSize": MAX_NETWORK_REQUEST_ENTRIES,
+        "target": {
+          "id": "camoufox-active-tab",
+          "title": target_title,
+          "url": target_url,
+          "type": "page",
+        },
+      }));
+    }
     let cdp_port = self.get_cdp_port_for_profile(&profile).await?;
     let target = self.get_cdp_active_page_target(cdp_port).await?;
     let ws_url = target
       .web_socket_debugger_url
       .clone()
       .ok_or_else(|| McpError::internal("Selected tab is missing webSocketDebuggerUrl"))?;
-    let timeout_ms = args
-      .options
-      .timeout_ms
-      .unwrap_or(DEFAULT_NETWORK_CAPTURE_TIMEOUT_MS);
 
     let mut inner = self.inner.lock().await;
     if let Some(existing) = inner.network_captures.get_mut(&args.profile_id) {
@@ -12352,38 +14845,68 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: GetNetworkRequestsArgs = Self::parse_arguments(arguments)?;
-    let capture = {
+    let buffered_capture = {
       let inner = self.inner.lock().await;
       inner
         .network_captures
         .get(&args.profile_id)
         .map(|state| state.shared.clone())
-        .ok_or_else(|| {
-          McpError::not_found(format!(
-            "Network capture not found for profile {}",
-            args.profile_id
-          ))
-        })?
     };
+    if let Some(capture) = buffered_capture {
+      let requests = capture.requests.lock().await;
+      let total = requests.len();
+      let limit = args.limit.unwrap_or(DEFAULT_NETWORK_REQUEST_LIMIT).max(1);
+      let entries: Vec<NetworkRequestEntry> = requests.iter().rev().take(limit).cloned().collect();
+      drop(requests);
+      let mut entries = entries;
+      entries.reverse();
 
-    let requests = capture.requests.lock().await;
-    let total = requests.len();
-    let limit = args.limit.unwrap_or(DEFAULT_NETWORK_REQUEST_LIMIT).max(1);
-    let entries: Vec<NetworkRequestEntry> = requests.iter().rev().take(limit).cloned().collect();
-    drop(requests);
-    let mut entries = entries;
-    entries.reverse();
+      let last_error = capture.last_error.lock().await.clone();
 
-    let last_error = capture.last_error.lock().await.clone();
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "running": capture.running.load(Ordering::SeqCst),
+        "total": total,
+        "returned": entries.len(),
+        "lastError": last_error,
+        "requests": entries,
+      }));
+    }
 
-    Self::json_tool_result(&serde_json::json!({
-      "profileId": args.profile_id,
-      "running": capture.running.load(Ordering::SeqCst),
-      "total": total,
-      "returned": entries.len(),
-      "lastError": last_error,
-      "requests": entries,
-    }))
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let limit = args.limit.unwrap_or(DEFAULT_NETWORK_REQUEST_LIMIT).max(1);
+      let value = self
+        .evaluate_camoufox_page_value(
+          &page,
+          &format!(
+            r#"(() => {{
+              const raw = sessionStorage.getItem("__jnm_mcp_network_capture");
+              const parsed = raw ? JSON.parse(raw) : {{ requests: [] }};
+              const requests = Array.isArray(parsed.requests) ? parsed.requests : [];
+              return {{
+                total: requests.length,
+                requests: requests.slice(Math.max(0, requests.length - {})),
+              }};
+            }})()"#,
+            limit
+          ),
+        )
+        .await?;
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "running": true,
+        "total": value.get("total").cloned().unwrap_or(serde_json::json!(0)),
+        "returned": value.get("requests").and_then(|items| items.as_array()).map(|items| items.len()).unwrap_or(0),
+        "lastError": serde_json::Value::Null,
+        "requests": value.get("requests").cloned().unwrap_or_else(|| serde_json::json!([])),
+      }));
+    }
+    Err(McpError::not_found(format!(
+      "Network capture not found for profile {}",
+      args.profile_id
+    )))
   }
 
   async fn handle_get_response_body(
@@ -12391,20 +14914,103 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: GetResponseBodyArgs = Self::parse_arguments(arguments)?;
-    let max_bytes = args.max_bytes.unwrap_or(DEFAULT_RESPONSE_BODY_MAX_BYTES);
-    let (capture, body_request_tx) = {
+    let capture_state = {
       let inner = self.inner.lock().await;
       inner
         .network_captures
         .get(&args.profile_id)
         .map(|state| (state.shared.clone(), state.body_request_tx.clone()))
-        .ok_or_else(|| {
-          McpError::not_found(format!(
-            "Network capture not found for profile {}",
-            args.profile_id
-          ))
-        })?
     };
+
+    let profile = self.get_running_profile(&args.profile_id).ok();
+    if profile
+      .as_ref()
+      .map(|profile| profile.browser == "camoufox")
+      .unwrap_or(false)
+      && capture_state.is_none()
+    {
+      let profile = profile.expect("camoufox profile existence checked above");
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let max_bytes = args.max_bytes.unwrap_or(DEFAULT_RESPONSE_BODY_MAX_BYTES);
+      let value = self
+        .evaluate_camoufox_page_value(
+          &page,
+          &format!(
+            r#"(() => {{
+              const raw = sessionStorage.getItem("__jnm_mcp_network_capture");
+              const parsed = raw ? JSON.parse(raw) : {{ requests: [] }};
+              const requests = Array.isArray(parsed.requests) ? parsed.requests : [];
+              const entry = requests.find((item) => item.requestId === {});
+              if (!entry) {{
+                return {{ found: false }};
+              }}
+              return {{
+                found: true,
+                failed: !!entry.failed,
+                body: entry.responseBody,
+                base64Encoded: !!entry.responseBodyBase64Encoded,
+              }};
+            }})()"#,
+            serde_json::to_string(&args.request_id)
+              .map_err(|e| McpError::internal(format!("Failed to serialize request id: {e}")))?,
+          ),
+        )
+        .await?;
+
+      if value.get("found").and_then(|value| value.as_bool()) != Some(true) {
+        return Err(McpError::not_found(format!(
+          "Request {} was not found in captured network entries for profile {}",
+          args.request_id, args.profile_id
+        )));
+      }
+      if value.get("failed").and_then(|value| value.as_bool()) == Some(true) {
+        return Err(McpError::not_found(format!(
+          "Response body is unavailable for request {} because the request failed",
+          args.request_id
+        )));
+      }
+      let body = value
+        .get("body")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+      let base64_encoded = value
+        .get("base64Encoded")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+      let byte_len = if base64_encoded {
+        base64::engine::general_purpose::STANDARD
+          .decode(body.as_bytes())
+          .map_err(|e| McpError::internal(format!("Failed to decode base64 response body: {e}")))?
+          .len()
+      } else {
+        body.len()
+      };
+      if byte_len > max_bytes {
+        return Err(McpError::invalid_params(format!(
+          "Response body for request {} is {} bytes, which exceeds max_bytes {}",
+          args.request_id, byte_len, max_bytes
+        )));
+      }
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "requestId": args.request_id,
+        "base64Encoded": base64_encoded,
+        "size": byte_len,
+        "body": body,
+      }));
+    }
+    let max_bytes = args.max_bytes.unwrap_or(DEFAULT_RESPONSE_BODY_MAX_BYTES);
+    let (capture, body_request_tx) = capture_state.ok_or_else(|| {
+      if profile.is_none() {
+        McpError::not_found(format!("Profile not found: {}", args.profile_id))
+      } else {
+        McpError::not_found(format!(
+          "Network capture not found for profile {}",
+          args.profile_id
+        ))
+      }
+    })?;
 
     let mut cached_body = None;
     let mut cached_base64_encoded = false;
@@ -12517,30 +15123,52 @@ impl McpServer {
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let args: ClearNetworkRequestsArgs = Self::parse_arguments(arguments)?;
-    let capture = {
+    let buffered_capture = {
       let inner = self.inner.lock().await;
       inner
         .network_captures
         .get(&args.profile_id)
         .map(|state| state.shared.clone())
-        .ok_or_else(|| {
-          McpError::not_found(format!(
-            "Network capture not found for profile {}",
-            args.profile_id
-          ))
-        })?
     };
+    if let Some(capture) = buffered_capture {
+      let mut requests = capture.requests.lock().await;
+      let cleared = requests.len();
+      requests.clear();
+      drop(requests);
 
-    let mut requests = capture.requests.lock().await;
-    let cleared = requests.len();
-    requests.clear();
-    drop(requests);
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "cleared": cleared,
+        "running": capture.running.load(Ordering::SeqCst),
+      }));
+    }
 
-    Self::json_tool_result(&serde_json::json!({
-      "profileId": args.profile_id,
-      "cleared": cleared,
-      "running": capture.running.load(Ordering::SeqCst),
-    }))
+    let profile = self.get_running_profile(&args.profile_id)?;
+    if profile.browser == "camoufox" {
+      let page = self.get_camoufox_active_page(&profile).await?;
+      let value = self
+        .evaluate_camoufox_page_value(
+          &page,
+          r#"(() => {
+            const raw = sessionStorage.getItem("__jnm_mcp_network_capture");
+            const parsed = raw ? JSON.parse(raw) : { requests: [] };
+            const requests = Array.isArray(parsed.requests) ? parsed.requests : [];
+            const cleared = requests.length;
+            sessionStorage.removeItem("__jnm_mcp_network_capture");
+            return { cleared };
+          })()"#,
+        )
+        .await?;
+      return Self::json_tool_result(&serde_json::json!({
+        "profileId": args.profile_id,
+        "cleared": value.get("cleared").cloned().unwrap_or(serde_json::json!(0)),
+        "running": true,
+      }));
+    }
+    Err(McpError::not_found(format!(
+      "Network capture not found for profile {}",
+      args.profile_id
+    )))
   }
 
   async fn handle_get_all_traffic_snapshots(&self) -> Result<serde_json::Value, McpError> {
@@ -13769,6 +16397,19 @@ mod tests {
   }
 
   #[test]
+  fn test_cookie_lock_errors_can_fallback_to_empty_download_cookie_header() {
+    assert!(McpServer::can_fallback_to_empty_cookie_header(
+      "Failed to prepare statement: database is locked"
+    ));
+    assert!(McpServer::can_fallback_to_empty_cookie_header(
+      "resource temporarily unavailable"
+    ));
+    assert!(!McpServer::can_fallback_to_empty_cookie_header(
+      "cookie database not found"
+    ));
+  }
+
+  #[test]
   fn test_clear_storage_args_support_defaults() {
     let args: ClearStorageArgs = McpServer::parse_arguments(&serde_json::json!({
       "profileId": "profile-1"
@@ -13815,6 +16456,28 @@ mod tests {
   }
 
   #[test]
+  fn test_locator_read_args_support_frame_selector() {
+    let args: LocatorReadArgs = McpServer::parse_arguments(&serde_json::json!({
+      "profileId": "profile-frame",
+      "locator": {
+        "by": "css",
+        "value": "#iframe-result"
+      },
+      "frame": {
+        "by": "index",
+        "value": 1
+      }
+    }))
+    .expect("locator read args should parse frame selector");
+
+    assert_eq!(args.profile_id, "profile-frame");
+    assert_eq!(
+      args.frame.as_ref().map(|frame| frame.by),
+      Some(McpFrameBy::Index)
+    );
+  }
+
+  #[test]
   fn test_query_elements_args_support_timeout_and_limit() {
     let args: QueryElementsArgs = McpServer::parse_arguments(&serde_json::json!({
       "profileId": "profile-2",
@@ -13832,6 +16495,59 @@ mod tests {
     assert_eq!(args.limit, Some(7));
     assert_eq!(args.options.auto_wait, Some(false));
     assert_eq!(args.options.timeout_ms, Some(2500));
+  }
+
+  #[test]
+  fn test_query_elements_args_support_frame_selector() {
+    let args: QueryElementsArgs = McpServer::parse_arguments(&serde_json::json!({
+      "profileId": "profile-3",
+      "locator": {
+        "by": "text",
+        "value": "iframe-submitted"
+      },
+      "frame": {
+        "by": "name",
+        "value": "child-frame"
+      }
+    }))
+    .expect("query args should parse frame selector");
+
+    assert_eq!(args.profile_id, "profile-3");
+    assert_eq!(
+      args.frame.as_ref().map(|frame| frame.by),
+      Some(McpFrameBy::Name)
+    );
+  }
+
+  #[test]
+  fn test_tab_selector_by_index_accepts_numeric_string() {
+    let tabs = vec![
+      McpTabNode {
+        id: "tab-0".to_string(),
+        index: 0,
+        title: "Home".to_string(),
+        url: "https://example.com".to_string(),
+        target_type: "page".to_string(),
+        active: false,
+      },
+      McpTabNode {
+        id: "tab-1".to_string(),
+        index: 1,
+        title: "Docs".to_string(),
+        url: "https://example.com/docs".to_string(),
+        target_type: "page".to_string(),
+        active: true,
+      },
+    ];
+    let selector: McpTabRef = serde_json::from_value(serde_json::json!({
+      "by": "index",
+      "value": "1"
+    }))
+    .expect("tab selector should parse");
+
+    let resolved = McpServer::resolve_tab_selector(&tabs, &selector)
+      .expect("numeric string tab selector should resolve");
+    assert_eq!(resolved.id, "tab-1");
   }
 
   #[test]

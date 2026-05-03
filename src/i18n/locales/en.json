@@ -654,7 +654,7 @@
     "tokenCopied": "Token copied",
     "mcpEnableLabel": "Enable MCP Server (Model Context Protocol)",
     "mcpEnableDescription": "Allow AI assistants like Claude Desktop to control browsers.",
-    "mcpAcceptTermsFirst": "(Accept Chromium terms in Settings first)",
+    "mcpAcceptTermsFirst": "(Accept JnmBrowser terms in Settings first)",
     "mcpStarted": "MCP server started on port {{port}}",
     "mcpStopped": "MCP server stopped",
     "mcpToggleFailed": "Failed to toggle MCP server",
@@ -919,7 +919,7 @@
     "osLabel": "Operating System Fingerprint",
     "selectOSPlaceholder": "Select operating system",
     "generateRandomOnLaunch": "Generate random fingerprint on every launch",
-    "generateRandomDescription": "When enabled, a new fingerprint will be generated each time the browser is launched.",
+    "generateRandomDescription": "When enabled, a new seed-based fingerprint is generated on every launch, while the supported fixed settings still remain in effect.",
     "generateRandomDescriptionAuto": "When enabled, a new fingerprint will be generated each time the browser is launched. The generated fingerprint is saved for reference.",
     "autoLocationDescription": "Automatically configure location information based on proxy configuration or your connection if no proxy provided",
     "editingDisabledRunning": "Fingerprint editing is disabled because the profile is currently running. Stop the profile to make changes.",
@@ -1016,7 +1016,10 @@
     "refreshFingerprint": "Refresh Fingerprint",
     "canvasNoiseSeedPlaceholder": "Enter a seed string for canvas fingerprint",
     "addFontsPlaceholder": "Add fonts...",
-    "enterAsJson": "Enter {{title}} as JSON"
+    "enterAsJson": "Enter {{title}} as JSON",
+    "chromiumAutomaticDescription": "Chromium works best in random fingerprint mode with only a few fixed settings. Most anti-detect traits are derived from the seed at runtime.",
+    "chromiumManualDescription": "This page only suits limited fixed overrides. Empty fields are normal: many canvas, audio, WebGL, and layout traits are generated from the seed at runtime instead of being stored as static values.",
+    "chromiumSupportedFixedSettingsDescription": "Only the fixed settings that are actually wired into the current Chromium path are kept here. With random-on-launch enabled, these values still persist while deeper traits continue to be derived from the seed."
   },
   "warnings": {
     "windowResizeTitle": "Custom Window Dimensions",
@@ -1426,8 +1429,8 @@
     "tryAgain": "Please try again"
   },
   "wayfernTerms": {
-    "title": "Chromium Terms and Conditions",
-    "description": "Before using JnmBrowser, you must read and agree to Chromium's Terms and Conditions.",
+    "title": "JnmBrowser Terms and Conditions",
+    "description": "Before using JnmBrowser, you must read and agree to JnmBrowser's Terms and Conditions.",
     "reviewLabel": "Please review the Terms and Conditions at:",
     "agreeNotice": "By clicking \"I Accept\", you agree to be bound by these terms.",
     "acceptButton": "I Accept",

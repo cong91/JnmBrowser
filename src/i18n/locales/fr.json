@@ -654,7 +654,7 @@
     "tokenCopied": "Jeton copié",
     "mcpEnableLabel": "Activer le serveur MCP (Model Context Protocol)",
     "mcpEnableDescription": "Permet aux assistants IA comme Claude Desktop de contrôler les navigateurs.",
-    "mcpAcceptTermsFirst": "(Acceptez d'abord les conditions Chromium dans les Paramètres)",
+    "mcpAcceptTermsFirst": "(Acceptez d'abord les conditions de JnmBrowser dans les Paramètres)",
     "mcpStarted": "Serveur MCP démarré sur le port {{port}}",
     "mcpStopped": "Serveur MCP arrêté",
     "mcpToggleFailed": "Échec du basculement du serveur MCP",
@@ -919,7 +919,7 @@
     "osLabel": "Empreinte du système d'exploitation",
     "selectOSPlaceholder": "Sélectionner le système d'exploitation",
     "generateRandomOnLaunch": "Générer une empreinte aléatoire à chaque lancement",
-    "generateRandomDescription": "Lorsque cette option est activée, une nouvelle empreinte sera générée à chaque lancement du navigateur.",
+    "generateRandomDescription": "Lorsque cette option est activée, une nouvelle empreinte basée sur la seed est générée à chaque lancement, tandis que les réglages fixes pris en charge continuent de s'appliquer.",
     "generateRandomDescriptionAuto": "Lorsque cette option est activée, une nouvelle empreinte sera générée à chaque lancement du navigateur. L'empreinte générée est sauvegardée pour référence.",
     "autoLocationDescription": "Configurer automatiquement les informations de localisation en fonction de la configuration du proxy ou de votre connexion si aucun proxy n'est fourni",
     "editingDisabledRunning": "La modification de l'empreinte est désactivée car le profil est en cours d'exécution. Arrêtez le profil pour effectuer des modifications.",
@@ -1016,7 +1016,10 @@
     "refreshFingerprint": "Actualiser l'empreinte",
     "canvasNoiseSeedPlaceholder": "Entrez une graine pour l'empreinte canvas",
     "addFontsPlaceholder": "Ajouter des polices...",
-    "enterAsJson": "Entrez {{title}} en JSON"
+    "enterAsJson": "Entrez {{title}} en JSON",
+    "chromiumAutomaticDescription": "Chromium fonctionne mieux en mode empreinte aléatoire avec seulement quelques réglages fixes. La plupart des caractéristiques anti-détection sont dérivées de la graine à l’exécution.",
+    "chromiumManualDescription": "Cette page convient uniquement à quelques remplacements fixes limités. Il est normal que de nombreux champs soient vides : beaucoup de caractéristiques canvas, audio, WebGL et de mise en page sont générées à partir de la graine à l’exécution au lieu d’être stockées comme valeurs statiques.",
+    "chromiumSupportedFixedSettingsDescription": "Seuls les réglages fixes réellement raccordés au chemin Chromium actuel sont conservés ici. Avec l’aléatoire à chaque lancement activé, ces valeurs continuent de s’appliquer tandis que les traits plus profonds restent dérivés de la graine."
   },
   "warnings": {
     "windowResizeTitle": "Dimensions de fenêtre personnalisées",
@@ -1426,8 +1429,8 @@
     "tryAgain": "Veuillez réessayer"
   },
   "wayfernTerms": {
-    "title": "Conditions générales de Chromium",
-    "description": "Avant d'utiliser JnmBrowser, vous devez lire et accepter les Conditions Générales de Chromium.",
+    "title": "Conditions Générales de JnmBrowser",
+    "description": "Avant d'utiliser JnmBrowser, vous devez lire et accepter les Conditions Générales de JnmBrowser.",
     "reviewLabel": "Veuillez consulter les Conditions Générales sur :",
     "agreeNotice": "En cliquant sur « J'accepte », vous acceptez ces conditions.",
     "acceptButton": "J'accepte",

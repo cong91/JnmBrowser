@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
+import { useElementSize } from "@/hooks/use-element-size";
 import { cn } from "@/lib/utils";
 import type { BandwidthDataPoint } from "@/types";
 
@@ -18,6 +19,9 @@ export function BandwidthMiniChart({
   onClick,
   className,
 }: BandwidthMiniChartProps) {
+  const { ref: chartRef, isReady: isChartReady } =
+    useElementSize<HTMLDivElement>();
+
   // Transform data for the chart - combine sent and received for total bandwidth
   const chartData = React.useMemo(() => {
     // Fill in missing seconds with zeros for smooth chart
@@ -67,49 +71,51 @@ export function BandwidthMiniChart({
         className,
       )}
     >
-      <div className="flex-1 h-3 pointer-events-none">
-        <ResponsiveContainer
-          width="100%"
-          height="100%"
-          minWidth={1}
-          minHeight={1}
-        >
-          <AreaChart
-            data={chartData}
-            margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
+      <div ref={chartRef} className="flex-1 h-3 pointer-events-none">
+        {isChartReady ? (
+          <ResponsiveContainer
+            width="100%"
+            height="100%"
+            minWidth={1}
+            minHeight={1}
           >
-            <defs>
-              <linearGradient
-                id="bandwidthGradient"
-                x1="0"
-                y1="0"
-                x2="0"
-                y2="1"
-              >
-                <stop
-                  offset="0%"
-                  stopColor="var(--chart-1)"
-                  stopOpacity={0.6}
-                />
-                <stop
-                  offset="100%"
-                  stopColor="var(--chart-1)"
-                  stopOpacity={0.1}
-                />
-              </linearGradient>
-            </defs>
-            <Area
-              type="monotone"
-              dataKey="bandwidth"
-              stroke="var(--chart-1)"
-              strokeWidth={1}
-              fill="url(#bandwidthGradient)"
-              isAnimationActive={false}
-              dot={false}
-              activeDot={false}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
+            <AreaChart
+              data={chartData}
+              margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
+            >
+              <defs>
+                <linearGradient
+                  id="bandwidthGradient"
+                  x1="0"
+                  y1="0"
+                  x2="0"
+                  y2="1"
+                >
+                  <stop
+                    offset="0%"
+                    stopColor="var(--chart-1)"
+                    stopOpacity={0.6}
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor="var(--chart-1)"
+                    stopOpacity={0.1}
+                  />
+                </linearGradient>
+              </defs>
+              <Area
+                type="monotone"
+                dataKey="bandwidth"
+                stroke="var(--chart-1)"
+                strokeWidth={1}
+                fill="url(#bandwidthGradient)"
+                isAnimationActive={false}
+                dot={false}
+                activeDot={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : null}
       </div>
       <span className="text-xs text-muted-foreground whitespace-nowrap min-w-[60px] text-right">
         {formatBytes(currentBandwidth)}

@@ -373,7 +373,7 @@ export function ProfileInfoDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("profileInfo.title")}</DialogTitle>
         </DialogHeader>
@@ -652,7 +652,7 @@ export function ProfileLaunchHookDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent aria-describedby={undefined} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{t("profileInfo.launchHook.title")}</DialogTitle>
         </DialogHeader>
@@ -731,7 +731,7 @@ export function ProfileDnsBlocklistDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-xs">
+      <DialogContent aria-describedby={undefined} className="max-w-xs">
         <DialogHeader>
           <DialogTitle>{t("dnsBlocklist.title")}</DialogTitle>
         </DialogHeader>
@@ -830,7 +830,10 @@ export function ProfileBypassRulesDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col">
+      <DialogContent
+        aria-describedby={undefined}
+        className="sm:max-w-lg max-h-[80vh] flex flex-col"
+      >
         <DialogHeader className="shrink-0">
           <DialogTitle>{t("profileInfo.network.bypassRulesTitle")}</DialogTitle>
         </DialogHeader>

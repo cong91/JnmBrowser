@@ -78,7 +78,7 @@ export function DnsBlocklistDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-md">
+      <DialogContent aria-describedby={undefined} className="max-w-md">
         <DialogHeader>
           <DialogTitle>{t("dnsBlocklist.title")}</DialogTitle>
         </DialogHeader>

@@ -390,7 +390,7 @@ export function CookieManagementDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="max-w-lg">
+      <DialogContent aria-describedby={undefined} className="max-w-lg">
         <DialogHeader>
           <DialogTitle>{t("cookies.management.title")}</DialogTitle>
         </DialogHeader>

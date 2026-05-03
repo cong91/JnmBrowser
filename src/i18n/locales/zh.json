@@ -654,7 +654,7 @@
     "tokenCopied": "令牌已复制",
     "mcpEnableLabel": "启用 MCP 服务器 (Model Context Protocol)",
     "mcpEnableDescription": "允许 Claude Desktop 等 AI 助手控制浏览器。",
-    "mcpAcceptTermsFirst": "(请先在设置中接受 Chromium 条款)",
+    "mcpAcceptTermsFirst": "(请先在设置中接受 JnmBrowser 条款)",
     "mcpStarted": "MCP 服务器已在端口 {{port}} 上启动",
     "mcpStopped": "MCP 服务器已停止",
     "mcpToggleFailed": "切换 MCP 服务器失败",
@@ -919,7 +919,7 @@
     "osLabel": "操作系统指纹",
     "selectOSPlaceholder": "选择操作系统",
     "generateRandomOnLaunch": "每次启动时生成随机指纹",
-    "generateRandomDescription": "启用后，每次启动浏览器时将生成新的指纹。",
+    "generateRandomDescription": "启用后，每次启动浏览器时都会重新生成 seed 指纹；当前支持的固定设置仍会继续生效。",
     "generateRandomDescriptionAuto": "启用后，每次启动浏览器时将生成新的指纹。生成的指纹会保存以供参考。",
     "autoLocationDescription": "根据代理配置或您的连接（未提供代理时）自动配置位置信息",
     "editingDisabledRunning": "指纹编辑已禁用，因为配置文件正在运行中。停止配置文件后才能进行更改。",
@@ -1016,7 +1016,10 @@
     "refreshFingerprint": "刷新指纹",
     "canvasNoiseSeedPlaceholder": "输入用于 canvas 指纹的种子字符串",
     "addFontsPlaceholder": "添加字体...",
-    "enterAsJson": "以 JSON 格式输入 {{title}}"
+    "enterAsJson": "以 JSON 格式输入 {{title}}",
+    "chromiumAutomaticDescription": "Chromium 最适合使用随机指纹模式，并只固定少量简单设置。大部分反检测特征都会在运行时根据 seed 自动派生。",
+    "chromiumManualDescription": "这个页面只适合做少量固定覆盖。很多字段留空是正常现象：大量 canvas、audio、WebGL 和布局特征都由 seed 在运行时生成，而不是作为静态值保存。",
+    "chromiumSupportedFixedSettingsDescription": "这里保留的都是当前 Chromium 方案已真正接上的固定项。开启“每次启动随机”后，它们仍会保留，而更深层特征会继续由 seed 生成。"
   },
   "warnings": {
     "windowResizeTitle": "自定义窗口尺寸",
@@ -1426,8 +1429,8 @@
     "tryAgain": "请重试"
   },
   "wayfernTerms": {
-    "title": "Chromium 条款和条件",
-    "description": "在使用 JnmBrowser 之前,你必须阅读并同意 Chromium 的条款和条件。",
+    "title": "JnmBrowser 条款和条件",
+    "description": "在使用 JnmBrowser 之前,你必须阅读并同意 JnmBrowser 的条款和条件。",
     "reviewLabel": "请查看以下条款和条件:",
     "agreeNotice": "点击「我接受」即表示你同意受这些条款约束。",
     "acceptButton": "我接受",

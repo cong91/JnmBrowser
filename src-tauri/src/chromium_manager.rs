@@ -80,6 +80,56 @@ struct CdpTarget {
 }
 
 impl ChromiumManager {
+  fn preserved_fixed_fingerprint_fields(fingerprint: &Value) -> serde_json::Map<String, Value> {
+    const KEYS: &[&str] = &[
+      "userAgent",
+      "platform",
+      "platformVersion",
+      "browserBrand",
+      "brand",
+      "browserVersion",
+      "brandVersion",
+      "hardwareConcurrency",
+      "deviceMemory",
+      "language",
+      "languages",
+      "timezone",
+      "webglVendor",
+      "webglRenderer",
+      "gpuVendor",
+      "gpuRenderer",
+    ];
+
+    let mut preserved = serde_json::Map::new();
+    for key in KEYS {
+      if let Some(value) = fingerprint.get(*key) {
+        preserved.insert((*key).to_string(), value.clone());
+      }
+    }
+    preserved
+  }
+
+  fn resolved_seed(profile: &BrowserProfile, config: &ChromiumConfig) -> u32 {
+    if config.randomize_fingerprint_on_launch == Some(true) {
+      let random_seed = rand::random::<u32>();
+      if random_seed == 0 {
+        1
+      } else {
+        random_seed
+      }
+    } else {
+      config
+        .fingerprint
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .map(|parsed| parsed.get("fingerprint").cloned().unwrap_or(parsed))
+        .and_then(|existing| existing.get("seed").and_then(|value| value.as_u64()))
+        .and_then(|seed| u32::try_from(seed).ok())
+        .filter(|seed| *seed != 0)
+        .unwrap_or_else(|| Self::stable_fingerprint_seed(profile))
+    }
+  }
+
   fn chromium_extension_launch_args(extension_paths: &[String]) -> Vec<String> {
     if extension_paths.is_empty() {
       return Vec::new();
@@ -224,6 +274,15 @@ impl ChromiumManager {
       .unwrap_or_else(|| json!({}))
   }
 
+  fn fingerprint_seed(config: &ChromiumConfig, profile: &BrowserProfile) -> u32 {
+    Self::stored_fingerprint_value(config)
+      .get("seed")
+      .and_then(|value| value.as_u64())
+      .and_then(|seed| u32::try_from(seed).ok())
+      .filter(|seed| *seed != 0)
+      .unwrap_or_else(|| Self::stable_fingerprint_seed(profile))
+  }
+
   fn runtime_browser_full_version(profile: &BrowserProfile) -> String {
     let version = profile.version.trim();
     if version.is_empty() {
@@ -288,6 +347,7 @@ impl ChromiumManager {
 
   fn fingerprint_override_script(profile: &BrowserProfile, fingerprint: &Value) -> Option<String> {
     let mut overrides = Vec::new();
+    let mut override_entries = Vec::new();
 
     if let Some(user_agent) = Self::json_string(fingerprint, &["userAgent", "user_agent"]) {
       let user_agent = Self::normalize_user_agent_for_runtime(&user_agent, profile);
@@ -300,6 +360,8 @@ impl ChromiumManager {
       overrides.push(format!(
         "overrideValue('userAgent', {user_agent_json});overrideValue('appVersion', {app_version_json});"
       ));
+      override_entries.push(("userAgent".to_string(), user_agent_json));
+      override_entries.push(("appVersion".to_string(), app_version_json));
     }
 
     if let Some(platform) = Self::json_string(
@@ -308,11 +370,13 @@ impl ChromiumManager {
     ) {
       let platform_json = serde_json::to_string(&platform).ok()?;
       overrides.push(format!("overrideValue('platform', {platform_json});"));
+      override_entries.push(("platform".to_string(), platform_json));
     }
 
     if let Some(language) = Self::json_string(fingerprint, &["language", "locale"]) {
       let language_json = serde_json::to_string(&language).ok()?;
       overrides.push(format!("overrideValue('language', {language_json});"));
+      override_entries.push(("language".to_string(), language_json));
     }
 
     if let Some(languages) = Self::json_languages(fingerprint) {
@@ -324,6 +388,7 @@ impl ChromiumManager {
       if !languages_vec.is_empty() {
         let languages_json = serde_json::to_string(&languages_vec).ok()?;
         overrides.push(format!("overrideValue('languages', {languages_json});"));
+        override_entries.push(("languages".to_string(), languages_json));
       }
     }
 
@@ -338,21 +403,74 @@ impl ChromiumManager {
     ) {
       let value = serde_json::to_string(&hardware_concurrency).ok()?;
       overrides.push(format!("overrideValue('hardwareConcurrency', {value});"));
+      override_entries.push(("hardwareConcurrency".to_string(), value));
     }
 
     if let Some(device_memory) = Self::json_f64(fingerprint, &["deviceMemory", "device_memory"]) {
       let value = serde_json::to_string(&device_memory).ok()?;
       overrides.push(format!("overrideValue('deviceMemory', {value});"));
+      override_entries.push(("deviceMemory".to_string(), value));
     }
 
     if overrides.is_empty() {
       return None;
     }
 
+    let overrides_object = override_entries
+      .into_iter()
+      .map(|(key, value)| {
+        serde_json::to_string(&key)
+          .ok()
+          .map(|serialized_key| format!("{serialized_key}:{value}"))
+      })
+      .collect::<Option<Vec<_>>>()?
+      .join(",");
+
     Some(format!(
-      "(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};{} }})();",
-      overrides.join("")
+      "(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};{}const overrides={{{}}};const overriddenKeys=new Set(Object.keys(overrides));const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop))return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop))||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);for(const key of overriddenKeys){{try{{delete nav[key];}}catch(_e){{}}}} }})();",
+      overrides.join(""),
+      overrides_object
     ))
+  }
+
+  fn merge_geolocation_defaults(
+    fingerprint: &mut Value,
+    geo: &crate::camoufox::geolocation::Geolocation,
+  ) {
+    let has_timezone = Self::json_string(fingerprint, &["timezone", "timeZone"]).is_some();
+    let has_language = Self::json_string(fingerprint, &["language", "locale"]).is_some();
+    let has_languages = Self::json_languages(fingerprint).is_some();
+    let has_latitude = fingerprint
+      .get("latitude")
+      .and_then(|value| value.as_f64())
+      .is_some();
+    let has_longitude = fingerprint
+      .get("longitude")
+      .and_then(|value| value.as_f64())
+      .is_some();
+
+    if let Some(obj) = fingerprint.as_object_mut() {
+      if !has_timezone {
+        obj.insert("timezone".to_string(), json!(geo.timezone));
+      }
+
+      let locale_str = geo.locale.as_string();
+      if !has_language {
+        obj.insert("language".to_string(), json!(&locale_str));
+      }
+      if !has_languages {
+        obj.insert(
+          "languages".to_string(),
+          json!([&locale_str, &geo.locale.language]),
+        );
+      }
+      if !has_latitude {
+        obj.insert("latitude".to_string(), json!(geo.latitude));
+      }
+      if !has_longitude {
+        obj.insert("longitude".to_string(), json!(geo.longitude));
+      }
+    }
   }
 
   async fn apply_runtime_fingerprint_overrides(
@@ -391,7 +509,44 @@ impl ChromiumManager {
       {
         log::warn!("Failed to inject fingerprint override script via CDP: {e}");
       }
+
+      if let Err(e) = self
+        .send_cdp_command(
+          ws_url,
+          "Runtime.evaluate",
+          json!({
+            "expression": source,
+            "returnByValue": true,
+          }),
+        )
+        .await
+      {
+        log::warn!("Failed to apply runtime fingerprint override in current page via CDP: {e}");
+      }
     }
+  }
+
+  pub async fn refresh_runtime_fingerprint_overrides_for_target(
+    &self,
+    profile: &BrowserProfile,
+    ws_url: &str,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(config) = profile.chromium_config.as_ref() else {
+      return Ok(());
+    };
+    let fingerprint = Self::stored_fingerprint_value(config);
+    if fingerprint
+      .as_object()
+      .map(|value| value.is_empty())
+      .unwrap_or(true)
+    {
+      return Ok(());
+    }
+
+    self
+      .apply_runtime_fingerprint_overrides(ws_url, profile, &fingerprint)
+      .await;
+    Ok(())
   }
 
   fn fingerprint_chromium_launch_args(
@@ -404,7 +559,7 @@ impl ChromiumManager {
 
     args.push(format!(
       "--fingerprint={}",
-      Self::stable_fingerprint_seed(profile)
+      Self::fingerprint_seed(config, profile)
     ));
 
     let platform = config
@@ -591,7 +746,7 @@ impl ChromiumManager {
       .or_else(|| profile.resolved_os().map(ToOwned::to_owned))
       .unwrap_or_else(|| Self::current_fingerprint_platform().to_string());
 
-    let seed = Self::stable_fingerprint_seed(profile);
+    let seed = Self::resolved_seed(profile, config);
     let mut fingerprint = json!({
       "seed": seed,
       "platform": os,
@@ -609,7 +764,12 @@ impl ChromiumManager {
       .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
     {
       let existing = existing.get("fingerprint").cloned().unwrap_or(existing);
-      if let (Some(target), Some(source)) = (fingerprint.as_object_mut(), existing.as_object()) {
+      if let Some(target) = fingerprint.as_object_mut() {
+        let source = if config.randomize_fingerprint_on_launch == Some(true) {
+          Self::preserved_fixed_fingerprint_fields(&existing)
+        } else {
+          existing.as_object().cloned().unwrap_or_default()
+        };
         for (key, value) in source {
           target.insert(key.clone(), value.clone());
         }
@@ -637,17 +797,7 @@ impl ChromiumManager {
 
       match geo_result {
         Ok(geo) => {
-          if let Some(obj) = fingerprint.as_object_mut() {
-            obj.insert("timezone".to_string(), json!(geo.timezone));
-            let locale_str = geo.locale.as_string();
-            obj.insert("language".to_string(), json!(&locale_str));
-            obj.insert(
-              "languages".to_string(),
-              json!([&locale_str, &geo.locale.language]),
-            );
-            obj.insert("latitude".to_string(), json!(geo.latitude));
-            obj.insert("longitude".to_string(), json!(geo.longitude));
-          }
+          Self::merge_geolocation_defaults(&mut fingerprint, &geo);
         }
         Err(e) => {
           log::warn!("fingerprint-chromium geolocation failed, using existing/default values: {e}");
@@ -1333,6 +1483,71 @@ mod tests {
     assert!(script.contains("16.0") || script.contains("16"));
     assert!(script.contains("userAgent"));
     assert!(script.contains("zh-HK"));
+    assert!(script.contains("proxyNavigator"));
+    assert!(script.contains("installNavigatorProxy"));
+  }
+
+  #[test]
+  fn test_fingerprint_launch_args_use_stored_seed() {
+    let profile = test_profile();
+    let config = super::ChromiumConfig {
+      fingerprint: Some(
+        json!({
+          "seed": 123456789u32,
+          "platform": "macos"
+        })
+        .to_string(),
+      ),
+      ..Default::default()
+    };
+
+    let args = ChromiumManager::fingerprint_chromium_launch_args(&profile, &config);
+
+    assert!(args.contains(&"--fingerprint=123456789".to_string()));
+  }
+
+  #[test]
+  fn test_fingerprint_launch_args_fall_back_to_stable_seed() {
+    let profile = test_profile();
+    let config = super::ChromiumConfig::default();
+
+    let args = ChromiumManager::fingerprint_chromium_launch_args(&profile, &config);
+    let expected = format!(
+      "--fingerprint={}",
+      ChromiumManager::stable_fingerprint_seed(&profile)
+    );
+
+    assert!(args.contains(&expected));
+  }
+
+  #[test]
+  fn test_merge_geolocation_defaults_preserves_fixed_locale_values() {
+    let mut fingerprint = json!({
+      "language": "fr-FR",
+      "languages": ["fr-FR", "fr"],
+      "timezone": "Europe/Paris",
+      "latitude": 48.8566,
+      "longitude": 2.3522
+    });
+    let geo = crate::camoufox::geolocation::Geolocation {
+      locale: crate::camoufox::geolocation::Locale {
+        language: "zh".to_string(),
+        region: Some("CN".to_string()),
+        script: None,
+      },
+      longitude: 121.4737,
+      latitude: 31.2304,
+      timezone: "Asia/Shanghai".to_string(),
+      accuracy: None,
+    };
+
+    ChromiumManager::merge_geolocation_defaults(&mut fingerprint, &geo);
+
+    assert_eq!(fingerprint["language"], "fr-FR");
+    assert_eq!(fingerprint["languages"], json!(["fr-FR", "fr"]));
+    assert_eq!(fingerprint["timezone"], "Europe/Paris");
+    assert_eq!(fingerprint["latitude"], 48.8566);
+    assert_eq!(fingerprint["longitude"], 2.3522);
   }
 }
 

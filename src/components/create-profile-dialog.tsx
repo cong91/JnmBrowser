@@ -694,7 +694,10 @@ export function CreateProfileDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="w-full max-h-[90vh] flex flex-col">
+      <DialogContent
+        aria-describedby={undefined}
+        className="w-full max-h-[90vh] flex flex-col"
+      >
         <DialogHeader className="flex-shrink-0">
           <DialogTitle>
             {currentStep === "browser-selection"
