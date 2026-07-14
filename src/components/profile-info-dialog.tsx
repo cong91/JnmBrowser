@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { FaApple, FaLinux, FaWindows } from "react-icons/fa";
 import {
   LuChevronRight,
+  LuCircle,
   LuClipboard,
   LuClipboardCheck,
   LuCookie,
@@ -72,6 +73,7 @@ interface ProfileInfoDialogProps {
   onCloneProfile?: (profile: BrowserProfile) => void;
   onDeleteProfile?: (profile: BrowserProfile) => void;
   onLaunchWithSync?: (profile: BrowserProfile) => void;
+  onLaunchWithRecord?: (profile: BrowserProfile) => void;
   crossOsUnlocked?: boolean;
   isRunning?: boolean;
   isDisabled?: boolean;
@@ -120,6 +122,7 @@ export function ProfileInfoDialog({
   onCloneProfile,
   onDeleteProfile,
   onLaunchWithSync,
+  onLaunchWithRecord,
   isRunning = false,
   isDisabled = false,
   isCrossOs = false,
@@ -284,6 +287,20 @@ export function ProfileInfoDialog({
       },
       disabled: isDisabled || isRunning,
       hidden: !isChromiumBrowser(profile.browser) || !onLaunchWithSync,
+    },
+    {
+      icon: <LuCircle className="w-4 h-4 text-destructive" />,
+      label: t("recorder.launchWithRecord"),
+      onClick: () => {
+        handleAction(() => onLaunchWithRecord?.(profile));
+      },
+      disabled: isDisabled || isRunning,
+      hidden:
+        !(
+          profile.browser === "chromium" ||
+          profile.browser === "camoufox" ||
+          isChromiumBrowser(profile.browser)
+        ) || !onLaunchWithRecord,
     },
     {
       icon: <LuCopy className="w-4 h-4" />,

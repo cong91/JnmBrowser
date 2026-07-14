@@ -1,0 +1,175 @@
+{
+  "beadId": "jnmbrowser-8bo",
+  "prdName": "action-recorder-ux",
+  "tasks": [
+    {
+      "id": "localization-1",
+      "category": "localization",
+      "description": "Add new i18n keys to all 7 locale files for the launch-with-record flow and auto-save feedback",
+      "steps": [
+        "pnpm lint:spell passes (no typos)",
+        "All 7 locale files have recorder.launchWithRecord, recorder.autoSaved, recorder.launchFailed, recorder.recordingActive keys",
+        "Keys are non-empty strings in all locales"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": [
+          "src/i18n/locales/en.json",
+          "src/i18n/locales/es.json",
+          "src/i18n/locales/fr.json",
+          "src/i18n/locales/ja.json",
+          "src/i18n/locales/pt.json",
+          "src/i18n/locales/ru.json",
+          "src/i18n/locales/zh.json"
+        ]
+      }
+    },
+    {
+      "id": "ui-1",
+      "category": "ui",
+      "description": "Add a new ActionItem to ProfileInfoDialog following the Launch with Sync pattern, with proper visibility and disabled states",
+      "steps": [
+        "ProfileInfoDialog shows Launch with Record menu item",
+        "Menu item is hidden for non-chromium/camoufox profiles",
+        "Menu item is disabled when isRunning || isDisabled",
+        "Menu item uses LuCircle icon and recorder.launchWithRecord label",
+        "pnpm lint passes"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["localization-1"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": ["src/components/profile-info-dialog.tsx"]
+      }
+    },
+    {
+      "id": "integration-1",
+      "category": "integration",
+      "description": "Add onLaunchWithRecord prop to ProfilesDataTable and wire it to launch profile + start recording sequence",
+      "steps": [
+        "Clicking Launch with Record launches the profile",
+        "Recording starts automatically after profile is running",
+        "Success toast shows recorder.started message",
+        "Error toast shows recorder.launchFailed if launch or recording fails",
+        "pnpm lint passes"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["ui-1"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": ["src/app/page.tsx", "src/components/profile-data-table.tsx"]
+      }
+    },
+    {
+      "id": "integration-2",
+      "category": "integration",
+      "description": "Modify handleKillProfile in page.tsx to check for active recording and call stop_recording before killing the browser",
+      "steps": [
+        "Killing a browser while recording is active saves the recording",
+        "Success toast shows recorder.autoSaved message with event count",
+        "Recording appears in list_recordings after kill",
+        "pnpm lint passes"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["localization-1"],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": ["src/app/page.tsx"]
+      }
+    },
+    {
+      "id": "ui-2",
+      "category": "ui",
+      "description": "Add a persistent badge or status indicator visible when recording is active, positioned prominently in the profile list",
+      "steps": [
+        "REC badge is visible when getProfileRecorderInfo(profile.id) returns a session",
+        "Badge uses recorder.recBadge label",
+        "Badge is styled with red/destructive color",
+        "pnpm lint passes"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": ["src/components/profile-data-table.tsx"]
+      }
+    },
+    {
+      "id": "testing-1",
+      "category": "testing",
+      "description": "Create src-tauri/tests/recorder_integration.rs to test the browser kill + recording auto-save flow",
+      "steps": [
+        "Test launches chromium profile",
+        "Test starts recording",
+        "Test kills browser",
+        "Test verifies recording was saved to disk",
+        "pnpm test passes",
+        "cargo test --test recorder_integration passes"
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["integration-2"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": ["src-tauri/tests/recorder_integration.rs"]
+      }
+    },
+    {
+      "id": "verification-1",
+      "category": "verification",
+      "description": "Manual verification of the complete launch-with-record and auto-save-on-kill flows",
+      "steps": [
+        "Launch chromium profile via Launch with Record menu",
+        "Perform browser actions (navigate, click, type)",
+        "Kill browser",
+        "Open RecorderDialog and verify recording appears",
+        "Export recording as MCP recipe and verify it contains the performed actions",
+        "Replay recording on another profile and verify actions are reproduced"
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["integration-1", "integration-2", "ui-2", "testing-1"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": []
+      }
+    }
+  ],
+  "context": {
+    "patterns": [
+      "Launch with Sync pattern in profile-info-dialog.tsx:279-287",
+      "handleKillProfile in page.tsx:575-592",
+      "useRecorderSessions hook provides getProfileRecorderInfo",
+      "RecorderManager singleton in recorder.rs:85",
+      "ActionItem interface in profile-info-dialog.tsx:231-240"
+    ],
+    "keyFiles": [
+      "src/components/profile-info-dialog.tsx",
+      "src/app/page.tsx",
+      "src/components/profile-data-table.tsx",
+      "src/i18n/locales/en.json",
+      "src-tauri/src/recorder.rs",
+      "src-tauri/src/browser_runner.rs"
+    ],
+    "nonGoals": [
+      "Bulk recording controls",
+      "Recording editing/trimming UI",
+      "Cloud sync for recordings",
+      "Recording sharing/export formats beyond MCP recipe"
+    ]
+  },
+  "beadMetadata": {
+    "depends_on": [],
+    "parallel": true,
+    "conflicts_with": [],
+    "blocks": [],
+    "estimated_hours": 4
+  }
+}

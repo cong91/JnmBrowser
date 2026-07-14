@@ -26,6 +26,7 @@ import { ProfileSelectorDialog } from "@/components/profile-selector-dialog";
 import { ProfileSyncDialog } from "@/components/profile-sync-dialog";
 import { ProxyAssignmentDialog } from "@/components/proxy-assignment-dialog";
 import { ProxyManagementDialog } from "@/components/proxy-management-dialog";
+import { RecorderDialog } from "@/components/recorder-dialog";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { SyncAllDialog } from "@/components/sync-all-dialog";
 import { SyncConfigDialog } from "@/components/sync-config-dialog";
@@ -36,6 +37,7 @@ import type { PermissionType } from "@/hooks/use-permissions";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useProfileEvents } from "@/hooks/use-profile-events";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
+import { useRecorderSessions } from "@/hooks/use-recorder-session";
 import { useSyncSessions } from "@/hooks/use-sync-session";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { isChromiumBrowser } from "@/lib/browser-utils";
@@ -50,6 +52,8 @@ import type {
   BrowserProfile,
   CamoufoxConfig,
   ChromiumConfig,
+  RecorderSessionInfo,
+  Recording,
   SyncSettings,
 } from "@/types";
 
@@ -89,6 +93,10 @@ export default function Home() {
   const { getProfileSyncInfo } = useSyncSessions();
   const [syncLeaderProfile, setSyncLeaderProfile] =
     useState<BrowserProfile | null>(null);
+
+  // Action recorder sessions
+  const { getProfileRecorderInfo } = useRecorderSessions();
+  const [recorderDialogOpen, setRecorderDialogOpen] = useState(false);
 
   // Cloud auth for cross-OS unlock
   const crossOsUnlocked = true;
@@ -568,6 +576,28 @@ export default function Home() {
     async (profile: BrowserProfile) => {
       console.log("Starting kill for profile:", profile.name);
 
+      // Auto-save any active recording before killing the browser so the
+      // capture is not silently lost when the CDP/Playwright session dies.
+      const activeRecording = getProfileRecorderInfo(profile.id);
+      if (activeRecording) {
+        try {
+          const recording = await invoke<Recording>("stop_recording", {
+            sessionId: activeRecording.session.id,
+          });
+          showSuccessToast(t("recorder.autoSaved"), {
+            description: t("recorder.eventCount", {
+              count: recording.header.event_count,
+            }),
+          });
+        } catch (error) {
+          console.error("Failed to auto-save recording before kill:", error);
+          showErrorToast(t("recorder.stopFailed"), {
+            description: error instanceof Error ? error.message : String(error),
+          });
+          // Continue with kill even if save fails.
+        }
+      }
+
       try {
         await invoke("kill_browser_profile", { profile });
         console.log("Successfully killed profile:", profile.name);
@@ -580,7 +610,7 @@ export default function Home() {
         throw err;
       }
     },
-    [t],
+    [getProfileRecorderInfo, t],
   );
 
   const handleDeleteSelectedProfiles = useCallback(
@@ -731,6 +761,122 @@ export default function Home() {
       }
     },
     [t],
+  );
+
+  const handleToggleRecording = useCallback(
+    async (profile: BrowserProfile) => {
+      const active = getProfileRecorderInfo(profile.id);
+      try {
+        if (active) {
+          const recording = await invoke<Recording>("stop_recording", {
+            sessionId: active.session.id,
+          });
+          showSuccessToast(t("recorder.stopped"), {
+            description: t("recorder.eventCount", {
+              count: recording.header.event_count,
+            }),
+          });
+        } else {
+          if (
+            profile.browser !== "chromium" &&
+            profile.browser !== "camoufox"
+          ) {
+            showErrorToast(t("recorder.unsupportedBrowser"));
+            return;
+          }
+          await invoke<RecorderSessionInfo>("start_recording", {
+            profileId: profile.id,
+          });
+          showSuccessToast(t("recorder.started"));
+        }
+      } catch (error) {
+        console.error("Failed to toggle recording:", error);
+        showErrorToast(
+          active ? t("recorder.stopFailed") : t("recorder.startFailed"),
+          {
+            description: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+    },
+    [getProfileRecorderInfo, t],
+  );
+
+  const handleLaunchWithRecord = useCallback(
+    async (profile: BrowserProfile) => {
+      if (profile.browser !== "chromium" && profile.browser !== "camoufox") {
+        showErrorToast(t("recorder.unsupportedBrowser"));
+        return;
+      }
+
+      let unlistenRunning: (() => void) | undefined;
+      let runningTimeout: number | undefined;
+      let settled = false;
+
+      try {
+        // Wait for the backend to confirm the profile is running before arming
+        // the recorder (start_recording requires a live CDP/Playwright session).
+        const runningPromise = new Promise<void>((resolve, reject) => {
+          runningTimeout = window.setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              unlistenRunning?.();
+              reject(new Error("Timed out waiting for browser to start"));
+            }
+          }, 60_000);
+
+          void listen<{ id: string; is_running: boolean }>(
+            "profile-running-changed",
+            (event) => {
+              if (
+                event.payload.id === profile.id &&
+                event.payload.is_running &&
+                !settled
+              ) {
+                settled = true;
+                if (runningTimeout !== undefined) {
+                  window.clearTimeout(runningTimeout);
+                }
+                unlistenRunning?.();
+                resolve();
+              }
+            },
+          ).then((fn) => {
+            unlistenRunning = fn;
+          });
+        });
+
+        // If the profile is already running (race / relaunch), start recording
+        // immediately after launchProfile returns without waiting for an event.
+        const wasAlreadyRunning = runningProfiles.has(profile.id);
+        await launchProfile(profile);
+        if (!wasAlreadyRunning) {
+          await runningPromise;
+        } else if (!settled) {
+          settled = true;
+          if (runningTimeout !== undefined) {
+            window.clearTimeout(runningTimeout);
+          }
+          unlistenRunning?.();
+        }
+
+        await invoke<RecorderSessionInfo>("start_recording", {
+          profileId: profile.id,
+        });
+        showSuccessToast(t("recorder.started"));
+      } catch (error) {
+        console.error("Failed to launch with record:", error);
+        showErrorToast(t("recorder.launchFailed"), {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (runningTimeout !== undefined) {
+          window.clearTimeout(runningTimeout);
+        }
+        unlistenRunning?.();
+      }
+    },
+    [launchProfile, runningProfiles, t],
   );
 
   useEffect(() => {
@@ -983,6 +1129,16 @@ export default function Home() {
             onLaunchWithSync={(profile) => {
               setSyncLeaderProfile(profile);
             }}
+            onLaunchWithRecord={(profile) => {
+              void handleLaunchWithRecord(profile);
+            }}
+            getProfileRecorderInfo={getProfileRecorderInfo}
+            onToggleRecording={(profile) => {
+              void handleToggleRecording(profile);
+            }}
+            onOpenRecordings={() => {
+              setRecorderDialogOpen(true);
+            }}
           />
         </div>
       </main>
@@ -1220,6 +1376,15 @@ export default function Home() {
           setSyncLeaderProfile(null);
         }}
         leaderProfile={syncLeaderProfile}
+        allProfiles={profiles}
+        runningProfiles={runningProfiles}
+      />
+
+      <RecorderDialog
+        isOpen={recorderDialogOpen}
+        onClose={() => {
+          setRecorderDialogOpen(false);
+        }}
         allProfiles={profiles}
         runningProfiles={runningProfiles}
       />

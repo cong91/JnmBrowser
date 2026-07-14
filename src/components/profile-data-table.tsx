@@ -20,10 +20,12 @@ import {
   LuCheck,
   LuChevronDown,
   LuChevronUp,
+  LuCircle,
   LuCookie,
   LuInfo,
   LuLock,
   LuPuzzle,
+  LuSquare,
   LuTrash2,
   LuTriangleAlert,
   LuUsers,
@@ -85,6 +87,7 @@ import type {
   BrowserProfile,
   LocationItem,
   ProxyCheckResult,
+  RecorderSessionInfo,
   StoredProxy,
   SyncSessionInfo,
   TrafficSnapshot,
@@ -218,6 +221,16 @@ interface TableMeta {
       }
     | undefined;
   onLaunchWithSync: (profile: BrowserProfile) => void;
+  onLaunchWithRecord: (profile: BrowserProfile) => void;
+
+  // Action recorder
+  getProfileRecorderInfo: (profileId: string) =>
+    | {
+        session: RecorderSessionInfo;
+      }
+    | undefined;
+  onToggleRecording: (profile: BrowserProfile) => void;
+  onOpenRecordings?: () => void;
 }
 
 interface SyncStatusDot {
@@ -854,6 +867,14 @@ interface ProfilesDataTableProps {
       }
     | undefined;
   onLaunchWithSync?: (profile: BrowserProfile) => void;
+  onLaunchWithRecord?: (profile: BrowserProfile) => void;
+  getProfileRecorderInfo?: (profileId: string) =>
+    | {
+        session: RecorderSessionInfo;
+      }
+    | undefined;
+  onToggleRecording?: (profile: BrowserProfile) => void;
+  onOpenRecordings?: () => void;
 }
 
 export function ProfilesDataTable({
@@ -883,6 +904,10 @@ export function ProfilesDataTable({
   syncUnlocked = false,
   getProfileSyncInfo,
   onLaunchWithSync,
+  onLaunchWithRecord,
+  getProfileRecorderInfo,
+  onToggleRecording,
+  onOpenRecordings,
 }: ProfilesDataTableProps) {
   const { t } = useTranslation();
   const { getTableSorting, updateSorting, isLoaded } = useTableSorting();
@@ -1604,6 +1629,20 @@ export function ProfilesDataTable({
         (() => {
           /* empty */
         }),
+      onLaunchWithRecord:
+        onLaunchWithRecord ??
+        (() => {
+          /* empty */
+        }),
+
+      // Action recorder
+      getProfileRecorderInfo: getProfileRecorderInfo ?? (() => undefined),
+      onToggleRecording:
+        onToggleRecording ??
+        (() => {
+          /* empty */
+        }),
+      onOpenRecordings,
     }),
     [
       t,
@@ -1659,6 +1698,10 @@ export function ProfilesDataTable({
       getLockInfo,
       getProfileSyncInfo,
       onLaunchWithSync,
+      onLaunchWithRecord,
+      getProfileRecorderInfo,
+      onToggleRecording,
+      onOpenRecordings,
     ],
   );
 
@@ -1906,6 +1949,11 @@ export function ProfilesDataTable({
           const isLeader = syncInfo?.isLeader === true;
           const isFollower = syncInfo?.isLeader === false;
           const isDesynced = isFollower && syncInfo.failedAtUrl != null;
+          const recorderInfo = meta.getProfileRecorderInfo(profile.id);
+          const isRecording = recorderInfo != null;
+          const canRecord =
+            isRunning &&
+            (profile.browser === "chromium" || profile.browser === "camoufox");
           const stopTooltip = isLeader
             ? meta.t("profiles.synchronizer.stopLeader")
             : isFollower
@@ -1958,6 +2006,36 @@ export function ProfilesDataTable({
                     {meta.t("profiles.synchronizer.desyncedTooltip", {
                       url: syncInfo?.failedAtUrl ?? "",
                     })}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {isRecording && (
+                <Badge variant="destructive" className="h-5 px-1.5 text-[10px]">
+                  {meta.t("recorder.recBadge")}
+                </Badge>
+              )}
+              {canRecord && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <RippleButton
+                        variant={isRecording ? "destructive" : "outline"}
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        onClick={() => meta.onToggleRecording(profile)}
+                      >
+                        {isRecording ? (
+                          <LuSquare className="h-3.5 w-3.5" />
+                        ) : (
+                          <LuCircle className="h-3.5 w-3.5 text-destructive" />
+                        )}
+                      </RippleButton>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {isRecording
+                      ? meta.t("recorder.stopRecording")
+                      : meta.t("recorder.record")}
                   </TooltipContent>
                 </Tooltip>
               )}
@@ -2098,6 +2176,9 @@ export function ProfilesDataTable({
           const lockedEmail = meta.getProfileLockEmail(profile.id);
           const isLocked = meta.isProfileLockedByAnother(profile.id);
 
+          const isRecordingName =
+            meta.getProfileRecorderInfo(profile.id) != null;
+
           return (
             <div className="flex items-center gap-1">
               <button
@@ -2126,6 +2207,23 @@ export function ProfilesDataTable({
               >
                 {display}
               </button>
+              {isRecordingName && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <Badge
+                        variant="destructive"
+                        className="h-5 px-1.5 text-[10px]"
+                      >
+                        {meta.t("recorder.recBadge")}
+                      </Badge>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {meta.t("recorder.recordingActive")}
+                  </TooltipContent>
+                </Tooltip>
+              )}
               {isLocked && (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -2725,6 +2823,7 @@ export function ProfilesDataTable({
               }}
               onCloneProfile={onCloneProfile}
               onLaunchWithSync={onLaunchWithSync}
+              onLaunchWithRecord={onLaunchWithRecord}
               onDeleteProfile={(profile) => {
                 setProfileForInfoDialog(null);
                 setProfileToDelete(profile);
@@ -2773,6 +2872,15 @@ export function ProfilesDataTable({
             size="icon"
           >
             <LuCookie />
+          </DataTableActionBarAction>
+        )}
+        {onOpenRecordings && (
+          <DataTableActionBarAction
+            tooltip={t("recorder.manage")}
+            onClick={onOpenRecordings}
+            size="icon"
+          >
+            <LuCircle className="text-destructive" />
           </DataTableActionBarAction>
         )}
         {onBulkDelete && (
