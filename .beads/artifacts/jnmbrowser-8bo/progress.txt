@@ -23,3 +23,12 @@ Started: 2026-07-14
 - ui-2: REC badge + tooltip on profile name column
 - integration-1: handleLaunchWithRecord waits for profile-running-changed then start_recording
 - integration-2: handleKillProfile auto-saves active recording before kill
+
+### 2026-07-14 11:21 UTC Review fixes + verification
+
+- Fixed launch-with-record race: await listen() before launchProfile
+- launchProfile returns boolean; cancel resize warning is non-error
+- Frontend kill auto-save has 5s timeout
+- Backend kill_browser_profile calls RecorderManager::stop_for_profile
+- Gates: lint:js/rust/spell pass; recorder_integration 3/3; recorder unit 18/18
+- Commits: 0c73392, 405a78f, plus review-fix commit

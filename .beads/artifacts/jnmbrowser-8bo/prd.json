@@ -113,7 +113,7 @@
         "pnpm test passes",
         "cargo test --test recorder_integration passes"
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["integration-2"],
         "parallel": false,
@@ -133,7 +133,7 @@
         "Export recording as MCP recipe and verify it contains the performed actions",
         "Replay recording on another profile and verify actions are reproduced"
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["integration-1", "integration-2", "ui-2", "testing-1"],
         "parallel": false,
