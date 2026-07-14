@@ -2524,6 +2524,19 @@ pub async fn kill_browser_profile(
     profile.id
   );
 
+  // Flush any active action recording for this profile before tearing down the
+  // browser process so kill paths that bypass the frontend still persist data.
+  let saved = crate::recorder::RecorderManager::instance()
+    .stop_for_profile(&app_handle, &profile.id.to_string())
+    .await;
+  if !saved.is_empty() {
+    log::info!(
+      "Auto-saved {} recording(s) for profile {} before kill",
+      saved.len(),
+      profile.id
+    );
+  }
+
   let browser_runner = BrowserRunner::instance();
 
   match browser_runner

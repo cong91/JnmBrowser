@@ -476,7 +476,7 @@ export default function Home() {
   );
 
   const launchProfile = useCallback(
-    async (profile: BrowserProfile) => {
+    async (profile: BrowserProfile): Promise<boolean> => {
       console.log("Starting launch for profile:", profile.name);
 
       // Show one-time warning about window resizing for fingerprinted browsers
@@ -495,7 +495,7 @@ export default function Home() {
               setWindowResizeWarningOpen(true);
             });
             if (!proceed) {
-              return;
+              return false;
             }
           }
         } catch (error) {
@@ -508,6 +508,7 @@ export default function Home() {
           profile,
         });
         console.log("Successfully launched profile:", result.name);
+        return true;
       } catch (err: unknown) {
         console.error("Failed to launch browser:", err);
         const errorMessage = err instanceof Error ? err.message : String(err);
@@ -576,14 +577,22 @@ export default function Home() {
     async (profile: BrowserProfile) => {
       console.log("Starting kill for profile:", profile.name);
 
-      // Auto-save any active recording before killing the browser so the
-      // capture is not silently lost when the CDP/Playwright session dies.
+      // Best-effort UI feedback for auto-save. Backend kill_browser_profile also
+      // flushes recordings so non-UI kill paths are covered.
       const activeRecording = getProfileRecorderInfo(profile.id);
       if (activeRecording) {
         try {
-          const recording = await invoke<Recording>("stop_recording", {
-            sessionId: activeRecording.session.id,
-          });
+          const recording = await Promise.race([
+            invoke<Recording>("stop_recording", {
+              sessionId: activeRecording.session.id,
+            }),
+            new Promise<never>((_, reject) => {
+              window.setTimeout(
+                () => reject(new Error("Timed out saving recording")),
+                5_000,
+              );
+            }),
+          ]);
           showSuccessToast(t("recorder.autoSaved"), {
             description: t("recorder.eventCount", {
               count: recording.header.event_count,
@@ -594,7 +603,7 @@ export default function Home() {
           showErrorToast(t("recorder.stopFailed"), {
             description: error instanceof Error ? error.message : String(error),
           });
-          // Continue with kill even if save fails.
+          // Continue with kill even if save fails / times out.
         }
       }
 
@@ -814,42 +823,48 @@ export default function Home() {
       let settled = false;
 
       try {
-        // Wait for the backend to confirm the profile is running before arming
-        // the recorder (start_recording requires a live CDP/Playwright session).
+        let resolveRunning!: () => void;
+        let rejectRunning!: (error: unknown) => void;
         const runningPromise = new Promise<void>((resolve, reject) => {
-          runningTimeout = window.setTimeout(() => {
-            if (!settled) {
-              settled = true;
-              unlistenRunning?.();
-              reject(new Error("Timed out waiting for browser to start"));
-            }
-          }, 60_000);
-
-          void listen<{ id: string; is_running: boolean }>(
-            "profile-running-changed",
-            (event) => {
-              if (
-                event.payload.id === profile.id &&
-                event.payload.is_running &&
-                !settled
-              ) {
-                settled = true;
-                if (runningTimeout !== undefined) {
-                  window.clearTimeout(runningTimeout);
-                }
-                unlistenRunning?.();
-                resolve();
-              }
-            },
-          ).then((fn) => {
-            unlistenRunning = fn;
-          });
+          resolveRunning = resolve;
+          rejectRunning = reject;
         });
 
-        // If the profile is already running (race / relaunch), start recording
-        // immediately after launchProfile returns without waiting for an event.
+        runningTimeout = window.setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            unlistenRunning?.();
+            rejectRunning(new Error("Timed out waiting for browser to start"));
+          }
+        }, 60_000);
+
+        // Fully await listener registration before launching so we cannot miss
+        // the profile-running-changed event.
+        unlistenRunning = await listen<{ id: string; is_running: boolean }>(
+          "profile-running-changed",
+          (event) => {
+            if (
+              event.payload.id === profile.id &&
+              event.payload.is_running &&
+              !settled
+            ) {
+              settled = true;
+              if (runningTimeout !== undefined) {
+                window.clearTimeout(runningTimeout);
+              }
+              unlistenRunning?.();
+              resolveRunning();
+            }
+          },
+        );
+
         const wasAlreadyRunning = runningProfiles.has(profile.id);
-        await launchProfile(profile);
+        const launched = await launchProfile(profile);
+        if (!launched) {
+          // User cancelled the window-resize warning — not a failure.
+          return;
+        }
+
         if (!wasAlreadyRunning) {
           await runningPromise;
         } else if (!settled) {
@@ -1100,7 +1115,9 @@ export default function Home() {
           />
           <ProfilesDataTable
             profiles={filteredProfiles}
-            onLaunchProfile={launchProfile}
+            onLaunchProfile={(profile) => {
+              void launchProfile(profile);
+            }}
             onKillProfile={handleKillProfile}
             onCloneProfile={handleCloneProfile}
             onDeleteProfile={handleDeleteProfile}

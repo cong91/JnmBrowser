@@ -199,6 +199,32 @@ impl RecorderManager {
     Ok(recording)
   }
 
+  /// Stop and persist every active recording for a profile (if any).
+  /// Used by browser kill paths so recordings are not silently lost.
+  pub async fn stop_for_profile(
+    &self,
+    app_handle: &tauri::AppHandle,
+    profile_id: &str,
+  ) -> Vec<Recording> {
+    let session_ids: Vec<String> = {
+      let inner = self.inner.lock().await;
+      inner
+        .sessions
+        .values()
+        .filter(|s| s.profile_id == profile_id)
+        .map(|s| s.id.clone())
+        .collect()
+    };
+    let mut saved = Vec::new();
+    for session_id in session_ids {
+      match self.stop_recording(app_handle.clone(), &session_id).await {
+        Ok(recording) => saved.push(recording),
+        Err(e) => log::warn!("Failed to auto-save recording {session_id}: {e}"),
+      }
+    }
+    saved
+  }
+
   /// Stop all active recordings (e.g. on app shutdown). Does not emit per-session
   /// events; used for graceful cleanup.
   #[allow(dead_code)]
