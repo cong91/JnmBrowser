@@ -1,0 +1,34 @@
+# Progress Log
+
+Bead: jnmbrowser-8bo
+Started: 2026-07-14
+
+## Codebase Patterns
+
+- **Launch with Sync pattern**: `profile-info-dialog.tsx:279-287` shows exact structure for menu items with icon, label, onClick, disabled, hidden states
+- **handleKillProfile**: `page.tsx:575-592` calls `kill_browser_profile` without checking recording state
+- **useRecorderSessions**: Hook provides `getProfileRecorderInfo(profileId)` to check active recording sessions
+- **RecorderManager singleton**: `recorder.rs:85` manages active recording sessions
+- **ActionItem interface**: `profile-info-dialog.tsx:231-240` defines menu item structure
+- **i18n pattern**: `en.json:1612-1647` shows recorder.* keys with interpolation like `{{count}}`
+
+---
+
+<!-- Task logs below - APPEND ONLY -->
+
+### 2026-07-14 10:57 UTC Wave 1-3 implementation
+
+- localization-1: added recorder.launchWithRecord/autoSaved/launchFailed/recordingActive to 7 locales
+- ui-1: Launch with Record menu item in ProfileInfoDialog
+- ui-2: REC badge + tooltip on profile name column
+- integration-1: handleLaunchWithRecord waits for profile-running-changed then start_recording
+- integration-2: handleKillProfile auto-saves active recording before kill
+
+### 2026-07-14 11:21 UTC Review fixes + verification
+
+- Fixed launch-with-record race: await listen() before launchProfile
+- launchProfile returns boolean; cancel resize warning is non-error
+- Frontend kill auto-save has 5s timeout
+- Backend kill_browser_profile calls RecorderManager::stop_for_profile
+- Gates: lint:js/rust/spell pass; recorder_integration 3/3; recorder unit 18/18
+- Commits: 0c73392, 405a78f, plus review-fix commit

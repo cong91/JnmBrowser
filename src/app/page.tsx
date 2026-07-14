@@ -26,6 +26,7 @@ import { ProfileSelectorDialog } from "@/components/profile-selector-dialog";
 import { ProfileSyncDialog } from "@/components/profile-sync-dialog";
 import { ProxyAssignmentDialog } from "@/components/proxy-assignment-dialog";
 import { ProxyManagementDialog } from "@/components/proxy-management-dialog";
+import { RecorderDialog } from "@/components/recorder-dialog";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { SyncAllDialog } from "@/components/sync-all-dialog";
 import { SyncConfigDialog } from "@/components/sync-config-dialog";
@@ -36,6 +37,7 @@ import type { PermissionType } from "@/hooks/use-permissions";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useProfileEvents } from "@/hooks/use-profile-events";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
+import { useRecorderSessions } from "@/hooks/use-recorder-session";
 import { useSyncSessions } from "@/hooks/use-sync-session";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { isChromiumBrowser } from "@/lib/browser-utils";
@@ -50,6 +52,8 @@ import type {
   BrowserProfile,
   CamoufoxConfig,
   ChromiumConfig,
+  RecorderSessionInfo,
+  Recording,
   SyncSettings,
 } from "@/types";
 
@@ -89,6 +93,10 @@ export default function Home() {
   const { getProfileSyncInfo } = useSyncSessions();
   const [syncLeaderProfile, setSyncLeaderProfile] =
     useState<BrowserProfile | null>(null);
+
+  // Action recorder sessions
+  const { getProfileRecorderInfo } = useRecorderSessions();
+  const [recorderDialogOpen, setRecorderDialogOpen] = useState(false);
 
   // Cloud auth for cross-OS unlock
   const crossOsUnlocked = true;
@@ -468,7 +476,7 @@ export default function Home() {
   );
 
   const launchProfile = useCallback(
-    async (profile: BrowserProfile) => {
+    async (profile: BrowserProfile): Promise<boolean> => {
       console.log("Starting launch for profile:", profile.name);
 
       // Show one-time warning about window resizing for fingerprinted browsers
@@ -487,7 +495,7 @@ export default function Home() {
               setWindowResizeWarningOpen(true);
             });
             if (!proceed) {
-              return;
+              return false;
             }
           }
         } catch (error) {
@@ -500,6 +508,7 @@ export default function Home() {
           profile,
         });
         console.log("Successfully launched profile:", result.name);
+        return true;
       } catch (err: unknown) {
         console.error("Failed to launch browser:", err);
         const errorMessage = err instanceof Error ? err.message : String(err);
@@ -568,6 +577,36 @@ export default function Home() {
     async (profile: BrowserProfile) => {
       console.log("Starting kill for profile:", profile.name);
 
+      // Best-effort UI feedback for auto-save. Backend kill_browser_profile also
+      // flushes recordings so non-UI kill paths are covered.
+      const activeRecording = getProfileRecorderInfo(profile.id);
+      if (activeRecording) {
+        try {
+          const recording = await Promise.race([
+            invoke<Recording>("stop_recording", {
+              sessionId: activeRecording.session.id,
+            }),
+            new Promise<never>((_, reject) => {
+              window.setTimeout(
+                () => reject(new Error("Timed out saving recording")),
+                5_000,
+              );
+            }),
+          ]);
+          showSuccessToast(t("recorder.autoSaved"), {
+            description: t("recorder.eventCount", {
+              count: recording.header.event_count,
+            }),
+          });
+        } catch (error) {
+          console.error("Failed to auto-save recording before kill:", error);
+          showErrorToast(t("recorder.stopFailed"), {
+            description: error instanceof Error ? error.message : String(error),
+          });
+          // Continue with kill even if save fails / times out.
+        }
+      }
+
       try {
         await invoke("kill_browser_profile", { profile });
         console.log("Successfully killed profile:", profile.name);
@@ -580,7 +619,7 @@ export default function Home() {
         throw err;
       }
     },
-    [t],
+    [getProfileRecorderInfo, t],
   );
 
   const handleDeleteSelectedProfiles = useCallback(
@@ -731,6 +770,128 @@ export default function Home() {
       }
     },
     [t],
+  );
+
+  const handleToggleRecording = useCallback(
+    async (profile: BrowserProfile) => {
+      const active = getProfileRecorderInfo(profile.id);
+      try {
+        if (active) {
+          const recording = await invoke<Recording>("stop_recording", {
+            sessionId: active.session.id,
+          });
+          showSuccessToast(t("recorder.stopped"), {
+            description: t("recorder.eventCount", {
+              count: recording.header.event_count,
+            }),
+          });
+        } else {
+          if (
+            profile.browser !== "chromium" &&
+            profile.browser !== "camoufox"
+          ) {
+            showErrorToast(t("recorder.unsupportedBrowser"));
+            return;
+          }
+          await invoke<RecorderSessionInfo>("start_recording", {
+            profileId: profile.id,
+          });
+          showSuccessToast(t("recorder.started"));
+        }
+      } catch (error) {
+        console.error("Failed to toggle recording:", error);
+        showErrorToast(
+          active ? t("recorder.stopFailed") : t("recorder.startFailed"),
+          {
+            description: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+    },
+    [getProfileRecorderInfo, t],
+  );
+
+  const handleLaunchWithRecord = useCallback(
+    async (profile: BrowserProfile) => {
+      if (profile.browser !== "chromium" && profile.browser !== "camoufox") {
+        showErrorToast(t("recorder.unsupportedBrowser"));
+        return;
+      }
+
+      let unlistenRunning: (() => void) | undefined;
+      let runningTimeout: number | undefined;
+      let settled = false;
+
+      try {
+        let resolveRunning!: () => void;
+        let rejectRunning!: (error: unknown) => void;
+        const runningPromise = new Promise<void>((resolve, reject) => {
+          resolveRunning = resolve;
+          rejectRunning = reject;
+        });
+
+        runningTimeout = window.setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            unlistenRunning?.();
+            rejectRunning(new Error("Timed out waiting for browser to start"));
+          }
+        }, 60_000);
+
+        // Fully await listener registration before launching so we cannot miss
+        // the profile-running-changed event.
+        unlistenRunning = await listen<{ id: string; is_running: boolean }>(
+          "profile-running-changed",
+          (event) => {
+            if (
+              event.payload.id === profile.id &&
+              event.payload.is_running &&
+              !settled
+            ) {
+              settled = true;
+              if (runningTimeout !== undefined) {
+                window.clearTimeout(runningTimeout);
+              }
+              unlistenRunning?.();
+              resolveRunning();
+            }
+          },
+        );
+
+        const wasAlreadyRunning = runningProfiles.has(profile.id);
+        const launched = await launchProfile(profile);
+        if (!launched) {
+          // User cancelled the window-resize warning — not a failure.
+          return;
+        }
+
+        if (!wasAlreadyRunning) {
+          await runningPromise;
+        } else if (!settled) {
+          settled = true;
+          if (runningTimeout !== undefined) {
+            window.clearTimeout(runningTimeout);
+          }
+          unlistenRunning?.();
+        }
+
+        await invoke<RecorderSessionInfo>("start_recording", {
+          profileId: profile.id,
+        });
+        showSuccessToast(t("recorder.started"));
+      } catch (error) {
+        console.error("Failed to launch with record:", error);
+        showErrorToast(t("recorder.launchFailed"), {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (runningTimeout !== undefined) {
+          window.clearTimeout(runningTimeout);
+        }
+        unlistenRunning?.();
+      }
+    },
+    [launchProfile, runningProfiles, t],
   );
 
   useEffect(() => {
@@ -954,7 +1115,9 @@ export default function Home() {
           />
           <ProfilesDataTable
             profiles={filteredProfiles}
-            onLaunchProfile={launchProfile}
+            onLaunchProfile={(profile) => {
+              void launchProfile(profile);
+            }}
             onKillProfile={handleKillProfile}
             onCloneProfile={handleCloneProfile}
             onDeleteProfile={handleDeleteProfile}
@@ -982,6 +1145,16 @@ export default function Home() {
             getProfileSyncInfo={getProfileSyncInfo}
             onLaunchWithSync={(profile) => {
               setSyncLeaderProfile(profile);
+            }}
+            onLaunchWithRecord={(profile) => {
+              void handleLaunchWithRecord(profile);
+            }}
+            getProfileRecorderInfo={getProfileRecorderInfo}
+            onToggleRecording={(profile) => {
+              void handleToggleRecording(profile);
+            }}
+            onOpenRecordings={() => {
+              setRecorderDialogOpen(true);
             }}
           />
         </div>
@@ -1220,6 +1393,15 @@ export default function Home() {
           setSyncLeaderProfile(null);
         }}
         leaderProfile={syncLeaderProfile}
+        allProfiles={profiles}
+        runningProfiles={runningProfiles}
+      />
+
+      <RecorderDialog
+        isOpen={recorderDialogOpen}
+        onClose={() => {
+          setRecorderDialogOpen(false);
+        }}
         allProfiles={profiles}
         runningProfiles={runningProfiles}
       />

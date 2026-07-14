@@ -39,6 +39,7 @@ mod proxy_manager;
 pub mod proxy_runner;
 pub mod proxy_server;
 pub mod proxy_storage;
+pub mod recorder;
 mod settings_manager;
 pub mod sync;
 mod synchronizer;
@@ -2293,6 +2294,15 @@ pub fn run() {
       synchronizer::stop_sync_session,
       synchronizer::remove_sync_follower,
       synchronizer::get_sync_sessions,
+      // Action recorder commands
+      recorder::commands::start_recording,
+      recorder::commands::stop_recording,
+      recorder::commands::get_recorder_sessions,
+      recorder::commands::list_recordings,
+      recorder::commands::get_recording,
+      recorder::commands::delete_recording,
+      recorder::commands::export_recording_as_recipe,
+      recorder::commands::replay_recording,
       // DNS blocklist commands
       dns_blocklist::get_dns_blocklist_cache_status,
       dns_blocklist::refresh_dns_blocklists,
@@ -2360,6 +2370,8 @@ mod tests {
       "ensure_active_browsers_downloaded",
       "handle_url_open",
       "cloud_get_proxy_usage",
+      // Action recorder: full recording payload is used by MCP / future UI
+      "get_recording",
     ];
 
     // Extract command names from the generate_handler! macro in this file

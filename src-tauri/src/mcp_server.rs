@@ -5573,6 +5573,87 @@ impl McpServer {
           "required": ["session_id", "follower_profile_id"]
         }),
       },
+      // Action recorder tools
+      McpTool {
+        name: "start_action_recording".to_string(),
+        description: "Start recording user interactions on a running Chromium or Camoufox profile. Events are captured via an injected content script and buffered until stop_action_recording is called.".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": {
+            "profile_id": {
+              "type": "string",
+              "description": "UUID of a running Chromium or Camoufox profile"
+            }
+          },
+          "required": ["profile_id"]
+        }),
+      },
+      McpTool {
+        name: "stop_action_recording".to_string(),
+        description: "Stop an active action recording session and persist the captured event stream to disk.".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "description": "Recording session id returned by start_action_recording"
+            }
+          },
+          "required": ["session_id"]
+        }),
+      },
+      McpTool {
+        name: "get_recorded_events".to_string(),
+        description: "List active action-recording sessions (in-progress only).".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": {}
+        }),
+      },
+      McpTool {
+        name: "list_recordings".to_string(),
+        description: "List saved action recordings stored on disk (summaries only).".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": {}
+        }),
+      },
+      McpTool {
+        name: "export_recording_as_recipe".to_string(),
+        description: "Export a saved action recording as an MCP recipe JSON that can be executed with run_recipe / run_batch_profile_workflow.".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": {
+            "recording_id": {
+              "type": "string",
+              "description": "Saved recording id"
+            },
+            "recipe_name": {
+              "type": "string",
+              "description": "Optional recipe name override"
+            }
+          },
+          "required": ["recording_id"]
+        }),
+      },
+      McpTool {
+        name: "replay_recording".to_string(),
+        description: "Replay a saved raw action recording on a running profile using coordinate/keystroke-level dispatch.".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": {
+            "recording_id": {
+              "type": "string",
+              "description": "Saved recording id"
+            },
+            "profile_id": {
+              "type": "string",
+              "description": "UUID of a running profile to replay onto"
+            }
+          },
+          "required": ["recording_id", "profile_id"]
+        }),
+      },
       // Browser interaction tools
       McpTool {
         name: "navigate".to_string(),
@@ -6832,6 +6913,31 @@ impl McpServer {
       "stop_sync_session" => self.handle_stop_sync_session(&arguments).await,
       "get_sync_sessions" => self.handle_get_sync_sessions().await,
       "remove_sync_follower" => self.handle_remove_sync_follower(&arguments).await,
+      // Action recorder tools
+      "start_action_recording" => {
+        Self::require_paid_subscription("Browser automation").await?;
+        self.handle_start_action_recording(&arguments).await
+      }
+      "stop_action_recording" => {
+        Self::require_paid_subscription("Browser automation").await?;
+        self.handle_stop_action_recording(&arguments).await
+      }
+      "get_recorded_events" => {
+        Self::require_paid_subscription("Browser automation").await?;
+        self.handle_get_recorded_events().await
+      }
+      "list_recordings" => {
+        Self::require_paid_subscription("Browser automation").await?;
+        self.handle_list_recordings().await
+      }
+      "export_recording_as_recipe" => {
+        Self::require_paid_subscription("Browser automation").await?;
+        self.handle_export_recording_as_recipe(&arguments).await
+      }
+      "replay_recording" => {
+        Self::require_paid_subscription("Browser automation").await?;
+        self.handle_replay_recording(&arguments).await
+      }
       // Browser interaction tools (require paid subscription)
       "navigate" => {
         Self::require_paid_subscription("Browser automation").await?;
@@ -15959,6 +16065,124 @@ impl McpServer {
       }]
     }))
   }
+
+  async fn handle_start_action_recording(
+    &self,
+    arguments: &serde_json::Value,
+  ) -> Result<serde_json::Value, McpError> {
+    let profile_id = arguments
+      .get("profile_id")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| McpError {
+        code: -32602,
+        message: "Missing profile_id".to_string(),
+      })?
+      .to_string();
+    let app = self.get_app_handle().await?;
+    let info = crate::recorder::commands::start_recording(app, profile_id)
+      .await
+      .map_err(|e| McpError {
+        code: -32000,
+        message: e,
+      })?;
+    Self::json_tool_result(&info)
+  }
+
+  async fn handle_stop_action_recording(
+    &self,
+    arguments: &serde_json::Value,
+  ) -> Result<serde_json::Value, McpError> {
+    let session_id = arguments
+      .get("session_id")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| McpError {
+        code: -32602,
+        message: "Missing session_id".to_string(),
+      })?
+      .to_string();
+    let app = self.get_app_handle().await?;
+    let recording = crate::recorder::commands::stop_recording(app, session_id)
+      .await
+      .map_err(|e| McpError {
+        code: -32000,
+        message: e,
+      })?;
+    Self::json_tool_result(&recording)
+  }
+
+  async fn handle_get_recorded_events(&self) -> Result<serde_json::Value, McpError> {
+    let sessions = crate::recorder::commands::get_recorder_sessions()
+      .await
+      .map_err(|e| McpError {
+        code: -32000,
+        message: e,
+      })?;
+    Self::json_tool_result(&sessions)
+  }
+
+  async fn handle_list_recordings(&self) -> Result<serde_json::Value, McpError> {
+    let recordings = crate::recorder::commands::list_recordings()
+      .await
+      .map_err(|e| McpError {
+        code: -32000,
+        message: e,
+      })?;
+    Self::json_tool_result(&recordings)
+  }
+
+  async fn handle_export_recording_as_recipe(
+    &self,
+    arguments: &serde_json::Value,
+  ) -> Result<serde_json::Value, McpError> {
+    let recording_id = arguments
+      .get("recording_id")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| McpError {
+        code: -32602,
+        message: "Missing recording_id".to_string(),
+      })?
+      .to_string();
+    let recipe_name = arguments
+      .get("recipe_name")
+      .and_then(|v| v.as_str())
+      .map(ToString::to_string);
+    let recipe = crate::recorder::commands::export_recording_as_recipe(recording_id, recipe_name)
+      .await
+      .map_err(|e| McpError {
+        code: -32000,
+        message: e,
+      })?;
+    Self::json_tool_result(&recipe)
+  }
+
+  async fn handle_replay_recording(
+    &self,
+    arguments: &serde_json::Value,
+  ) -> Result<serde_json::Value, McpError> {
+    let recording_id = arguments
+      .get("recording_id")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| McpError {
+        code: -32602,
+        message: "Missing recording_id".to_string(),
+      })?
+      .to_string();
+    let profile_id = arguments
+      .get("profile_id")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| McpError {
+        code: -32602,
+        message: "Missing profile_id".to_string(),
+      })?
+      .to_string();
+    crate::recorder::commands::replay_recording(recording_id, profile_id)
+      .await
+      .map_err(|e| McpError {
+        code: -32000,
+        message: e,
+      })?;
+    Ok(Self::text_tool_result("Recording replay started"))
+  }
 }
 
 lazy_static::lazy_static! {
@@ -16046,6 +16270,13 @@ mod tests {
     assert!(tool_names.contains(&"stop_sync_session"));
     assert!(tool_names.contains(&"get_sync_sessions"));
     assert!(tool_names.contains(&"remove_sync_follower"));
+    // Action recorder tools
+    assert!(tool_names.contains(&"start_action_recording"));
+    assert!(tool_names.contains(&"stop_action_recording"));
+    assert!(tool_names.contains(&"get_recorded_events"));
+    assert!(tool_names.contains(&"list_recordings"));
+    assert!(tool_names.contains(&"export_recording_as_recipe"));
+    assert!(tool_names.contains(&"replay_recording"));
     // Browser interaction tools
     assert!(tool_names.contains(&"navigate"));
     assert!(tool_names.contains(&"screenshot"));

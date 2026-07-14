@@ -526,6 +526,88 @@ export interface SyncSessionInfo {
   followers: SyncFollowerState[];
 }
 
+// Action recorder types
+export interface RecorderSessionInfo {
+  id: string;
+  profile_id: string;
+  profile_name: string;
+  browser: string;
+  started_at: number;
+  event_count: number;
+  status: string;
+}
+
+export interface RecordingSummary {
+  id: string;
+  created_at: string;
+  profile_id: string;
+  profile_name: string;
+  browser: string;
+  start_url: string;
+  event_count: number;
+  duration_ms: number;
+}
+
+export interface RecordedEvent {
+  t_ms: number;
+  kind: string;
+  target?: RecordedTarget | null;
+  payload?: unknown;
+}
+
+export interface RecordedTarget {
+  tag?: string | null;
+  id?: string | null;
+  locators: LocatorCandidate[];
+  rect?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  attributes?: unknown;
+}
+
+export interface LocatorCandidate {
+  by: string;
+  value: string;
+  nth?: number | null;
+  exact?: boolean | null;
+  preferred: boolean;
+}
+
+export interface Recording {
+  header: {
+    version: number;
+    id: string;
+    created_at: string;
+    profile_id: string;
+    profile_name: string;
+    browser: string;
+    start_url: string;
+    viewport?: { width: number; height: number } | null;
+    event_count: number;
+  };
+  events: RecordedEvent[];
+}
+
+export interface ExportedRecipe {
+  version: number;
+  name: string;
+  description?: string | null;
+  defaults?: {
+    timeout_ms?: number | null;
+    auto_wait?: boolean | null;
+  } | null;
+  inputs?: unknown;
+  steps: Array<{
+    id: string;
+    tool: string;
+    arguments: unknown;
+    on_error?: string | null;
+  }>;
+}
+
 // Traffic stats types
 export interface BandwidthDataPoint {
   timestamp: number;
