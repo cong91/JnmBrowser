@@ -1068,7 +1068,9 @@ pub async fn cancel_download(browser_str: String, version: String) -> Result<(),
 mod tests {
   use super::*;
 
+  #[cfg(target_os = "macos")]
   use std::sync::atomic::{AtomicUsize, Ordering};
+  #[cfg(target_os = "macos")]
   use std::sync::Arc;
   use tempfile::TempDir;
   use wiremock::matchers::{method, path};

@@ -108,6 +108,10 @@ pub fn dns_blocklist_dir() -> PathBuf {
   cache_dir().join("dns_blocklists")
 }
 
+pub fn recordings_dir() -> PathBuf {
+  data_dir().join("recordings")
+}
+
 #[cfg(test)]
 thread_local! {
   static TEST_DATA_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
@@ -193,6 +197,7 @@ mod tests {
     assert!(vpn_dir().ends_with("vpn"));
     assert!(extensions_dir().ends_with("extensions"));
     assert!(dns_blocklist_dir().ends_with("dns_blocklists"));
+    assert!(recordings_dir().ends_with("recordings"));
   }
 
   #[test]

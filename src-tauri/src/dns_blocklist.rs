@@ -337,6 +337,14 @@ mod tests {
 
   #[test]
   fn test_cache_fresh_returns_false_when_missing() {
+    // Isolate from the developer's real app cache so local blocklist downloads
+    // don't make this assertion flaky.
+    let tmp = std::env::temp_dir().join(format!(
+      "jnmbrowser-dns-blocklist-test-{}",
+      std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let _guard = app_dirs::set_test_cache_dir(tmp);
     assert!(!BlocklistManager::is_cache_fresh(BlocklistLevel::Light));
     assert!(!BlocklistManager::is_cache_fresh(BlocklistLevel::None));
   }

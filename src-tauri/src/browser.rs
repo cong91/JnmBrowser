@@ -721,10 +721,10 @@ impl Browser for ChromiumBrowser {
     return macos::get_chromium_executable_path(install_dir);
 
     #[cfg(target_os = "linux")]
-    return linux::get_chromium_executable_path(&install_dir, &BrowserType::Chromium);
+    return linux::get_chromium_executable_path(install_dir, &BrowserType::Chromium);
 
     #[cfg(target_os = "windows")]
-    return windows::get_chromium_executable_path(&install_dir, &BrowserType::Chromium);
+    return windows::get_chromium_executable_path(install_dir, &BrowserType::Chromium);
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     Err("Unsupported platform".into())
