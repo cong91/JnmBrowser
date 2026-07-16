@@ -314,10 +314,30 @@ async fn replay_camoufox(
   recording: &Recording,
 ) -> Result<(), String> {
   let path = profile_data_path(profile);
-  let page = CamoufoxManager::instance()
-    .get_active_page(&path)
-    .await
-    .map_err(|e| format!("Failed to get Camoufox page for replay: {e}"))?;
+  // Retry get_active_page for a few seconds — the automation session may
+  // need a moment to stabilize after launch.
+  let page = {
+    let mut last_err: Option<String> = None;
+    let mut resolved: Option<playwright::api::Page> = None;
+    for attempt in 0..10 {
+      if attempt > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+      }
+      match CamoufoxManager::instance().get_active_page(&path).await {
+        Ok(page) => {
+          resolved = Some(page);
+          break;
+        }
+        Err(e) => last_err = Some(format!("{e}")),
+      }
+    }
+    resolved.ok_or_else(|| {
+      format!(
+        "Failed to get Camoufox page for replay: {}",
+        last_err.unwrap_or_else(|| "unknown error".to_string())
+      )
+    })?
+  };
 
   let mut last_t: u64 = 0;
   for event in &recording.events {

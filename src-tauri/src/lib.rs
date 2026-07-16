@@ -14,6 +14,7 @@ mod api_client;
 mod api_server;
 mod app_auto_updater;
 pub mod app_dirs;
+mod auto_register;
 mod auto_updater;
 mod browser;
 mod browser_runner;
@@ -25,6 +26,7 @@ mod default_browser;
 pub mod dns_blocklist;
 mod downloaded_browsers_registry;
 mod downloader;
+mod email;
 mod ephemeral_dirs;
 mod extension_manager;
 mod extraction;
@@ -2306,6 +2308,11 @@ pub fn run() {
       // DNS blocklist commands
       dns_blocklist::get_dns_blocklist_cache_status,
       dns_blocklist::refresh_dns_blocklists,
+      // Auto-registration commands
+      auto_register::commands::start_auto_registration,
+      auto_register::commands::cancel_registration,
+      auto_register::commands::list_registered_accounts_cmd,
+      auto_register::commands::delete_registered_account_cmd,
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")

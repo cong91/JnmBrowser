@@ -46,17 +46,38 @@ pub async fn start_recording(
       let path = profile_data_path(&profile);
       let shared_task = shared.clone();
       let pid = profile_id.clone();
-      // Best-effort start URL via page evaluation.
-      let start_url = match crate::camoufox_manager::CamoufoxManager::instance()
-        .get_active_page(&path)
-        .await
-      {
-        Ok(page) => page
-          .eval::<String>("location.href")
+      // Retry get_active_page for up to 15s — the Camoufox automation session
+      // may need a moment to stabilize after launch (ephemeral dir creation,
+      // Playwright context warm-up, or transient page-list failures).
+      let mut start_url = String::new();
+      let mut last_err: Option<String> = None;
+      for attempt in 0..30 {
+        if attempt > 0 {
+          tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        match crate::camoufox_manager::CamoufoxManager::instance()
+          .get_active_page(&path)
           .await
-          .unwrap_or_default(),
-        Err(_) => String::new(),
-      };
+        {
+          Ok(page) => {
+            start_url = page
+              .eval::<String>("location.href")
+              .await
+              .unwrap_or_default();
+            last_err = None;
+            break;
+          }
+          Err(e) => {
+            last_err = Some(format!("{e}"));
+          }
+        }
+      }
+      if let Some(err) = last_err {
+        return Err(format!(
+          "Camoufox automation session not ready for profile '{}' after 15s: {err}",
+          profile.name
+        ));
+      }
       tokio::spawn(async move {
         run_camoufox_recorder(pid, path, shared_task, cancel_rx, ready_tx).await;
       });

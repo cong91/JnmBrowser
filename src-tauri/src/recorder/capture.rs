@@ -16,6 +16,8 @@ use crate::recorder::inject_script::recorder_script;
 use crate::recorder::types::{LocatorCandidate, RecordedEvent, RecordedTarget, Rect};
 use crate::recorder::{new_shared, push_event, set_last_error, RECORDER_TAG};
 
+use playwright::api::Page;
+
 /// Resolve a running profile by id.
 pub fn get_running_profile(profile_id: &str) -> Result<BrowserProfile, String> {
   let profiles = ProfileManager::instance()
@@ -49,8 +51,7 @@ pub fn canonical_browser(browser: &str) -> Result<&'static str, String> {
 
 pub fn profile_data_path(profile: &BrowserProfile) -> String {
   let profiles_dir = ProfileManager::instance().get_profiles_dir();
-  profile
-    .get_profile_data_path(&profiles_dir)
+  crate::ephemeral_dirs::get_effective_profile_path(profile, &profiles_dir)
     .to_string_lossy()
     .to_string()
 }
@@ -335,16 +336,40 @@ pub async fn run_camoufox_recorder(
     }
   };
 
-  let page = match CamoufoxManager::instance()
-    .get_active_page(&profile_path)
-    .await
-  {
-    Ok(page) => page,
-    Err(e) => {
-      let msg = format!("Failed to get Camoufox page for {profile_id}: {e}");
-      set_last_error(&shared, msg.clone()).await;
-      notify(&mut ready_tx, Err(msg));
-      return;
+  // Retry get_active_page for a few seconds — the automation session may
+  // need a moment to stabilize even after start_recording's own retry loop,
+  // e.g. if a tab navigation transiently makes pages() return empty.
+  let page = {
+    let mut last_err: Option<String> = None;
+    let mut resolved: Option<Page> = None;
+    for attempt in 0..10 {
+      if attempt > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+      }
+      match CamoufoxManager::instance()
+        .get_active_page(&profile_path)
+        .await
+      {
+        Ok(page) => {
+          resolved = Some(page);
+          break;
+        }
+        Err(e) => {
+          last_err = Some(format!("{e}"));
+        }
+      }
+    }
+    match resolved {
+      Some(page) => page,
+      None => {
+        let msg = format!(
+          "Failed to get Camoufox page for {profile_id}: {}",
+          last_err.unwrap_or_else(|| "unknown error".to_string())
+        );
+        set_last_error(&shared, msg.clone()).await;
+        notify(&mut ready_tx, Err(msg));
+        return;
+      }
     }
   };
 

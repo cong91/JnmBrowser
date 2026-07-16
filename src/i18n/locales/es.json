@@ -1649,4 +1649,29 @@
     "launchFailed": "No se pudo iniciar y comenzar la grabacion",
     "recordingActive": "Grabando acciones en este perfil"
   }
+
+,
+  "registration": {
+    "title": "ChatGPT Auto Registration",
+    "newRegistration": "Register New",
+    "progress": "Progress",
+    "storedAccounts": "Stored Accounts",
+    "noAccounts": "No registered accounts yet. Start your first registration above.",
+    "noActiveTasks": "No active registration tasks. Start a new registration.",
+    "cdkLabel": "CDK Code",
+    "browserType": "Browser Type",
+    "proxy": "Proxy ID (optional)",
+    "proxyPlaceholder": "Leave empty for none",
+    "maxRetries": "Max Retries",
+    "accountsPerCdk": "Accounts per CDK",
+    "headless": "Headless",
+    "startRegistration": "Start Registration",
+    "starting": "Starting...",
+    "email": "Email",
+    "password": "Password",
+    "accountId": "Account ID",
+    "accessToken": "Access Token",
+    "sessionToken": "Session Token",
+    "createdAt": "Created"
+  }
 }

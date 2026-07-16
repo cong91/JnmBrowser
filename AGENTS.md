@@ -1,17 +1,22 @@
 # Project Guidelines
 
+**JnmBrowser** (a.k.a. DonutBrowser) — an open-source anti-detect browser built with Tauri v2 + Next.js.
+- Tauri binary: `JnmBrowser`, Rust lib: `donutbrowser_lib`
+- Current version: 0.22.9
+- License: AGPL-3.0
+
 ## Repository Structure
 
 ```
-donutbrowser/
-├── src/                              # Next.js frontend
+JnmBrowser/
+├── src/                              # Next.js frontend (App Router, Turbopack)
 │   ├── app/                          # App router (page.tsx, layout.tsx)
 │   ├── components/                   # 50+ React components (dialogs, tables, UI)
 │   ├── hooks/                        # Event-driven React hooks
 │   ├── i18n/locales/                 # Translations (en, es, fr, ja, pt, ru, zh)
 │   ├── lib/                          # Utilities (themes, toast, browser-utils)
 │   └── types.ts                      # Shared TypeScript interfaces
-├── src-tauri/                        # Rust backend (Tauri)
+├── src-tauri/                        # Rust backend (Tauri v2)
 │   ├── src/
 │   │   ├── lib.rs                    # Tauri command registration (100+ commands)
 │   │   ├── browser_runner.rs         # Profile launch/kill orchestration
@@ -36,20 +41,35 @@ donutbrowser/
 │   │   ├── synchronizer.rs         # Real-time profile synchronizer
 │   │   ├── daemon/                 # Background daemon + tray icon (currently disabled)
 │   │   └── cloud_auth.rs           # Cloud authentication
-│   ├── tests/                      # Integration tests
+│   ├── tests/                      # Integration tests (proxy, sync, vpn)
 │   └── Cargo.toml                  # Rust dependencies
 ├── donut-sync/                     # NestJS sync server (self-hostable)
 │   └── src/                        # Controllers, services, auth, S3 sync
 ├── docs/                           # Documentation (self-hosting guide)
 ├── flake.nix                       # Nix development environment
-└── .github/workflows/              # CI/CD pipelines
+└── .github/workflows/              # CI/CD (build-installers.yml)
 ```
 
-## Testing and Quality
+## Build and Dev Commands
 
-- After making changes, run `pnpm format && pnpm lint && pnpm test` at the root of the project
-- Always run this command before finishing a task to ensure the application isn't broken
-- `pnpm lint` includes spellcheck via [typos](https://github.com/crate-ci/typos). False positives can be allowlisted in `_typos.toml`
+| Command | Description |
+|---------|-------------|
+| `pnpm dev` | Start Next.js dev server on port 12341 (Turbopack) |
+| `pnpm tauri dev` | Full Tauri dev mode (copies proxy binary + starts frontend + Rust) |
+| `pnpm build` | Build Next.js frontend |
+| `pnpm tauri build` | Build full desktop app |
+| `pnpm format` | Auto-fix JS (Biome) + Rust (clippy --fix + fmt) |
+| `pnpm lint` | Lint JS (Biome + tsc), Rust (clippy), and spellcheck (typos) |
+| `pnpm test` | Run Rust unit tests + sync E2E tests |
+| `pnpm test:rust:unit` | Rust unit tests (lib + proxy + vpn integration) |
+| `pnpm test:sync-e2e` | Sync server E2E test harness |
+| `pnpm check-unused-commands` | Verify no unused Tauri commands |
+| `pnpm shadcn:add` | Add a shadcn/ui component |
+
+- After making changes, run `pnpm format && pnpm lint && pnpm test` before finishing a task
+- JS linting uses **Biome** (not ESLint/Prettier) — config in `biome.json`
+- Rust linting uses `cargo clippy --all-targets --all-features -- -D warnings -D clippy::all`
+- `pnpm lint` includes spellcheck via [typos](https://github.com/crate-ci/typos). False positives are allowlisted in `_typos.toml` (locale JSON files and camoufox data are excluded)
 
 ## Code Quality
 
@@ -89,6 +109,17 @@ donutbrowser/
   - `chart-1` through `chart-5` — data visualization
 - Use these as Tailwind classes: `bg-success`, `text-destructive`, `border-warning`, etc.
 - For lighter variants use opacity: `bg-destructive/10`, `bg-success/10`, `border-warning/50`
+
+## Gotchas
+
+- **Proxy binary**: `donut-proxy` must be copied before dev/build. The `prebuild`, `pretauri:dev`, and `precargo` scripts handle this automatically via `copy-proxy-binary.mjs`. If you run `cargo` commands directly, run `pnpm copy-proxy-binary` first.
+- **Tauri v2**: This project uses Tauri v2 (schema `https://schema.tauri.app/config/2`). APIs differ from v1 — check Tauri v2 docs.
+- **Biome, not ESLint**: JS/TS linting and formatting uses Biome 2.x. Use `pnpm format:js` to auto-fix, not `prettier` or `eslint --fix`.
+- **Dev port**: Frontend dev server runs on port `12341`, not the default 3000.
+- **donut-sync**: The sync server is a separate NestJS app in `donut-sync/`. It has its own `package.json`, `biome.json`, and TypeScript config. Lint and typecheck commands cover both `src/` and `donut-sync/src/`.
+- **Husky**: Git hooks are managed by Husky (`pnpm prepare` sets them up).
+- **Unused Tauri commands**: Run `pnpm check-unused-commands` to verify no dead Tauri commands exist — there's a test (`test_no_unused_tauri_commands`) that enforces this.
+- **Integration tests**: Rust integration tests live in `src-tauri/tests/` (proxy, sync, VPN). They may require specific environment setup.
 
 ## Proprietary Changes
 

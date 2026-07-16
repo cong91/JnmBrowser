@@ -111,10 +111,12 @@ fn serialize_profile_for_mcp(profile: &BrowserProfile) -> serde_json::Value {
 }
 
 fn mcp_profile_path(profile: &BrowserProfile) -> String {
-  profile
-    .get_profile_data_path(&ProfileManager::instance().get_profiles_dir())
-    .to_string_lossy()
-    .to_string()
+  crate::ephemeral_dirs::get_effective_profile_path(
+    profile,
+    &ProfileManager::instance().get_profiles_dir(),
+  )
+  .to_string_lossy()
+  .to_string()
 }
 
 impl McpError {
