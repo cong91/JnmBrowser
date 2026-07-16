@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrent } from "@tauri-apps/plugin-deep-link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AccountRegistrationDialog } from "@/components/account-registration-dialog";
 import { CamoufoxConfigDialog } from "@/components/camoufox-config-dialog";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
 import { CookieCopyDialog } from "@/components/cookie-copy-dialog";
@@ -97,6 +98,7 @@ export default function Home() {
   // Action recorder sessions
   const { getProfileRecorderInfo } = useRecorderSessions();
   const [recorderDialogOpen, setRecorderDialogOpen] = useState(false);
+  const [autoRegisterDialogOpen, setAutoRegisterDialogOpen] = useState(false);
 
   // Cloud auth for cross-OS unlock
   const crossOsUnlocked = true;
@@ -1102,6 +1104,7 @@ export default function Home() {
             onSyncConfigDialogOpen={setSyncConfigDialogOpen}
             onIntegrationsDialogOpen={setIntegrationsDialogOpen}
             onExtensionManagementDialogOpen={setExtensionManagementDialogOpen}
+            onAutoRegisterDialogOpen={setAutoRegisterDialogOpen}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
           />
@@ -1404,6 +1407,11 @@ export default function Home() {
         }}
         allProfiles={profiles}
         runningProfiles={runningProfiles}
+      />
+
+      <AccountRegistrationDialog
+        open={autoRegisterDialogOpen}
+        onOpenChange={setAutoRegisterDialogOpen}
       />
     </div>
   );

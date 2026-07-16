@@ -549,14 +549,70 @@ impl RegistrationEngine {
     let birthdate = random_birthday();
     self.log(&format!("{prefix} Name: {first_name} {last_name}"));
 
-    // Step 3: Launch browser
+    // Step 3: Launch a fresh browser profile for THIS account only.
+    // Lifecycle: create ephemeral profile → register → kill browser → delete profile.
     self.emit(
       app_handle, RegistrationStep::LaunchingBrowser,
-      &format!("{prefix} Launching browser..."),
+      &format!("{prefix} Launching fresh browser profile..."),
       cdk_idx, alias_idx, total_cdks, None,
     );
-    let (_cdp_port, mut cdp) = self.launch_and_connect(app_handle).await?;
 
+    // Fresh device id per account so cookies/fingerprint are isolated.
+    self.device_id = Uuid::new_v4().to_string();
+
+    let (profile, mut cdp) = self.launch_and_connect(app_handle).await?;
+    self.log(&format!(
+      "{prefix} Browser profile launched: {} ({})",
+      profile.name, profile.id
+    ));
+
+    // Always clean up the active profile when this account finishes (success or failure).
+    let mut active_profile = profile;
+    let registration_result = self
+      .run_registration_in_browser(
+        app_handle,
+        email_service,
+        &mut cdp,
+        &mut active_profile,
+        cdk,
+        base_email,
+        &alias_email,
+        &password,
+        &first_name,
+        &last_name,
+        &birthdate,
+        prefix.as_str(),
+        cdk_idx,
+        alias_idx,
+        total_cdks,
+      )
+      .await;
+
+    self.cleanup_browser(app_handle, &active_profile).await;
+    self.log(&format!("{prefix} Browser closed and profile cleaned up"));
+
+    registration_result
+  }
+
+  /// Core registration steps that run inside an already-launched browser profile.
+  async fn run_registration_in_browser(
+    &mut self,
+    app_handle: &tauri::AppHandle,
+    email_service: &dyn EmailService,
+    cdp: &mut CdpConnection,
+    profile: &mut crate::profile::BrowserProfile,
+    cdk: &str,
+    base_email: &str,
+    alias_email: &str,
+    password: &str,
+    first_name: &str,
+    last_name: &str,
+    birthdate: &str,
+    prefix: &str,
+    cdk_idx: u32,
+    alias_idx: u32,
+    total_cdks: u32,
+  ) -> Result<RegistrationResult, String> {
     // Seed oai-did cookie
     self.log(&format!("{prefix} Device ID: {}", self.device_id));
     for domain in &["chatgpt.com", ".chatgpt.com", "auth.openai.com", ".auth.openai.com"] {
@@ -602,8 +658,13 @@ impl RegistrationEngine {
       &format!("{prefix} Following authorize..."),
       cdk_idx, alias_idx, total_cdks, None,
     );
-    let mut cur_url = self.authorize_with_retry(&mut cdp, auth_url, app_handle).await?;
-    self.log(&format!("{prefix} Authorize → {cur_url}"));
+    let mut cur_url = self
+      .authorize_with_retry(cdp, profile, auth_url, app_handle)
+      .await?;
+    self.log(&format!(
+      "{prefix} Authorize → {cur_url} (profile={})",
+      profile.id
+    ));
 
     // Step 8-12: State machine loop
     let mut register_submitted = false;
@@ -711,8 +772,8 @@ impl RegistrationEngine {
 
     let result = RegistrationResult {
       success: true,
-      email: alias_email,
-      password,
+      email: alias_email.to_string(),
+      password: password.to_string(),
       account_id,
       access_token,
       device_id: self.device_id.clone(),
@@ -735,6 +796,7 @@ impl RegistrationEngine {
   async fn authorize_with_retry(
     &mut self,
     cdp: &mut CdpConnection,
+    profile: &mut crate::profile::BrowserProfile,
     auth_url: &str,
     app_handle: &tauri::AppHandle,
   ) -> Result<String, String> {
@@ -742,16 +804,27 @@ impl RegistrationEngine {
 
     for attempt in 0..max_attempts {
       if attempt > 0 {
-        self.log(&format!("Authorize retry {attempt}/{max_attempts}..."));
-        // Restart browser with fresh session
-        let (_new_port, new_cdp) = self.launch_and_connect(app_handle).await?;
+        self.log(&format!(
+          "Authorize retry {attempt}/{max_attempts}: closing old browser and opening a fresh profile..."
+        ));
+        // Kill old browser first so we never stack multiple browser processes.
+        self.cleanup_browser(app_handle, profile).await;
+
+        // Fresh device + fresh browser profile for Cloudflare bypass.
+        self.device_id = Uuid::new_v4().to_string();
+        let (new_profile, new_cdp) = self.launch_and_connect(app_handle).await?;
         *cdp = new_cdp;
-        // Re-seed cookies
+        *profile = new_profile;
+
+        // Re-seed cookies and re-visit homepage on the new browser.
         for domain in &["chatgpt.com", ".chatgpt.com", "auth.openai.com", ".auth.openai.com"] {
           let _ = cdp.set_cookie("oai-did", &self.device_id, domain).await;
         }
-        // Re-visit homepage
         cdp.navigate("https://chatgpt.com/", 20).await?;
+        self.log(&format!(
+          "Fresh browser profile ready: {} ({})",
+          profile.name, profile.id
+        ));
       }
 
       cdp.navigate(auth_url, 30).await?;
@@ -769,80 +842,128 @@ impl RegistrationEngine {
   }
 
   // -----------------------------------------------------------------------
-  // Browser launch + CDP connect
+  // Browser launch + CDP connect + cleanup
   // -----------------------------------------------------------------------
 
+  /// Launch a NEW ephemeral browser profile and connect CDP.
+  /// Always creates a fresh profile — never reuses an existing one.
   async fn launch_and_connect(
     &mut self,
     app_handle: &tauri::AppHandle,
-  ) -> Result<(u16, CdpConnection), String> {
-    let cdp_port = self.launch_browser(app_handle).await?;
-    self.log(&format!("Browser on CDP port {cdp_port}"));
-    sleep(std::time::Duration::from_secs(2)).await;
-
-    let ws_url = get_page_ws_url(cdp_port).await?;
-    let cdp = CdpConnection::connect(&ws_url).await?;
-    Ok((cdp_port, cdp))
-  }
-
-  async fn launch_browser(&self, app_handle: &tauri::AppHandle) -> Result<u16, String> {
-    use crate::browser::BrowserType;
-    use crate::browser_runner::BrowserRunner;
-    use crate::chromium_manager::ChromiumManager;
-    use crate::profile::manager::create_browser_profile_with_group;
-
-    let profile = if let Some(ref pid) = self.config.profile_id {
-      let uuid = uuid::Uuid::parse_str(pid).map_err(|e| format!("Invalid profile ID: {e}"))?;
-      let pm = crate::profile::ProfileManager::instance();
-      let profiles = pm
-        .list_profiles()
-        .map_err(|e| format!("Failed to list profiles: {e}"))?;
-      profiles
-        .into_iter()
-        .find(|p| p.id == uuid)
-        .ok_or_else(|| format!("Profile {pid} not found"))?
-    } else {
-      let browser_str = if self.config.browser_type == "camoufox" {
-        "camoufox"
-      } else {
-        "chromium"
-      };
-      let browser = BrowserType::from_str(browser_str)
-        .map_err(|e| format!("Invalid browser type: {e}"))?;
-      create_browser_profile_with_group(
-        app_handle.clone(),
-        format!("auto-reg-{}", &self.task_id[..8].to_string()),
-        browser.as_str().to_string(),
-        String::new(),
-        "stable".into(),
-        self.config.proxy_id.clone(),
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-      )
-      .await
-      .map_err(|e| format!("Create profile: {e}"))?
-    };
-
-    let launched = BrowserRunner::instance()
-      .launch_browser(app_handle.clone(), &profile, Some("about:blank".into()), None)
-      .await
-      .map_err(|e| format!("Launch: {e}"))?;
-
+  ) -> Result<(crate::profile::BrowserProfile, CdpConnection), String> {
+    let profile = self.launch_browser(app_handle).await?;
+    self.log(&format!(
+      "Browser launched: profile={} id={}",
+      profile.name, profile.id
+    ));
     sleep(std::time::Duration::from_secs(2)).await;
 
     let profile_path = crate::ephemeral_dirs::get_effective_profile_path(
-      &launched,
+      &profile,
       &crate::profile::ProfileManager::instance().get_profiles_dir(),
     );
-    ChromiumManager::instance()
+    let cdp_port = crate::chromium_manager::ChromiumManager::instance()
       .get_cdp_port(&profile_path.to_string_lossy())
       .await
-      .ok_or_else(|| "Failed to get CDP port".into())
+      .ok_or_else(|| "Failed to get CDP port".to_string())?;
+
+    self.log(&format!("CDP port ready: {cdp_port}"));
+    let ws_url = get_page_ws_url(cdp_port).await?;
+    let cdp = CdpConnection::connect(&ws_url).await?;
+    Ok((profile, cdp))
+  }
+
+  /// Create + launch a brand-new ephemeral browser profile for one registration.
+  async fn launch_browser(
+    &self,
+    app_handle: &tauri::AppHandle,
+  ) -> Result<crate::profile::BrowserProfile, String> {
+    use crate::browser::BrowserType;
+    use crate::browser_runner::BrowserRunner;
+    use crate::profile::manager::create_browser_profile_with_group;
+
+    let browser_str = if self.config.browser_type == "camoufox" {
+      "camoufox"
+    } else {
+      "chromium"
+    };
+    let browser = BrowserType::from_str(browser_str)
+      .map_err(|e| format!("Invalid browser type: {e}"))?;
+
+    // Unique profile name per account so concurrent/sequential runs never collide.
+    let short_id = Uuid::new_v4().to_string();
+    let profile_name = format!(
+      "auto-reg-{}-{}",
+      &self.task_id[..8.min(self.task_id.len())],
+      &short_id[..8]
+    );
+
+    let profile = create_browser_profile_with_group(
+      app_handle.clone(),
+      profile_name,
+      browser.as_str().to_string(),
+      String::new(),
+      "stable".into(),
+      self.config.proxy_id.clone(),
+      None,
+      None,
+      None,
+      None,
+      true, // always ephemeral
+      None,
+      None,
+    )
+    .await
+    .map_err(|e| format!("Create profile: {e}"))?;
+
+    let launched = BrowserRunner::instance()
+      .launch_browser(
+        app_handle.clone(),
+        &profile,
+        Some("about:blank".into()),
+        None,
+      )
+      .await
+      .map_err(|e| format!("Launch: {e}"))?;
+
+    Ok(launched)
+  }
+
+  /// Kill the browser process and delete the ephemeral profile.
+  async fn cleanup_browser(
+    &mut self,
+    app_handle: &tauri::AppHandle,
+    profile: &crate::profile::BrowserProfile,
+  ) {
+    use crate::browser_runner::BrowserRunner;
+
+    // 1) Kill browser process first
+    if let Err(e) = BrowserRunner::instance()
+      .kill_browser_process(app_handle.clone(), profile)
+      .await
+    {
+      self.log(&format!(
+        "Warning: failed to kill browser for profile {}: {e}",
+        profile.id
+      ));
+    } else {
+      self.log(&format!("Browser killed for profile {}", profile.id));
+    }
+
+    // Give OS a moment to release file locks before deleting profile data.
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    // 2) Delete the ephemeral profile so it doesn't clutter the UI.
+    if let Err(e) = crate::profile::ProfileManager::instance()
+      .delete_profile(app_handle, &profile.id.to_string())
+    {
+      self.log(&format!(
+        "Warning: failed to delete profile {}: {e}",
+        profile.id
+      ));
+    } else {
+      self.log(&format!("Profile deleted: {}", profile.id));
+    }
   }
 
   fn fail_result(&self, error: &str) -> RegistrationResult {

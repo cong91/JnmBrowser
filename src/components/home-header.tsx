@@ -7,6 +7,7 @@ import {
   LuCloud,
   LuPlug,
   LuPuzzle,
+  LuRocket,
   LuSearch,
   LuUsers,
   LuX,
@@ -175,6 +176,7 @@ interface Props {
   onSyncConfigDialogOpen: (open: boolean) => void;
   onIntegrationsDialogOpen: (open: boolean) => void;
   onExtensionManagementDialogOpen: (open: boolean) => void;
+  onAutoRegisterDialogOpen: (open: boolean) => void;
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
 }
@@ -188,6 +190,7 @@ const HomeHeader = ({
   onSyncConfigDialogOpen,
   onIntegrationsDialogOpen,
   onExtensionManagementDialogOpen,
+  onAutoRegisterDialogOpen,
   searchQuery,
   onSearchQueryChange,
 }: Props) => {
@@ -283,6 +286,14 @@ const HomeHeader = ({
             </span>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onClick={() => {
+                onAutoRegisterDialogOpen(true);
+              }}
+            >
+              <LuRocket className="mr-2 w-4 h-4" />
+              {t("header.menu.autoRegister")}
+            </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {
                 onSettingsDialogOpen(true);
