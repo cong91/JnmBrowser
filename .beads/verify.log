@@ -1,0 +1,5 @@
+PASS full ship jnmbrowser-8qs
+commit=2ce73f5
+clippy_lib=PASS
+cargo_test_lib=PASS_via_precommit
+biome=PASS

@@ -10,7 +10,7 @@
         "cargo test --manifest-path src-tauri/Cargo.toml --lib compiles types",
         "pnpm lint:js includes hook typecheck"
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": [],
         "parallel": true,
@@ -29,7 +29,7 @@
       "steps": [
         "cargo test --manifest-path src-tauri/Cargo.toml --lib nord_cli -- --nocapture"
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": [],
         "parallel": true,
@@ -49,7 +49,7 @@
         "cargo test --manifest-path src-tauri/Cargo.toml --lib auto_register",
         "Manual optional: nord rotateEveryN=1 between two accounts"
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["backend-1", "backend-2"],
         "parallel": false,
@@ -62,7 +62,7 @@
       "category": "frontend",
       "description": "Dialog selects none/proxy/nord, shows the right fields, sends correct invoke payload; no raw English strings.",
       "steps": ["pnpm lint:js", "Manual: toggle modes updates visible fields"],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["backend-1"],
         "parallel": true,
@@ -78,7 +78,7 @@
       "category": "i18n",
       "description": "All seven locales include network mode, Nord group/server, rotateEveryN, errors/labels under registration.* with non-empty translations.",
       "steps": ["Grep new keys present in all 7 locale files", "pnpm lint:js"],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["frontend-1"],
         "parallel": false,
@@ -101,7 +101,7 @@
       "steps": [
         "Doc section exists; no contradiction with free-trial/2FA sections"
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["backend-3"],
         "parallel": true,
