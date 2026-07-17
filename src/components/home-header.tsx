@@ -4,6 +4,7 @@ import { FaDownload } from "react-icons/fa";
 import { FiWifi } from "react-icons/fi";
 import { GoGear, GoKebabHorizontal, GoPlus } from "react-icons/go";
 import {
+  LuCircle,
   LuCloud,
   LuPlug,
   LuPuzzle,
@@ -177,6 +178,7 @@ interface Props {
   onIntegrationsDialogOpen: (open: boolean) => void;
   onExtensionManagementDialogOpen: (open: boolean) => void;
   onAutoRegisterDialogOpen: (open: boolean) => void;
+  onRecordingsDialogOpen: (open: boolean) => void;
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
 }
@@ -191,6 +193,7 @@ const HomeHeader = ({
   onIntegrationsDialogOpen,
   onExtensionManagementDialogOpen,
   onAutoRegisterDialogOpen,
+  onRecordingsDialogOpen,
   searchQuery,
   onSearchQueryChange,
 }: Props) => {
@@ -293,6 +296,14 @@ const HomeHeader = ({
             >
               <LuRocket className="mr-2 w-4 h-4" />
               {t("header.menu.autoRegister")}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                onRecordingsDialogOpen(true);
+              }}
+            >
+              <LuCircle className="mr-2 w-4 h-4 text-destructive" />
+              {t("header.menu.recordings")}
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {

@@ -39,5 +39,6 @@ pub trait EmailService: Send + Sync {
   ) -> Result<String, EmailServiceError>;
 
   /// Check if the service is reachable.
+  #[allow(dead_code)]
   fn check_health(&self) -> bool;
 }

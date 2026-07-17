@@ -1,9 +1,17 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { LuDownload, LuPlay, LuTrash2 } from "react-icons/lu";
+import {
+  LuCopy,
+  LuDownload,
+  LuFolderOpen,
+  LuPlay,
+  LuRefreshCw,
+  LuTrash2,
+} from "react-icons/lu";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -46,14 +54,20 @@ export function RecorderDialog({
 }: RecorderDialogProps) {
   const { t } = useTranslation();
   const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
+  const [recordingsDir, setRecordingsDir] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [openingFolder, setOpeningFolder] = useState(false);
 
   const loadRecordings = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await invoke<RecordingSummary[]>("list_recordings");
+      const [data, dir] = await Promise.all([
+        invoke<RecordingSummary[]>("list_recordings"),
+        invoke<string>("get_recordings_dir").catch(() => ""),
+      ]);
       setRecordings(data);
+      if (dir) setRecordingsDir(dir);
     } catch (err) {
       console.error("Failed to list recordings:", err);
       showErrorToast(err instanceof Error ? err.message : String(err));
@@ -141,6 +155,40 @@ export function RecorderDialog({
     [allProfiles, runningProfiles, t],
   );
 
+  const handleOpenFolder = useCallback(async () => {
+    setOpeningFolder(true);
+    try {
+      let dir = recordingsDir;
+      if (!dir) {
+        dir = await invoke<string>("get_recordings_dir");
+        setRecordingsDir(dir);
+      }
+      await openPath(dir);
+    } catch (err) {
+      console.error("Failed to open recordings folder:", err);
+      showErrorToast(t("recorder.openFolderFailed"), {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setOpeningFolder(false);
+    }
+  }, [recordingsDir, t]);
+
+  const handleCopyPath = useCallback(async () => {
+    try {
+      let dir = recordingsDir;
+      if (!dir) {
+        dir = await invoke<string>("get_recordings_dir");
+        setRecordingsDir(dir);
+      }
+      await navigator.clipboard.writeText(dir);
+      showSuccessToast(t("recorder.pathCopied"));
+    } catch (err) {
+      console.error("Failed to copy recordings path:", err);
+      showErrorToast(err instanceof Error ? err.message : String(err));
+    }
+  }, [recordingsDir, t]);
+
   const handleOpenChange = useCallback(
     (open: boolean) => {
       if (!open) onClose();
@@ -157,6 +205,66 @@ export function RecorderDialog({
             {t("recorder.dialogDescription")}
           </DialogDescription>
         </DialogHeader>
+
+        <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground">
+              {t("recorder.storageLocation")}
+            </span>
+            <div className="flex items-center gap-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span>
+                    <RippleButton
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={loading}
+                      onClick={() => void loadRecordings()}
+                    >
+                      <LuRefreshCw
+                        className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+                      />
+                    </RippleButton>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{t("recorder.refresh")}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span>
+                    <RippleButton
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={!recordingsDir}
+                      onClick={() => void handleCopyPath()}
+                    >
+                      <LuCopy className="h-3.5 w-3.5" />
+                    </RippleButton>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{t("recorder.copyPath")}</TooltipContent>
+              </Tooltip>
+              <RippleButton
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs"
+                disabled={openingFolder}
+                onClick={() => void handleOpenFolder()}
+              >
+                <LuFolderOpen className="h-3.5 w-3.5" />
+                {t("recorder.openFolder")}
+              </RippleButton>
+            </div>
+          </div>
+          <p
+            className="truncate font-mono text-xs text-foreground"
+            title={recordingsDir || undefined}
+          >
+            {recordingsDir || t("recorder.loadingPath")}
+          </p>
+        </div>
 
         <ScrollArea className="max-h-[420px] pr-2">
           {loading ? (

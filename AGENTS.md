@@ -2,8 +2,10 @@
 
 **JnmBrowser** (a.k.a. DonutBrowser) — an open-source anti-detect browser built with Tauri v2 + Next.js.
 - Tauri binary: `JnmBrowser`, Rust lib: `donutbrowser_lib`
+- Product identifier: `com.jnmbrowser`
 - Current version: 0.22.9
 - License: AGPL-3.0
+- Package manager: **pnpm** (Node 23 via `.nvmrc` / `.node-version`)
 
 ## Repository Structure
 
@@ -11,81 +13,103 @@
 JnmBrowser/
 ├── src/                              # Next.js frontend (App Router, Turbopack)
 │   ├── app/                          # App router (page.tsx, layout.tsx)
-│   ├── components/                   # 50+ React components (dialogs, tables, UI)
-│   ├── hooks/                        # Event-driven React hooks
+│   ├── components/                   # React components (dialogs, tables, UI)
+│   ├── hooks/                        # Event-driven React hooks (Tauri listen/invoke)
 │   ├── i18n/locales/                 # Translations (en, es, fr, ja, pt, ru, zh)
 │   ├── lib/                          # Utilities (themes, toast, browser-utils)
+│   ├── styles/                       # Global CSS / Tailwind entry
 │   └── types.ts                      # Shared TypeScript interfaces
 ├── src-tauri/                        # Rust backend (Tauri v2)
 │   ├── src/
 │   │   ├── lib.rs                    # Tauri command registration (100+ commands)
 │   │   ├── browser_runner.rs         # Profile launch/kill orchestration
-│   │   ├── browser.rs               # Browser trait & launch logic
+│   │   ├── browser.rs                # Browser trait & launch logic
+│   │   ├── chromium_manager.rs       # Chromium / fingerprint browser management
+│   │   ├── camoufox_manager.rs       # Camoufox (Firefox) browser management
+│   │   ├── camoufox/                 # Camoufox fingerprint engine data
 │   │   ├── profile/                  # Profile CRUD (manager.rs, types.rs)
-│   │   ├── proxy_manager.rs         # Proxy lifecycle & connection testing
-│   │   ├── proxy_server.rs          # Local proxy binary (donut-proxy)
-│   │   ├── proxy_storage.rs         # Proxy config persistence (JSON files)
-│   │   ├── api_server.rs            # REST API (utoipa + axum)
-│   │   ├── mcp_server.rs            # MCP protocol server
-│   │   ├── sync/                    # Cloud sync (engine, encryption, manifest, scheduler)
-│   │   ├── vpn/                     # WireGuard tunnels
-│   │   ├── camoufox/                # Camoufox fingerprint engine (Bayesian network)
-│   │   ├── wayfern_manager.rs       # Wayfern (Chromium) browser management
-│   │   ├── camoufox_manager.rs      # Camoufox (Firefox) browser management
-│   │   ├── downloader.rs           # Browser binary downloader
-│   │   ├── extraction.rs           # Archive extraction (zip, tar, dmg, msi)
-│   │   ├── settings_manager.rs     # App settings persistence
-│   │   ├── cookie_manager.rs       # Cookie import/export
-│   │   ├── extension_manager.rs    # Browser extension management
-│   │   ├── group_manager.rs        # Profile group management
-│   │   ├── synchronizer.rs         # Real-time profile synchronizer
-│   │   ├── daemon/                 # Background daemon + tray icon (currently disabled)
-│   │   └── cloud_auth.rs           # Cloud authentication
-│   ├── tests/                      # Integration tests (proxy, sync, vpn)
-│   └── Cargo.toml                  # Rust dependencies
-├── donut-sync/                     # NestJS sync server (self-hostable)
-│   └── src/                        # Controllers, services, auth, S3 sync
-├── docs/                           # Documentation (self-hosting guide)
-├── flake.nix                       # Nix development environment
-└── .github/workflows/              # CI/CD (build-installers.yml)
+│   │   ├── proxy_manager.rs          # Proxy lifecycle & connection testing
+│   │   ├── proxy_server.rs           # Local proxy binary logic
+│   │   ├── proxy_storage.rs          # Proxy config persistence (JSON files)
+│   │   ├── api_server.rs             # REST API (utoipa + axum)
+│   │   ├── mcp_server.rs             # MCP protocol server
+│   │   ├── sync/                     # Cloud sync (engine, encryption, manifest, scheduler)
+│   │   ├── vpn/                      # WireGuard tunnels
+│   │   ├── recorder/                 # Action recorder (capture, player, recipes)
+│   │   ├── auto_register/            # ChatGPT auto-registration engine
+│   │   ├── email/                    # Gmail CDK / OTP helpers
+│   │   ├── events/                   # Backend event helpers
+│   │   ├── app_dirs.rs               # App data dir (JNMBROWSER_DATA_DIR / DONUTBROWSER_*)
+│   │   ├── human_typing.rs           # Human-like typing helpers
+│   │   ├── settings_manager.rs       # App settings persistence
+│   │   ├── cookie_manager.rs         # Cookie import/export
+│   │   ├── extension_manager.rs      # Browser extension management
+│   │   ├── group_manager.rs          # Profile group management
+│   │   ├── synchronizer.rs           # Real-time profile synchronizer
+│   │   ├── daemon/                   # Background daemon + tray icon
+│   │   └── bin/                      # donut-proxy, donut-daemon binaries
+│   ├── tests/                        # Integration tests (proxy, sync, vpn, recorder)
+│   └── Cargo.toml
+├── donut-sync/                       # NestJS sync server (self-hostable)
+├── docs/                             # Feature docs (auto-registration, self-hosting)
+├── scripts/                          # Build / test harness scripts
+├── flake.nix                         # Nix development environment
+└── .github/workflows/                # CI/CD (build-installers.yml)
 ```
+
+## Architecture boundaries
+
+- **Frontend (`src/`)** talks to Rust only via Tauri `invoke` / `listen`. Do not put browser process control or profile file I/O in React.
+- **Rust commands** are registered in `src-tauri/src/lib.rs`. New user-facing backend APIs need a command + frontend call site; dead commands fail `pnpm check-unused-commands`.
+- **Browser kernels**: Chromium path is primarily `chromium_manager.rs`; Camoufox is `camoufox_manager.rs`. Legacy “Wayfern” naming still appears in some vars/API cache files — treat carefully when renaming.
+- **Proxy**: local `donut-proxy` binary is required for proxy features; copy via `pnpm copy-proxy-binary` before bare `cargo` runs.
+- **donut-sync**: separate NestJS app with its own `package.json` / Biome / tsc. Lint/typecheck scripts cover both trees.
+- **Sensitive areas — read first**:
+  - Action recorder: `src-tauri/src/recorder/`, frontend hooks like `use-recorder-session.ts`
+  - Auto-register: `src-tauri/src/auto_register/`, `docs/auto-registration.md`
+  - Sync: `src-tauri/src/sync/`, `docs/self-hosting-donut-sync.md`
+  - MCP: `src-tauri/src/mcp_server.rs` (+ root MCP plan docs when working from a plan)
 
 ## Build and Dev Commands
 
 | Command | Description |
 |---------|-------------|
-| `pnpm dev` | Start Next.js dev server on port 12341 (Turbopack) |
-| `pnpm tauri dev` | Full Tauri dev mode (copies proxy binary + starts frontend + Rust) |
-| `pnpm build` | Build Next.js frontend |
+| `pnpm dev` | Start Next.js dev server on port **12341** (Turbopack) |
+| `pnpm tauri dev` | Full Tauri dev (proxy binary + frontend + Rust) |
+| `pnpm build` | Build Next.js frontend → `dist/` |
 | `pnpm tauri build` | Build full desktop app |
 | `pnpm format` | Auto-fix JS (Biome) + Rust (clippy --fix + fmt) |
-| `pnpm lint` | Lint JS (Biome + tsc), Rust (clippy), and spellcheck (typos) |
-| `pnpm test` | Run Rust unit tests + sync E2E tests |
-| `pnpm test:rust:unit` | Rust unit tests (lib + proxy + vpn integration) |
-| `pnpm test:sync-e2e` | Sync server E2E test harness |
-| `pnpm check-unused-commands` | Verify no unused Tauri commands |
+| `pnpm lint` | Lint JS (Biome + tsc), Rust (clippy), spellcheck (typos) |
+| `pnpm lint:js` | Biome + tsc for `src/` and `donut-sync/` |
+| `pnpm lint:rust` | clippy `-D warnings -D clippy::all` + fmt |
+| `pnpm test` | Rust unit tests + sync E2E harness |
+| `pnpm test:rust:unit` | `cargo test --lib` + proxy + vpn integration tests |
+| `pnpm test:sync-e2e` | Sync server E2E (`scripts/sync-test-harness.mjs`) |
+| `pnpm check-unused-commands` | Fail if unused Tauri commands exist |
+| `pnpm copy-proxy-binary` | Copy `donut-proxy` for local cargo/dev |
 | `pnpm shadcn:add` | Add a shadcn/ui component |
 
-- After making changes, run `pnpm format && pnpm lint && pnpm test` before finishing a task
-- JS linting uses **Biome** (not ESLint/Prettier) — config in `biome.json`
-- Rust linting uses `cargo clippy --all-targets --all-features -- -D warnings -D clippy::all`
-- `pnpm lint` includes spellcheck via [typos](https://github.com/crate-ci/typos). False positives are allowlisted in `_typos.toml` (locale JSON files and camoufox data are excluded)
+- After meaningful changes, run `pnpm format && pnpm lint && pnpm test` before finishing a task
+- JS linting uses **Biome 2.x** (not ESLint/Prettier) — `biome.json`
+- Rust linting: `cargo clippy --all-targets --all-features -- -D warnings -D clippy::all`
+- Spellcheck: [typos](https://github.com/crate-ci/typos); allowlist in `_typos.toml` (locale JSON + camoufox data excluded)
 
 ## Code Quality
 
 - Don't leave comments that don't add value
-- Don't duplicate code unless there's a very good reason; keep the same logic in one place
-- Anytime you make changes that affect copy or add new text, it has to be reflected in all translation files
+- Don't duplicate logic; keep one source of truth
+- User-facing copy changes must update **all** locale files
+- Match surrounding naming, comment density, and idioms
 
 ## Translations (mandatory)
 
-- Never write user-facing strings as raw English literals in JSX, toast messages, dialog titles/descriptions, button labels, placeholders, table headers, tooltips, or empty-state text. Always go through `t("namespace.key")` from `useTranslation()`.
-- This applies to every component under `src/` — including new ones. If a component doesn't already import `useTranslation`, add it.
-- Adding a new string means adding the key to ALL seven locale files in `src/i18n/locales/` (en, es, fr, ja, pt, ru, zh) — not just `en.json`. The English version alone is incomplete work.
-- Reuse existing keys (`common.buttons.*`, `common.labels.*`, `createProfile.*`, etc.) before creating new namespaces. Check `en.json` first.
-- Strings excluded from this rule: `console.log/warn/error`, dev-only debug labels, internal IDs, CSS class names, type names. If unsure whether a string renders to the user, assume it does and translate it.
-- **Never use `t(key, "fallback")` with a default-value second argument.** The 2-arg form is forbidden — every key must exist in every locale file before the call site lands. Fallbacks mask missing translations: a key missing from `ru.json` will silently render the English fallback to Russian users, so the bug never surfaces in CI or review. Only call `t("namespace.key")`. If a translation is missing for any locale, that's a bug to fix at the JSON, not a hole to paper over at the call site.
-- Empty-string values in non-English locales are also forbidden — a locale either has the right translation or it has the same content as English; never `""`. If a particular language doesn't need a particular phrase (e.g. a suffix that doesn't grammatically apply), refactor the JSX to use a single interpolated key (`t("foo.bar", { name })` with `"...{{name}}..."` in each locale) instead of splitting prefix/suffix.
+- Never write user-facing strings as raw English literals in JSX, toasts, dialogs, buttons, placeholders, table headers, tooltips, or empty states. Always use `t("namespace.key")` from `useTranslation()`.
+- Applies to every component under `src/`. Import `useTranslation` when missing.
+- New strings → add the key to **all seven** locales in `src/i18n/locales/` (`en`, `es`, `fr`, `ja`, `pt`, `ru`, `zh`). English-only is incomplete.
+- Reuse existing keys (`common.buttons.*`, `common.labels.*`, `createProfile.*`, etc.) before new namespaces. Check `en.json` first.
+- Excluded: `console.log/warn/error`, dev-only labels, internal IDs, CSS classes, type names. If it might render to users, translate it.
+- **Never use `t(key, "fallback")`.** Every key must exist in every locale before the call site lands. Fallbacks hide missing translations.
+- Empty-string values in non-English locales are forbidden. Prefer one interpolated key (`t("foo.bar", { name })`) over prefix/suffix splits.
 
 ## Singletons
 
@@ -93,33 +117,36 @@ JnmBrowser/
 
 ## UI Theming
 
-- Never use hardcoded Tailwind color classes (e.g., `text-red-500`, `bg-green-600`, `border-yellow-400`). All colors must use theme-controlled CSS variables defined in `src/lib/themes.ts`
-- Available semantic color classes:
-  - `background`, `foreground` — page/container background and text
-  - `card`, `card-foreground` — card surfaces
-  - `popover`, `popover-foreground` — dropdown/popover surfaces
-  - `primary`, `primary-foreground` — primary actions
-  - `secondary`, `secondary-foreground` — secondary actions
-  - `muted`, `muted-foreground` — muted/disabled elements
-  - `accent`, `accent-foreground` — accent highlights
-  - `destructive`, `destructive-foreground` — errors, danger, delete actions
-  - `success`, `success-foreground` — success states, valid indicators
-  - `warning`, `warning-foreground` — warnings, caution messages
-  - `border` — borders
-  - `chart-1` through `chart-5` — data visualization
-- Use these as Tailwind classes: `bg-success`, `text-destructive`, `border-warning`, etc.
-- For lighter variants use opacity: `bg-destructive/10`, `bg-success/10`, `border-warning/50`
+- Never use hardcoded Tailwind color classes (e.g. `text-red-500`, `bg-green-600`). Use theme CSS variables from `src/lib/themes.ts`
+- Semantic classes: `background`, `foreground`, `card`, `popover`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `success`, `warning`, `border`, `chart-1`…`chart-5` (and `*-foreground` pairs)
+- Tailwind usage: `bg-success`, `text-destructive`, `border-warning`, or opacity variants like `bg-destructive/10`
+- Path aliases: `@/components`, `@/hooks`, `@/lib`, `@/components/ui` (see `components.json`)
 
-## Gotchas
+## Frontend / Tauri event gotchas
 
-- **Proxy binary**: `donut-proxy` must be copied before dev/build. The `prebuild`, `pretauri:dev`, and `precargo` scripts handle this automatically via `copy-proxy-binary.mjs`. If you run `cargo` commands directly, run `pnpm copy-proxy-binary` first.
-- **Tauri v2**: This project uses Tauri v2 (schema `https://schema.tauri.app/config/2`). APIs differ from v1 — check Tauri v2 docs.
-- **Biome, not ESLint**: JS/TS linting and formatting uses Biome 2.x. Use `pnpm format:js` to auto-fix, not `prettier` or `eslint --fix`.
-- **Dev port**: Frontend dev server runs on port `12341`, not the default 3000.
-- **donut-sync**: The sync server is a separate NestJS app in `donut-sync/`. It has its own `package.json`, `biome.json`, and TypeScript config. Lint and typecheck commands cover both `src/` and `donut-sync/src/`.
-- **Husky**: Git hooks are managed by Husky (`pnpm prepare` sets them up).
-- **Unused Tauri commands**: Run `pnpm check-unused-commands` to verify no dead Tauri commands exist — there's a test (`test_no_unused_tauri_commands`) that enforces this.
-- **Integration tests**: Rust integration tests live in `src-tauri/tests/` (proxy, sync, VPN). They may require specific environment setup.
+- **`listen()` is async.** Always `const unlisten = await listen(...)` **before** launching a profile or starting work that emits the event. Fire-and-forget `void listen().then(...)` then immediately launch can miss `profile-running-changed` and similar events.
+- Launch helpers that may cancel (e.g. window-resize warning) should return a boolean / distinguish cancel from failure so UI does not toast `launchFailed` on intentional cancel.
+- Profile action items often use `ActionItem { icon, label, onClick, disabled, hidden }` — mirror existing Launch-with-Sync / Launch-with-Record patterns for chromium/camoufox instead of inventing parallel controls.
+- Bulk-selection table already has a checkbox column — do not add a second checkbox for record/select flows.
+
+## Rust / test gotchas
+
+- **Proxy binary**: `prebuild` / `pretauri:dev` / `precargo` call `copy-proxy-binary.mjs`. Bare `cargo` needs `pnpm copy-proxy-binary` first.
+- **Tauri v2**: schema `https://schema.tauri.app/config/2`. Do not use Tauri v1 APIs.
+- **Dev port**: frontend is `12341`, not 3000. Tauri `devUrl` matches this.
+- **Data dir isolation**: prefer `JNMBROWSER_DATA_DIR` (fallback `DONUTBROWSER_*`) for process-level isolation. Lib-only `app_dirs::set_test_data_dir` is `#[cfg(test)]` on the **lib** crate — **integration tests** in `src-tauri/tests/` cannot call it; use the env var + `serial_test::serial` (env is process-global).
+- **clippy `private-interfaces`**: a `pub` module/item must not expose `pub(crate)` types. Either make the type `pub`, keep the module private, or re-export a public facade.
+- **Unused Tauri commands**: `pnpm check-unused-commands` / `test_no_unused_tauri_commands` must stay green.
+- **Husky**: `pnpm prepare` installs git hooks.
+
+## Docs agents should consult when relevant
+
+| Area | Doc |
+|------|-----|
+| Auto-registration | `docs/auto-registration.md` |
+| Self-host sync | `docs/self-hosting-donut-sync.md` |
+| Active ZCode plans | `.zcode/plans/` (check for updates before continuing a plan) |
+| Root plan books | MCP / kernel / Wayfern markdown plans at repo root — only when the active task references them |
 
 ## Proprietary Changes
 

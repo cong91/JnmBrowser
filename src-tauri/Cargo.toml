@@ -28,6 +28,14 @@ path = "src/bin/proxy_server.rs"
 name = "donut-daemon"
 path = "src/bin/donut_daemon.rs"
 
+[[bin]]
+name = "auto-reg-live"
+path = "src/bin/auto_reg_live.rs"
+
+[[bin]]
+name = "probe-free-trial"
+path = "src/bin/probe_free_trial.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 resvg = "0.47"

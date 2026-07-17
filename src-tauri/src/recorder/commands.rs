@@ -138,6 +138,18 @@ pub async fn list_recordings() -> Result<Vec<RecordingSummary>, String> {
   Ok(storage::list_recordings())
 }
 
+/// Absolute path to the recordings directory on disk.
+///
+/// Ensures the directory exists so "Open folder" never fails on a missing path
+/// before the first recording is saved.
+#[tauri::command]
+pub async fn get_recordings_dir() -> Result<String, String> {
+  let dir = storage::recordings_dir();
+  std::fs::create_dir_all(&dir)
+    .map_err(|e| format!("Failed to create recordings directory: {e}"))?;
+  Ok(dir.to_string_lossy().to_string())
+}
+
 /// Load a full saved recording by id.
 #[tauri::command]
 pub async fn get_recording(id: String) -> Result<Recording, String> {
