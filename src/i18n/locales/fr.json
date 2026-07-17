@@ -1738,10 +1738,22 @@
     "networkModeProxy": "Proxy",
     "networkModeNord": "NordVPN",
     "nordGroup": "Groupe / pays Nord",
-    "nordGroupPlaceholder": "p. ex. United States",
+    "nordGroupPlaceholder": "p. ex. Japan",
     "nordServerName": "Nom du serveur Nord (optionnel)",
     "nordServerPlaceholder": "p. ex. United States #5",
     "rotateEveryN": "Changer d'IP tous les N succès",
-    "nordSystemWideWarning": "NordVPN change l'IP système de tout le PC pendant l'enregistrement."
+    "nordSystemWideWarning": "NordVPN change l'IP système de tout le PC pendant l'enregistrement.",
+    "nordGroupCustom": "Groupe Nord personnalisé",
+    "nordLocation": "Emplacement Nord",
+    "nordLocationPlaceholder": "Choisir un emplacement",
+    "nordLocJapan": "Japon",
+    "nordLocUnitedStates": "États-Unis",
+    "nordLocSingapore": "Singapour",
+    "nordLocHongKong": "Hong Kong",
+    "nordLocUnitedKingdom": "Royaume-Uni",
+    "nordLocGermany": "Allemagne",
+    "nordLocCanada": "Canada",
+    "nordLocAustralia": "Australie",
+    "nordLocCustom": "Personnalisé…"
   }
 }

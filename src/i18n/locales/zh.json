@@ -1738,10 +1738,22 @@
     "networkModeProxy": "代理",
     "networkModeNord": "NordVPN",
     "nordGroup": "Nord 分组 / 国家",
-    "nordGroupPlaceholder": "例如 United States",
+    "nordGroupPlaceholder": "例如 Japan",
     "nordServerName": "Nord 服务器名称（可选）",
     "nordServerPlaceholder": "例如 United States #5",
     "rotateEveryN": "每成功 N 个账号轮换 IP",
-    "nordSystemWideWarning": "注册运行期间，NordVPN 会更改整台电脑的系统 IP。"
+    "nordSystemWideWarning": "注册运行期间，NordVPN 会更改整台电脑的系统 IP。",
+    "nordGroupCustom": "自定义 Nord 分组",
+    "nordLocation": "Nord 位置",
+    "nordLocationPlaceholder": "选择位置",
+    "nordLocJapan": "日本",
+    "nordLocUnitedStates": "美国",
+    "nordLocSingapore": "新加坡",
+    "nordLocHongKong": "香港",
+    "nordLocUnitedKingdom": "英国",
+    "nordLocGermany": "德国",
+    "nordLocCanada": "加拿大",
+    "nordLocAustralia": "澳大利亚",
+    "nordLocCustom": "自定义…"
   }
 }

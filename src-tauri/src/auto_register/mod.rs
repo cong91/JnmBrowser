@@ -15,4 +15,6 @@ pub use engine::RegistrationEngine;
 #[allow(unused_imports)]
 pub use store::{delete_registered_account, list_registered_accounts, save_registration_result};
 #[allow(unused_imports)]
-pub use types::{RegistrationConfig, RegistrationProgress, RegistrationResult, RegistrationStep};
+pub use types::{
+  NetworkMode, RegistrationConfig, RegistrationProgress, RegistrationResult, RegistrationStep,
+};

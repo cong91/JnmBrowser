@@ -54,10 +54,21 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   const [accountsPerCdk, setAccountsPerCdk] = useState(1);
   const [headless, setHeadless] = useState(false);
   const [networkMode, setNetworkMode] = useState<NetworkMode>("none");
-  const [rotateEveryN, setRotateEveryN] = useState(2);
-  const [nordGroup, setNordGroup] = useState("");
+  const [rotateEveryN, setRotateEveryN] = useState(1);
+  const [nordGroup, setNordGroup] = useState("Japan");
   const [nordServerName, setNordServerName] = useState("");
   const [activeTab, setActiveTab] = useState("register");
+
+  const nordLocations = [
+    { value: "Japan", labelKey: "registration.nordLocJapan" },
+    { value: "United States", labelKey: "registration.nordLocUnitedStates" },
+    { value: "Singapore", labelKey: "registration.nordLocSingapore" },
+    { value: "Hong Kong", labelKey: "registration.nordLocHongKong" },
+    { value: "United Kingdom", labelKey: "registration.nordLocUnitedKingdom" },
+    { value: "Germany", labelKey: "registration.nordLocGermany" },
+    { value: "Canada", labelKey: "registration.nordLocCanada" },
+    { value: "Australia", labelKey: "registration.nordLocAustralia" },
+  ] as const;
 
   const progressList = Array.from(progressMap.values());
 
@@ -239,41 +250,85 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                 </p>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">
-                    <Label htmlFor="nordGroup">
-                      {t("registration.nordGroup")}
+                    <Label htmlFor="nordLocation">
+                      {t("registration.nordLocation")}
+                    </Label>
+                    <Select
+                      value={
+                        nordLocations.some((l) => l.value === nordGroup)
+                          ? nordGroup
+                          : "custom"
+                      }
+                      onValueChange={(v) => {
+                        if (v === "custom") {
+                          if (
+                            nordLocations.some((l) => l.value === nordGroup)
+                          ) {
+                            setNordGroup("");
+                          }
+                          return;
+                        }
+                        setNordGroup(v);
+                      }}
+                    >
+                      <SelectTrigger id="nordLocation">
+                        <SelectValue
+                          placeholder={t(
+                            "registration.nordLocationPlaceholder",
+                          )}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {nordLocations.map((loc) => (
+                          <SelectItem key={loc.value} value={loc.value}>
+                            {t(loc.labelKey)}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value="custom">
+                          {t("registration.nordLocCustom")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="rotateEveryN">
+                      {t("registration.rotateEveryN")}
                     </Label>
                     <Input
-                      id="nordGroup"
+                      id="rotateEveryN"
+                      type="number"
+                      min={0}
+                      max={50}
+                      value={rotateEveryN}
+                      onChange={(e) =>
+                        setRotateEveryN(Number(e.target.value) || 0)
+                      }
+                    />
+                  </div>
+                </div>
+                {(!nordLocations.some((l) => l.value === nordGroup) ||
+                  nordGroup === "") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="nordGroupCustom">
+                      {t("registration.nordGroupCustom")}
+                    </Label>
+                    <Input
+                      id="nordGroupCustom"
                       placeholder={t("registration.nordGroupPlaceholder")}
                       value={nordGroup}
                       onChange={(e) => setNordGroup(e.target.value)}
                     />
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="nordServer">
-                      {t("registration.nordServerName")}
-                    </Label>
-                    <Input
-                      id="nordServer"
-                      placeholder={t("registration.nordServerPlaceholder")}
-                      value={nordServerName}
-                      onChange={(e) => setNordServerName(e.target.value)}
-                    />
-                  </div>
-                </div>
+                )}
                 <div className="space-y-2">
-                  <Label htmlFor="rotateEveryN">
-                    {t("registration.rotateEveryN")}
+                  <Label htmlFor="nordServer">
+                    {t("registration.nordServerName")}
                   </Label>
                   <Input
-                    id="rotateEveryN"
-                    type="number"
-                    min={0}
-                    max={50}
-                    value={rotateEveryN}
-                    onChange={(e) =>
-                      setRotateEveryN(Number(e.target.value) || 0)
-                    }
+                    id="nordServer"
+                    placeholder={t("registration.nordServerPlaceholder")}
+                    value={nordServerName}
+                    onChange={(e) => setNordServerName(e.target.value)}
                   />
                 </div>
               </div>

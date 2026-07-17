@@ -1311,31 +1311,48 @@ impl RegistrationEngine {
             self.log(&format!("{prefix} Auth UI URL: {cur_url}"));
           }
 
-          if cur_url.contains("email-verification")
+          // OpenAI sometimes jumps to email-verification without a password form
+          // (especially after choose-an-account). Never mark register_submitted
+          // until the password is actually set — otherwise create_account → 400.
+          let skipped_password_form = cur_url.contains("email-verification")
             || cur_url.contains("email-otp")
-            || cur_url.contains("about-you")
-          {
-            register_submitted = true;
-            continue;
-          }
+            || cur_url.contains("about-you");
 
-          match self.submit_password_via_ui(session, password).await {
-            Ok(()) => {
-              self.log(&format!("{prefix} Password submitted via UI form"));
+          if skipped_password_form {
+            self.log(&format!(
+              "{prefix} Password form skipped by UI ({cur_url}); forcing API register"
+            ));
+            let reg_js = format!(
+              "fetch('https://auth.openai.com/api/accounts/user/register', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ username: '{email}', password: '{pw}' }}) }})",
+              did = self.device_id,
+              email = alias_email,
+              pw = password,
+            );
+            let reg = session.fetch_json(&reg_js).await?;
+            self.log(&format!("{prefix} Force-register response: {reg}"));
+            let st = reg["_status"].as_u64().unwrap_or(200);
+            if st != 200 || reg.get("error").is_some() {
+              return Err(format!("Force API register failed: {reg}"));
             }
-            Err(ui_err) => {
-              self.log(&format!("{prefix} UI password submit failed: {ui_err}"));
-              let reg_js = format!(
+          } else {
+            match self.submit_password_via_ui(session, password).await {
+              Ok(()) => {
+                self.log(&format!("{prefix} Password submitted via UI form"));
+              }
+              Err(ui_err) => {
+                self.log(&format!("{prefix} UI password submit failed: {ui_err}"));
+                let reg_js = format!(
                 "fetch('https://auth.openai.com/api/accounts/user/register', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ username: '{email}', password: '{pw}' }}) }})",
                 did = self.device_id, email = alias_email, pw = password,
               );
-              let reg = session.fetch_json(&reg_js).await?;
-              self.log(&format!("{prefix} Register response: {reg}"));
-              let st = reg["_status"].as_u64().unwrap_or(200);
-              if st != 200 || reg.get("error").is_some() {
-                return Err(format!(
-                  "UI password failed ({ui_err}); API register failed: {reg}"
-                ));
+                let reg = session.fetch_json(&reg_js).await?;
+                self.log(&format!("{prefix} Register response: {reg}"));
+                let st = reg["_status"].as_u64().unwrap_or(200);
+                if st != 200 || reg.get("error").is_some() {
+                  return Err(format!(
+                    "UI password failed ({ui_err}); API register failed: {reg}"
+                  ));
+                }
               }
             }
           }
@@ -1456,9 +1473,11 @@ impl RegistrationEngine {
             sentinel = sentinel_header, did = self.device_id, first = first_name, last = last_name, birth = birthdate,
           );
           let create = session.fetch_json(&create_js).await?;
+          self.log(&format!("{prefix} create_account response: {create}"));
           let cs = create["_status"].as_u64().unwrap_or(200);
           if cs != 200 {
-            return Err(format!("Create account HTTP {cs}"));
+            let body = create["_body"].as_str().unwrap_or("");
+            return Err(format!("Create account HTTP {cs}: {create} {body}"));
           }
           account_created = true;
           self.log(&format!("{prefix} Account created"));
@@ -2517,7 +2536,7 @@ impl RegistrationEngine {
       let profiles = crate::profile::ProfileManager::instance()
         .list_profiles()
         .map_err(|e| format!("List profiles: {e}"))?;
-      let found = profiles
+      let mut found = profiles
         .into_iter()
         .find(|p| p.id.to_string() == *profile_id)
         .ok_or_else(|| format!("Configured profile_id not found: {profile_id}"))?;
@@ -2525,6 +2544,15 @@ impl RegistrationEngine {
         "Using existing profile: {} ({}) browser={}",
         found.name, found.id, found.browser
       ));
+      // Auto-reg must not reuse a cached Camoufox fingerprint — force a fresh one
+      // on every launch (and strip any stored fingerprint so launch regenerates).
+      if found.browser.eq_ignore_ascii_case("camoufox") {
+        let mut cfg = found.camoufox_config.clone().unwrap_or_default();
+        cfg.fingerprint = None;
+        cfg.randomize_fingerprint_on_launch = Some(true);
+        found.camoufox_config = Some(cfg);
+        self.log("Camoufox auto-reg: randomize_fingerprint_on_launch=true (no cache)");
+      }
       found
     } else {
       let browser_str = if self.config.browser_type == "camoufox" {
@@ -2543,7 +2571,7 @@ impl RegistrationEngine {
         &short_id[..8]
       );
 
-      create_browser_profile_with_group(
+      let mut created = create_browser_profile_with_group(
         app_handle.clone(),
         profile_name,
         browser.as_str().to_string(),
@@ -2559,7 +2587,17 @@ impl RegistrationEngine {
         None,
       )
       .await
-      .map_err(|e| format!("Create profile: {e}"))?
+      .map_err(|e| format!("Create profile: {e}"))?;
+
+      // Always mint a fresh Camoufox fingerprint for auto-reg (never cache).
+      if created.browser.eq_ignore_ascii_case("camoufox") {
+        let mut cfg = created.camoufox_config.clone().unwrap_or_default();
+        cfg.fingerprint = None;
+        cfg.randomize_fingerprint_on_launch = Some(true);
+        created.camoufox_config = Some(cfg);
+        self.log("Camoufox auto-reg ephemeral: randomize_fingerprint_on_launch=true");
+      }
+      created
     };
 
     let launched = BrowserRunner::instance()

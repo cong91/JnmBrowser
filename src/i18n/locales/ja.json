@@ -1738,10 +1738,22 @@
     "networkModeProxy": "プロキシ",
     "networkModeNord": "NordVPN",
     "nordGroup": "Nord グループ / 国",
-    "nordGroupPlaceholder": "例: United States",
+    "nordGroupPlaceholder": "例: Japan",
     "nordServerName": "Nord サーバー名（任意）",
     "nordServerPlaceholder": "例: United States #5",
     "rotateEveryN": "N 件成功ごとに IP を切り替え",
-    "nordSystemWideWarning": "登録実行中、NordVPN は PC 全体のシステム IP を変更します。"
+    "nordSystemWideWarning": "登録実行中、NordVPN は PC 全体のシステム IP を変更します。",
+    "nordGroupCustom": "カスタム Nord グループ",
+    "nordLocation": "Nord ロケーション",
+    "nordLocationPlaceholder": "ロケーションを選択",
+    "nordLocJapan": "日本",
+    "nordLocUnitedStates": "アメリカ合衆国",
+    "nordLocSingapore": "シンガポール",
+    "nordLocHongKong": "香港",
+    "nordLocUnitedKingdom": "イギリス",
+    "nordLocGermany": "ドイツ",
+    "nordLocCanada": "カナダ",
+    "nordLocAustralia": "オーストラリア",
+    "nordLocCustom": "カスタム…"
   }
 }

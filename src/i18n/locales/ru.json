@@ -1738,10 +1738,22 @@
     "networkModeProxy": "Прокси",
     "networkModeNord": "NordVPN",
     "nordGroup": "Группа / страна Nord",
-    "nordGroupPlaceholder": "напр. United States",
+    "nordGroupPlaceholder": "напр. Japan",
     "nordServerName": "Имя сервера Nord (необяз.)",
     "nordServerPlaceholder": "напр. United States #5",
     "rotateEveryN": "Менять IP каждые N успехов",
-    "nordSystemWideWarning": "NordVPN меняет системный IP всего ПК во время регистрации."
+    "nordSystemWideWarning": "NordVPN меняет системный IP всего ПК во время регистрации.",
+    "nordGroupCustom": "Свой группа Nord",
+    "nordLocation": "Локация Nord",
+    "nordLocationPlaceholder": "Выберите локацию",
+    "nordLocJapan": "Япония",
+    "nordLocUnitedStates": "США",
+    "nordLocSingapore": "Сингапур",
+    "nordLocHongKong": "Гонконг",
+    "nordLocUnitedKingdom": "Великобритания",
+    "nordLocGermany": "Германия",
+    "nordLocCanada": "Канада",
+    "nordLocAustralia": "Австралия",
+    "nordLocCustom": "Свой…"
   }
 }
