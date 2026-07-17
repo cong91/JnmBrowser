@@ -1013,7 +1013,8 @@ impl RegistrationEngine {
                     );
                   }
                   Err(e) => {
-                    // Hard-stop: rotate disconnects first; continuing would use host IP.
+                    // Hard-stop batch if rotate fails. Do NOT disconnect Nord —
+                    // leave VPN up for the user after auto-reg ends (success or fail).
                     let msg = format!("NordVPN rotate failed: {e}");
                     self.log(&msg);
                     self.emit(
@@ -1025,10 +1026,6 @@ impl RegistrationEngine {
                       total_cdks,
                       None,
                     );
-                    if nord_connected_by_us {
-                      let _ = super::nord_cli::disconnect(cli.as_deref());
-                    }
-                    // Abort remaining batch after partial successes.
                     let ok = all_results.iter().filter(|r| r.success).count();
                     return RegistrationResult {
                       success: ok > 0,
@@ -1073,11 +1070,9 @@ impl RegistrationEngine {
       }
     }
 
+    // Keep NordVPN connected after the batch finishes (user manages disconnect).
     if nord_connected_by_us {
-      match super::nord_cli::disconnect(cli.as_deref()) {
-        Ok(()) => self.log("NordVPN disconnected"),
-        Err(e) => self.log(&format!("NordVPN disconnect (best-effort) failed: {e}")),
-      }
+      self.log("NordVPN left connected after auto-reg (no auto-disconnect)");
     }
 
     // Return summary result
