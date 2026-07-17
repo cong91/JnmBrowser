@@ -920,6 +920,10 @@ impl RegistrationEngine {
                     nord_connected_by_us = true;
                     let mut new_ip = old_ip.clone();
                     for _ in 0..20 {
+                      if self.is_cancelled() {
+                        self.log("Cancelled during Nord IP verify");
+                        break;
+                      }
                       sleep(std::time::Duration::from_secs(3)).await;
                       if let Ok(ip) = crate::ip_utils::fetch_public_ip(None).await {
                         new_ip = ip;
@@ -946,7 +950,44 @@ impl RegistrationEngine {
                     );
                   }
                   Err(e) => {
-                    self.log(&format!("Nord rotate error (soft-continue): {e}"));
+                    // Hard-stop: rotate disconnects first; continuing would use host IP.
+                    let msg = format!("NordVPN rotate failed: {e}");
+                    self.log(&msg);
+                    self.emit(
+                      &app_handle,
+                      RegistrationStep::Failed,
+                      &msg,
+                      cdk_idx as u32,
+                      alias_idx,
+                      total_cdks,
+                      None,
+                    );
+                    if nord_connected_by_us {
+                      let _ = super::nord_cli::disconnect(cli.as_deref());
+                    }
+                    // Abort remaining batch after partial successes.
+                    let ok = all_results.iter().filter(|r| r.success).count();
+                    return RegistrationResult {
+                      success: ok > 0,
+                      email: String::new(),
+                      password: String::new(),
+                      account_id: format!("batch:{ok}"),
+                      access_token: String::new(),
+                      device_id: String::new(),
+                      error_message: msg,
+                      step_logs: self.logs.clone(),
+                      created_at: Utc::now(),
+                      two_fa_enabled: false,
+                      totp_secret: String::new(),
+                      free_trial_eligible: false,
+                      plan_type: String::new(),
+                      cdk: format!("{total_cdks} CDKs processed"),
+                      base_email: String::new(),
+                      status: super::types::AccountInventoryStatus::Available,
+                      note: String::new(),
+                      exported_at: None,
+                      sold_at: None,
+                    };
                   }
                 }
               }

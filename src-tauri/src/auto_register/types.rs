@@ -75,6 +75,23 @@ pub fn should_rotate(success_count: u32, every_n: u32) -> bool {
 }
 
 impl RegistrationConfig {
+  /// Normalize legacy payloads: bare `proxyId` without mode → Proxy.
+  /// Call before validate / run.
+  pub fn normalize_network(&mut self) {
+    let has_proxy = self
+      .proxy_id
+      .as_ref()
+      .map(|s| !s.trim().is_empty())
+      .unwrap_or(false);
+    if self.network_mode == NetworkMode::None && has_proxy {
+      self.network_mode = NetworkMode::Proxy;
+    }
+    // Nord without explicit rotateEveryN defaults to 2 (UI parity).
+    if self.network_mode == NetworkMode::Nord && self.rotate_every_n == 0 {
+      self.rotate_every_n = 2;
+    }
+  }
+
   /// Validate dual-mode network fields before starting a task.
   pub fn validate_network(&self) -> Result<(), String> {
     match self.network_mode {
@@ -106,11 +123,12 @@ impl RegistrationConfig {
     }
   }
 
-  /// Proxy to attach on profile create — only when mode is Proxy.
+  /// Proxy to attach on profile create — Proxy mode, or legacy proxyId with None.
   pub fn effective_proxy_id(&self) -> Option<String> {
     match self.network_mode {
       NetworkMode::Proxy => self.proxy_id.clone(),
-      _ => None,
+      NetworkMode::None => self.proxy_id.clone().filter(|s| !s.trim().is_empty()),
+      NetworkMode::Nord => None,
     }
   }
 }
@@ -227,14 +245,25 @@ mod network_config_tests {
   }
 
   #[test]
-  fn effective_proxy_id_only_in_proxy_mode() {
+  fn effective_proxy_id_legacy_none_with_proxy_id() {
     let mut c = base_config(NetworkMode::None);
     c.proxy_id = Some("p1".into());
-    assert!(c.effective_proxy_id().is_none());
-    c.network_mode = NetworkMode::Proxy;
+    // Before normalize: still honor proxy_id for safety.
+    assert_eq!(c.effective_proxy_id().as_deref(), Some("p1"));
+    c.normalize_network();
+    assert_eq!(c.network_mode, NetworkMode::Proxy);
     assert_eq!(c.effective_proxy_id().as_deref(), Some("p1"));
     c.network_mode = NetworkMode::Nord;
+    c.proxy_id = None;
     assert!(c.effective_proxy_id().is_none());
+  }
+
+  #[test]
+  fn nord_normalize_default_rotate_every_n() {
+    let mut c = base_config(NetworkMode::Nord);
+    assert_eq!(c.rotate_every_n, 0);
+    c.normalize_network();
+    assert_eq!(c.rotate_every_n, 2);
   }
 }
 

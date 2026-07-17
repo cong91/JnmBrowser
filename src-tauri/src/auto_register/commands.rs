@@ -16,6 +16,8 @@ pub async fn start_auto_registration(
   app_handle: tauri::AppHandle,
   config: RegistrationConfig,
 ) -> Result<String, String> {
+  let mut config = config;
+  config.normalize_network();
   config.validate_network()?;
 
   let cancel_flag = Arc::new(AtomicBool::new(false));
