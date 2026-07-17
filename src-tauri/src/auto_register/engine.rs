@@ -173,8 +173,8 @@ impl CdpConnection {
     Ok(())
   }
 
-  async fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String> {
-    let _ = self
+  async fn mouse_move(&mut self, x: f64, y: f64) -> Result<(), String> {
+    self
       .send_cmd(
         "Input.dispatchMouseEvent",
         serde_json::json!({
@@ -184,8 +184,14 @@ impl CdpConnection {
           "button": "none",
         }),
       )
-      .await;
-    sleep(std::time::Duration::from_millis(40)).await;
+      .await?;
+    Ok(())
+  }
+
+  async fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String> {
+    // Instant click at point (prefer humanized path via BrowserSession::human_click).
+    let _ = self.mouse_move(x, y).await;
+    sleep(std::time::Duration::from_millis(25)).await;
     self
       .send_cmd(
         "Input.dispatchMouseEvent",
@@ -198,7 +204,7 @@ impl CdpConnection {
         }),
       )
       .await?;
-    sleep(std::time::Duration::from_millis(40)).await;
+    sleep(std::time::Duration::from_millis(35)).await;
     self
       .send_cmd(
         "Input.dispatchMouseEvent",
@@ -208,6 +214,59 @@ impl CdpConnection {
           "y": y,
           "button": "left",
           "clickCount": 1,
+        }),
+      )
+      .await?;
+    Ok(())
+  }
+
+  async fn key_char(&mut self, ch: char) -> Result<(), String> {
+    let text = ch.to_string();
+    self
+      .send_cmd(
+        "Input.dispatchKeyEvent",
+        serde_json::json!({
+          "type": "keyDown",
+          "text": text,
+          "key": text,
+          "unmodifiedText": text,
+        }),
+      )
+      .await?;
+    self
+      .send_cmd(
+        "Input.dispatchKeyEvent",
+        serde_json::json!({
+          "type": "keyUp",
+          "key": text,
+        }),
+      )
+      .await?;
+    Ok(())
+  }
+
+  async fn key_backspace(&mut self) -> Result<(), String> {
+    self
+      .send_cmd(
+        "Input.dispatchKeyEvent",
+        serde_json::json!({
+          "type": "keyDown",
+          "key": "Backspace",
+          "code": "Backspace",
+          "windowsVirtualKeyCode": 8,
+          "nativeVirtualKeyCode": 8,
+        }),
+      )
+      .await?;
+    self
+      .send_cmd(
+        "Input.dispatchKeyEvent",
+        serde_json::json!({
+          "type": "keyUp",
+          "key": "Backspace",
+          "code": "Backspace",
+          "windowsVirtualKeyCode": 8,
+          "nativeVirtualKeyCode": 8,
         }),
       )
       .await?;
@@ -400,6 +459,20 @@ impl BrowserSession {
     }
   }
 
+  async fn mouse_move(&mut self, x: f64, y: f64) -> Result<(), String> {
+    match self {
+      Self::Cdp(cdp) => cdp.mouse_move(x, y).await,
+      Self::Camoufox { page, .. } => {
+        page
+          .mouse
+          .r#move(x, y, Some(1))
+          .await
+          .map_err(|e| format!("Camoufox mouse move failed: {e}"))?;
+        Ok(())
+      }
+    }
+  }
+
   async fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String> {
     match self {
       Self::Cdp(cdp) => cdp.mouse_click(x, y).await,
@@ -413,6 +486,125 @@ impl BrowserSession {
         Ok(())
       }
     }
+  }
+
+  /// Humanized move along a curved path then left-click (service-agnostic).
+  async fn human_click(
+    &mut self,
+    from: (f64, f64),
+    to: (f64, f64),
+    profile: &crate::browser_actions::HumanProfile,
+  ) -> Result<(), String> {
+    use crate::browser_actions::{jitter_ms, mouse_path, think_delay};
+
+    sleep(think_delay(profile)).await;
+    let path = mouse_path(from, to, profile.mouse_steps);
+    for (i, (x, y)) in path.iter().enumerate() {
+      self.mouse_move(*x, *y).await?;
+      if i + 1 < path.len() {
+        sleep(jitter_ms(4, 18)).await;
+      }
+    }
+    sleep(jitter_ms(25, 90)).await;
+    self.mouse_click(to.0, to.1).await?;
+    sleep(jitter_ms(40, 140)).await;
+    Ok(())
+  }
+
+  async fn key_char(&mut self, ch: char) -> Result<(), String> {
+    match self {
+      Self::Cdp(cdp) => cdp.key_char(ch).await,
+      Self::Camoufox { page, .. } => {
+        // type() emits keydown/keypress/input/keyup for the character.
+        let s = ch.to_string();
+        page
+          .keyboard
+          .r#type(&s, Some(0.0))
+          .await
+          .map_err(|e| format!("Camoufox type char failed: {e}"))?;
+        Ok(())
+      }
+    }
+  }
+
+  async fn key_backspace(&mut self) -> Result<(), String> {
+    match self {
+      Self::Cdp(cdp) => cdp.key_backspace().await,
+      Self::Camoufox { page, .. } => {
+        page
+          .keyboard
+          .press("Backspace", Some(20.0))
+          .await
+          .map_err(|e| format!("Camoufox backspace failed: {e}"))?;
+        Ok(())
+      }
+    }
+  }
+
+  /// Focus element + type with Markov delays / occasional typos (via human_typing).
+  async fn human_type(
+    &mut self,
+    selector: &str,
+    text: &str,
+    profile: &crate::browser_actions::HumanProfile,
+  ) -> Result<(), String> {
+    use crate::browser_actions::{post_type_delay, think_delay, typing_events, typing_step_delays};
+    use crate::human_typing::TypingAction;
+
+    // Focus + clear via JS (still need focus for real key events).
+    let focus_js = format!(
+      r#"(function(){{
+        const el = document.querySelector({sel});
+        if (!el) return {{ ok: false, reason: 'not_found' }};
+        el.focus();
+        el.click();
+        try {{
+          if (el.select) el.select();
+          else if (typeof el.value === 'string') el.value = '';
+        }} catch (_) {{}}
+        const r = el.getBoundingClientRect();
+        return {{ ok: true, x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height }};
+      }})()"#,
+      sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+    );
+    let result = self.evaluate(&focus_js, false).await?;
+    let value = result
+      .get("value")
+      .cloned()
+      .ok_or_else(|| "human_type: no evaluate value".to_string())?;
+    if value["ok"].as_bool() != Some(true) {
+      return Err(format!(
+        "human_type: {}",
+        value["reason"].as_str().unwrap_or("failed")
+      ));
+    }
+
+    sleep(think_delay(profile)).await;
+
+    let events = typing_events(text, profile.wpm);
+    let steps = typing_step_delays(&events);
+    for (delay, action) in steps {
+      sleep(delay).await;
+      match action {
+        TypingAction::Char(ch) => self.key_char(ch).await?,
+        TypingAction::Backspace => self.key_backspace().await?,
+      }
+    }
+    sleep(post_type_delay(profile)).await;
+
+    // Fire input/change so React/controlled fields sync if needed.
+    let fire_js = format!(
+      r#"(function(){{
+        const el = document.querySelector({sel});
+        if (!el) return false;
+        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        return true;
+      }})()"#,
+      sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+    );
+    let _ = self.evaluate(&fire_js, false).await;
+    Ok(())
   }
 }
 
@@ -2266,6 +2458,8 @@ impl RegistrationEngine {
     selector: &str,
     label: &str,
   ) -> Result<(), String> {
+    use crate::browser_actions::{click_point_in_rect, HumanProfile};
+
     let js = format!(
       r#"(function(){{
         const el = document.querySelector({sel});
@@ -2276,8 +2470,10 @@ impl RegistrationEngine {
         const r2 = el.getBoundingClientRect();
         return {{
           ok: true,
-          x: r2.left + r2.width / 2,
-          y: r2.top + r2.height / 2
+          x: r2.left,
+          y: r2.top,
+          w: r2.width,
+          h: r2.height
         }};
       }})()"#,
       sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
@@ -2299,7 +2495,14 @@ impl RegistrationEngine {
     let y = value["y"]
       .as_f64()
       .ok_or_else(|| format!("{label}: no y"))?;
-    self.click_xy(session, x, y).await
+    let w = value["w"].as_f64().unwrap_or(1.0);
+    let h = value["h"].as_f64().unwrap_or(1.0);
+    let (tx, ty) = click_point_in_rect(x, y, w, h);
+    // Approximate previous cursor near viewport origin-ish of element.
+    let from = (x.max(8.0) - 24.0, y.max(8.0) - 18.0);
+    session
+      .human_click(from, (tx, ty), &HumanProfile::careful())
+      .await
   }
 
   async fn click_by_text(
@@ -2308,6 +2511,8 @@ impl RegistrationEngine {
     text: &str,
     css_filter: &str,
   ) -> Result<(), String> {
+    use crate::browser_actions::{click_point_in_rect, HumanProfile};
+
     let js = format!(
       r#"(function(){{
         const needle = {text}.toLowerCase();
@@ -2321,8 +2526,10 @@ impl RegistrationEngine {
           const r2 = el.getBoundingClientRect();
           return {{
             ok: true,
-            x: r2.left + r2.width / 2,
-            y: r2.top + r2.height / 2
+            x: r2.left,
+            y: r2.top,
+            w: r2.width,
+            h: r2.height
           }};
         }}
         return {{ ok: false }};
@@ -2344,19 +2551,43 @@ impl RegistrationEngine {
     let y = value["y"]
       .as_f64()
       .ok_or_else(|| format!("text '{text}': no y"))?;
-    self.click_xy(session, x, y).await
+    let w = value["w"].as_f64().unwrap_or(1.0);
+    let h = value["h"].as_f64().unwrap_or(1.0);
+    let (tx, ty) = click_point_in_rect(x, y, w, h);
+    let from = (x.max(8.0) - 24.0, y.max(8.0) - 18.0);
+    session
+      .human_click(from, (tx, ty), &HumanProfile::careful())
+      .await
   }
 
   async fn click_xy(&mut self, session: &mut BrowserSession, x: f64, y: f64) -> Result<(), String> {
-    session.mouse_click(x, y).await
+    use crate::browser_actions::HumanProfile;
+    let from = ((x - 40.0).max(4.0), (y - 28.0).max(4.0));
+    session
+      .human_click(from, (x, y), &HumanProfile::careful())
+      .await
   }
 
+  /// Humanized field fill (Markov keystrokes). Falls back to JS value set only if typing fails.
   async fn fill_input(
     &mut self,
     session: &mut BrowserSession,
     selector: &str,
     value: &str,
   ) -> Result<(), String> {
+    use crate::browser_actions::HumanProfile;
+
+    match session
+      .human_type(selector, value, &HumanProfile::form_fill())
+      .await
+    {
+      Ok(()) => return Ok(()),
+      Err(e) => {
+        self.log(&format!("human_type fallback after: {e}"));
+      }
+    }
+
+    // Fallback: instant JS set (machine-like) — only if human path failed.
     let js = format!(
       r#"(function(){{
         const el = document.querySelector({sel});

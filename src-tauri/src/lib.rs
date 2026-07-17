@@ -17,6 +17,7 @@ pub mod app_dirs;
 pub mod auto_register;
 mod auto_updater;
 mod browser;
+pub mod browser_actions;
 pub mod browser_runner;
 mod browser_version_manager;
 pub mod camoufox;
