@@ -49,7 +49,7 @@ Progress is shown in real-time with step-by-step logs (including IP rotation mes
 | `proxy` | static `proxyId` on ephemeral profiles | no mid-batch hop (v1) |
 | `nord` | no profile proxy/VPN | system-wide Nord CLI; after every **N successful free-trial saves**, disconnect → connect → verify public IP |
 
-**Important:** Nord mode is **system-wide** (affects the whole PC, including CDK HTTP and OTP polling). Modes are mutually exclusive (`proxyId` is rejected with Nord). On task cancel/finish, the engine best-effort disconnects Nord if it connected it.
+**Important:** Nord mode is **system-wide** (affects the whole PC, including CDK HTTP and OTP polling). Modes are mutually exclusive (`proxyId` is rejected with Nord). Nord stays connected after the batch finishes (no auto-disconnect); you disconnect manually when done.
 
 ### Via Tauri Commands
 
@@ -130,7 +130,7 @@ CDK Input → Redeem CDK → Generate Alias → Generate User Info
 → Follow Authorize → Register User → Request OTP → Poll OTP
 → Verify OTP → Create Account → Extract Tokens → Free-trial gate → Enable 2FA
 → Save inventory → [every N successes: Nord rotate + IP verify]
-→ Disconnect Nord on cancel/finish
+→ Leave Nord connected after finish (no auto-disconnect)
 ```
 
 Registration itself is API-driven (CSRF / register / email-otp / create_account).
