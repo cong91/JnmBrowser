@@ -337,6 +337,69 @@ impl BrowserSession {
     }
   }
 
+  /// Wipe cookies + origin storage so the browser looks brand-new (no choose-an-account residue).
+  async fn clear_all_site_data(&mut self) -> Result<(), String> {
+    match self {
+      Self::Cdp(cdp) => {
+        let _ = cdp.send_cmd("Network.enable", serde_json::json!({})).await;
+        let _ = cdp
+          .send_cmd("Network.clearBrowserCookies", serde_json::json!({}))
+          .await;
+        let _ = cdp
+          .send_cmd("Network.clearBrowserCache", serde_json::json!({}))
+          .await;
+        let _ = cdp
+          .send_cmd(
+            "Storage.clearDataForOrigin",
+            serde_json::json!({
+              "origin": "https://chatgpt.com",
+              "storageTypes": "all",
+            }),
+          )
+          .await;
+        let _ = cdp
+          .send_cmd(
+            "Storage.clearDataForOrigin",
+            serde_json::json!({
+              "origin": "https://auth.openai.com",
+              "storageTypes": "all",
+            }),
+          )
+          .await;
+        Ok(())
+      }
+      Self::Camoufox { page, .. } => {
+        let context = page.context();
+        if let Err(e) = context.clear_cookies().await {
+          return Err(format!("Camoufox clear_cookies failed: {e}"));
+        }
+        // Best-effort origin storage wipe on a blank page.
+        let _: Result<bool, _> = page
+          .eval(
+            r#"(async () => {
+              try { localStorage.clear(); } catch (_) {}
+              try { sessionStorage.clear(); } catch (_) {}
+              try {
+                if (window.caches) {
+                  const keys = await caches.keys();
+                  await Promise.all(keys.map((k) => caches.delete(k)));
+                }
+              } catch (_) {}
+              try {
+                if (window.indexedDB && indexedDB.databases) {
+                  const dbs = await indexedDB.databases();
+                  await Promise.all((dbs || []).map((d) => d && d.name && indexedDB.deleteDatabase(d.name)));
+                }
+              } catch (_) {}
+              return true;
+            })()"#,
+          )
+          .await;
+        Ok(())
+      }
+    }
+  }
+
   async fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String> {
     match self {
       Self::Cdp(cdp) => cdp.mouse_click(x, y).await,
@@ -1188,6 +1251,14 @@ impl RegistrationEngine {
     alias_idx: u32,
     total_cdks: u32,
   ) -> Result<RegistrationResult, String> {
+    // Always start from a wiped jar — never inherit previous OpenAI sessions.
+    self.log(&format!(
+      "{prefix} Clearing browser cookies/cache/storage..."
+    ));
+    if let Err(e) = session.clear_all_site_data().await {
+      self.log(&format!("{prefix} clear_all_site_data warning: {e}"));
+    }
+
     // Seed oai-did cookie
     self.log(&format!("{prefix} Device ID: {}", self.device_id));
     for domain in &[
@@ -2523,7 +2594,10 @@ impl RegistrationEngine {
     ))
   }
 
-  /// Launch either a configured existing profile or a brand-new ephemeral one.
+  /// Always launch a **brand-new ephemeral** profile per account.
+  ///
+  /// `config.profile_id` is only a template: we copy browser/version/proxy defaults,
+  /// never reuse its cookie jar / choose-an-account history.
   async fn launch_browser(
     &mut self,
     app_handle: &tauri::AppHandle,
@@ -2532,78 +2606,116 @@ impl RegistrationEngine {
     use crate::browser_runner::BrowserRunner;
     use crate::profile::manager::create_browser_profile_with_group;
 
-    let profile = if let Some(profile_id) = self.config.profile_id.as_ref() {
-      let profiles = crate::profile::ProfileManager::instance()
-        .list_profiles()
-        .map_err(|e| format!("List profiles: {e}"))?;
-      let mut found = profiles
-        .into_iter()
-        .find(|p| p.id.to_string() == *profile_id)
-        .ok_or_else(|| format!("Configured profile_id not found: {profile_id}"))?;
-      self.log(&format!(
-        "Using existing profile: {} ({}) browser={}",
-        found.name, found.id, found.browser
-      ));
-      // Auto-reg must not reuse a cached Camoufox fingerprint — force a fresh one
-      // on every launch (and strip any stored fingerprint so launch regenerates).
-      if found.browser.eq_ignore_ascii_case("camoufox") {
-        let mut cfg = found.camoufox_config.clone().unwrap_or_default();
-        cfg.fingerprint = None;
-        cfg.randomize_fingerprint_on_launch = Some(true);
-        found.camoufox_config = Some(cfg);
-        self.log("Camoufox auto-reg: randomize_fingerprint_on_launch=true (no cache)");
-      }
-      found
+    let browser_str = if self.config.browser_type == "camoufox" {
+      "camoufox"
     } else {
-      let browser_str = if self.config.browser_type == "camoufox" {
-        "camoufox"
-      } else {
-        "chromium"
-      };
-      let browser =
-        BrowserType::from_str(browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
-
-      // Unique profile name per account so concurrent/sequential runs never collide.
-      let short_id = Uuid::new_v4().to_string();
-      let profile_name = format!(
-        "auto-reg-{}-{}",
-        &self.task_id[..8.min(self.task_id.len())],
-        &short_id[..8]
-      );
-
-      let mut created = create_browser_profile_with_group(
-        app_handle.clone(),
-        profile_name,
-        browser.as_str().to_string(),
-        String::new(),
-        "stable".into(),
-        self.config.effective_proxy_id(),
-        None,
-        None,
-        None,
-        None,
-        true, // ephemeral when auto-created
-        None,
-        None,
-      )
-      .await
-      .map_err(|e| format!("Create profile: {e}"))?;
-
-      // Always mint a fresh Camoufox fingerprint for auto-reg (never cache).
-      if created.browser.eq_ignore_ascii_case("camoufox") {
-        let mut cfg = created.camoufox_config.clone().unwrap_or_default();
-        cfg.fingerprint = None;
-        cfg.randomize_fingerprint_on_launch = Some(true);
-        created.camoufox_config = Some(cfg);
-        self.log("Camoufox auto-reg ephemeral: randomize_fingerprint_on_launch=true");
-      }
-      created
+      "chromium"
     };
+    let mut version = String::new();
+    let mut release_type = "stable".to_string();
+
+    // Optional template profile: version only — never reuse profile data dir / cookies.
+    if let Some(profile_id) = self.config.profile_id.as_ref() {
+      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
+        if let Some(found) = profiles
+          .into_iter()
+          .find(|p| p.id.to_string() == *profile_id)
+        {
+          self.log(&format!(
+            "Template profile {} ({}) browser={} version={} — spawning fresh ephemeral clone",
+            found.name, found.id, found.browser, found.version
+          ));
+          if !found.version.is_empty() {
+            version = found.version.clone();
+          }
+          if !found.release_type.is_empty() {
+            release_type = found.release_type.clone();
+          }
+        }
+      }
+    }
+
+    // Prefer an installed Camoufox version when template omitted version.
+    if version.is_empty() && browser_str == "camoufox" {
+      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
+        if let Some(v) = profiles
+          .into_iter()
+          .find(|p| p.browser.eq_ignore_ascii_case("camoufox") && !p.version.is_empty())
+          .map(|p| p.version)
+        {
+          version = v;
+          self.log(&format!(
+            "Using installed Camoufox version from existing profile: {version}"
+          ));
+        }
+      }
+      if version.is_empty() {
+        version = "v135.0.1-beta.24".into();
+        self.log(&format!("Using default Camoufox version: {version}"));
+      }
+    }
+
+    let browser =
+      BrowserType::from_str(browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
+
+    // Unique profile name per account so concurrent/sequential runs never collide.
+    let short_id = Uuid::new_v4().to_string();
+    let profile_name = format!(
+      "auto-reg-{}-{}",
+      &self.task_id[..8.min(self.task_id.len())],
+      &short_id[..8]
+    );
+
+    // Camoufox: request a new fingerprint at create time (no cached FP).
+    let camoufox_config = if browser_str == "camoufox" {
+      Some(crate::camoufox_manager::CamoufoxConfig {
+        fingerprint: None,
+        randomize_fingerprint_on_launch: Some(true),
+        geoip: Some(serde_json::Value::Bool(true)),
+        ..Default::default()
+      })
+    } else {
+      None
+    };
+
+    let mut created = create_browser_profile_with_group(
+      app_handle.clone(),
+      profile_name,
+      browser.as_str().to_string(),
+      version,
+      release_type,
+      self.config.effective_proxy_id(),
+      None,
+      camoufox_config,
+      None,
+      None,
+      true, // always ephemeral for auto-reg
+      None,
+      None,
+    )
+    .await
+    .map_err(|e| format!("Create profile: {e}"))?;
+
+    if created.browser.eq_ignore_ascii_case("camoufox") {
+      let mut cfg = created.camoufox_config.clone().unwrap_or_default();
+      // Ensure launch path regenerates if create-time FP is reused later.
+      cfg.randomize_fingerprint_on_launch = Some(true);
+      created.camoufox_config = Some(cfg);
+      self.log(&format!(
+        "Fresh ephemeral Camoufox profile {} (id={}) — no cookie cache, new fingerprint",
+        created.name, created.id
+      ));
+    } else {
+      self.log(&format!(
+        "Fresh ephemeral Chromium profile {} (id={}) — no cookie cache",
+        created.name, created.id
+      ));
+    }
 
     let launched = BrowserRunner::instance()
       .launch_browser(
         app_handle.clone(),
-        &profile,
+        &created,
         Some("about:blank".into()),
         None,
       )
@@ -2634,17 +2746,11 @@ impl RegistrationEngine {
       self.log(&format!("Browser killed for profile {}", profile.id));
     }
 
-    // Keep user-selected durable profiles (config.profile_id) on disk.
-    let keep_profile = self
-      .config
-      .profile_id
-      .as_ref()
-      .is_some_and(|id| id == &profile.id.to_string())
-      || !profile.ephemeral;
-
-    if keep_profile {
+    // Auto-reg always spawns ephemeral profiles (template profile_id is never the
+    // launched id). Delete after each account so no cookie residue remains.
+    if !profile.ephemeral {
       self.log(&format!(
-        "Keeping profile on disk: {} ({})",
+        "Keeping non-ephemeral profile on disk: {} ({})",
         profile.name, profile.id
       ));
       return;
@@ -2653,7 +2759,6 @@ impl RegistrationEngine {
     // Give OS a moment to release file locks before deleting profile data.
     sleep(std::time::Duration::from_millis(500)).await;
 
-    // 2) Delete ephemeral auto-created profiles so they don't clutter the UI.
     if let Err(e) =
       crate::profile::ProfileManager::instance().delete_profile(app_handle, &profile.id.to_string())
     {
@@ -2662,7 +2767,7 @@ impl RegistrationEngine {
         profile.id
       ));
     } else {
-      self.log(&format!("Profile deleted: {}", profile.id));
+      self.log(&format!("Ephemeral profile deleted: {}", profile.id));
     }
   }
 
