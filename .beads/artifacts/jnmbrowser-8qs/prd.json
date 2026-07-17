@@ -1,0 +1,143 @@
+{
+  "beadId": "jnmbrowser-8qs",
+  "prdName": "auto-reg-dual-network-nord-proxy",
+  "tasks": [
+    {
+      "id": "backend-1",
+      "category": "backend",
+      "description": "RegistrationConfig (Rust + TS) exposes networkMode, rotateEveryN, Nord fields, keeps proxyId; defaults and validation reject invalid mode combinations.",
+      "steps": [
+        "cargo test --manifest-path src-tauri/Cargo.toml --lib compiles types",
+        "pnpm lint:js includes hook typecheck"
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/auto_register/types.rs",
+          "src/hooks/use-registration-events.ts",
+          "src-tauri/src/auto_register/live_harness.rs"
+        ]
+      }
+    },
+    {
+      "id": "backend-2",
+      "category": "backend",
+      "description": "Windows NordVPN.exe resolve + connect/disconnect/group/server with CREATE_NO_WINDOW; unit tests for arg construction and path default.",
+      "steps": [
+        "cargo test --manifest-path src-tauri/Cargo.toml --lib nord_cli -- --nocapture"
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/auto_register/nord_cli.rs",
+          "src-tauri/src/auto_register/mod.rs"
+        ]
+      }
+    },
+    {
+      "id": "backend-3",
+      "category": "backend",
+      "description": "Nord mode connects at run start; after every N successful saves rotates and verifies IP via fetch_public_ip; cancel best-effort disconnect; proxy/none paths unchanged.",
+      "steps": [
+        "Unit test pure helper should_rotate(success_count, every_n)",
+        "cargo test --manifest-path src-tauri/Cargo.toml --lib auto_register",
+        "Manual optional: nord rotateEveryN=1 between two accounts"
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["backend-1", "backend-2"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": ["src-tauri/src/auto_register/engine.rs"]
+      }
+    },
+    {
+      "id": "frontend-1",
+      "category": "frontend",
+      "description": "Dialog selects none/proxy/nord, shows the right fields, sends correct invoke payload; no raw English strings.",
+      "steps": ["pnpm lint:js", "Manual: toggle modes updates visible fields"],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["backend-1"],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": [
+          "src/components/account-registration-dialog.tsx",
+          "src/hooks/use-registration-events.ts"
+        ]
+      }
+    },
+    {
+      "id": "i18n-1",
+      "category": "i18n",
+      "description": "All seven locales include network mode, Nord group/server, rotateEveryN, errors/labels under registration.* with non-empty translations.",
+      "steps": ["Grep new keys present in all 7 locale files", "pnpm lint:js"],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["frontend-1"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src/i18n/locales/en.json",
+          "src/i18n/locales/es.json",
+          "src/i18n/locales/fr.json",
+          "src/i18n/locales/ja.json",
+          "src/i18n/locales/pt.json",
+          "src/i18n/locales/ru.json",
+          "src/i18n/locales/zh.json"
+        ]
+      }
+    },
+    {
+      "id": "docs-1",
+      "category": "docs",
+      "description": "docs/auto-registration.md documents dual-mode, Nord prerequisites, rotate policy, troubleshooting.",
+      "steps": [
+        "Doc section exists; no contradiction with free-trial/2FA sections"
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["backend-3"],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": ["docs/auto-registration.md"]
+      }
+    }
+  ],
+  "context": {
+    "patterns": [
+      "Auto-reg sequential loop in RegistrationEngine::run",
+      "proxy_id xor vpn_id on profile create",
+      "Windows CREATE_NO_WINDOW process spawn",
+      "ip_utils::fetch_public_ip for egress verify",
+      "registration.* i18n in 7 locales"
+    ],
+    "keyFiles": [
+      "src-tauri/src/auto_register/engine.rs",
+      "src-tauri/src/auto_register/types.rs",
+      "src-tauri/src/ip_utils.rs",
+      "src/components/account-registration-dialog.tsx",
+      "docs/auto-registration.md"
+    ],
+    "nonGoals": [
+      "Nord WireGuard conf export",
+      "Concurrent multi-browser + system Nord",
+      "Proxy pool multi-hop",
+      "Official Nord MCP",
+      "Linux/macOS Nord CLI in v1"
+    ]
+  },
+  "beadMetadata": {
+    "depends_on": [],
+    "parallel": false,
+    "conflicts_with": [],
+    "blocks": [],
+    "estimated_hours": 10
+  }
+}

@@ -8,17 +8,22 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 
 1. **CDK Redemption**: Redeems a Gmail CDK code to obtain a disposable Gmail address
 2. **Alias Generation**: Creates `user+{random}@gmail.com` aliases (up to 6 per CDK)
-3. **Browser Automation**: Launches a Chromium/Camoufox profile with proxy + fingerprint
-4. **Registration Flow**: Automates the ChatGPT signup via CDP (Chrome DevTools Protocol)
+3. **Browser Automation**: Launches a Chromium/Camoufox profile with fingerprint (+ optional proxy)
+4. **Registration Flow**: Automates the ChatGPT signup via CDP / Playwright
 5. **OTP Retrieval**: Polls the Gmail CDK API for the verification code
 6. **Token Extraction**: Extracts access token, session token, and account credentials
-7. **Credential Storage**: Persists results as JSON files
+7. **Free-trial gate + 2FA**: Keeps free-trial eligible accounts and enables authenticator when possible
+8. **Credential Storage**: Persists inventory JSON for export/resale
+9. **Dual network**: Optional static proxy **or** NordVPN CLI IP rotation after N successes
 
 ## Prerequisites
 
 - A valid Gmail CDK code (format: `GMAIL-XXXX-XXXX-XXXX-XXXX`)
 - Chromium or Camoufox browser installed (via JnmBrowser's downloader)
-- Optional: proxy configured for geo-matching
+- **Network (pick one mode):**
+  - **None** — host egress IP
+  - **Proxy** — a proxy ID already configured in JnmBrowser
+  - **NordVPN** — Windows NordVPN app installed, logged in, CLI available (`NordVPN.exe` under Program Files)
 
 ## Usage
 
@@ -26,26 +31,56 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 
 1. Open JnmBrowser
 2. Click the **Auto Registration** button in the header
-3. Enter your CDK code
-4. Configure browser type, proxy (optional), retries, and accounts per CDK
-5. Click **Start Registration**
+3. Enter your CDK code(s)
+4. Configure browser type, retries, accounts per CDK
+5. Choose **Network**:
+   - **None** — no proxy / no Nord
+   - **Proxy** — enter proxy ID
+   - **NordVPN** — optional group/server, **rotate IP every N successes** (default 2)
+6. Click **Start Registration**
 
-Progress is shown in real-time with step-by-step logs.
+Progress is shown in real-time with step-by-step logs (including IP rotation messages in Nord mode).
+
+### Dual network modes
+
+| Mode | Profile attach | Mid-batch behavior |
+|------|----------------|--------------------|
+| `none` | no `proxy_id` / no `vpn_id` | host IP sticky |
+| `proxy` | static `proxyId` on ephemeral profiles | no mid-batch hop (v1) |
+| `nord` | no profile proxy/VPN | system-wide Nord CLI; after every **N successful free-trial saves**, disconnect → connect → verify public IP |
+
+**Important:** Nord mode is **system-wide** (affects the whole PC, including CDK HTTP and OTP polling). Modes are mutually exclusive (`proxyId` is rejected with Nord). On task cancel/finish, the engine best-effort disconnects Nord if it connected it.
 
 ### Via Tauri Commands
 
 ```typescript
 import { invoke } from "@tauri-apps/api/core";
 
-// Start registration
+// Proxy mode
 const taskId = await invoke("start_auto_registration", {
   config: {
-    cdk: "GMAIL-K4L5-EUW5-PHBV-A6KW",
+    cdks: ["GMAIL-K4L5-EUW5-PHBV-A6KW"],
     browserType: "chromium",
-    proxyId: null,
+    networkMode: "proxy",
+    proxyId: "my-proxy-id",
     maxRetries: 3,
     accountsPerCdk: 1,
     headless: false,
+    concurrency: 1,
+  },
+});
+
+// Nord mode with rotate every 2 successes
+const nordTask = await invoke("start_auto_registration", {
+  config: {
+    cdks: ["GMAIL-K4L5-EUW5-PHBV-A6KW"],
+    browserType: "camoufox",
+    networkMode: "nord",
+    rotateEveryN: 2,
+    nordGroup: "United States",
+    maxRetries: 3,
+    accountsPerCdk: 2,
+    concurrency: 1,
   },
 });
 
@@ -65,8 +100,10 @@ await invoke("delete_registered_account_cmd", { accountId: "..." });
 {
   "tool": "start_auto_register",
   "arguments": {
-    "cdk": "GMAIL-XXXX-XXXX-XXXX-XXXX",
+    "cdks": ["GMAIL-XXXX-XXXX-XXXX-XXXX"],
     "browserType": "chromium",
+    "networkMode": "nord",
+    "rotateEveryN": 2,
     "maxRetries": 3,
     "accountsPerCdk": 1
   }
@@ -79,7 +116,8 @@ await invoke("delete_registered_account_cmd", { accountId: "..." });
 Frontend (React) → Tauri invoke → RegistrationEngine (Rust)
                                      ├── GmailCdkService (HTTP API)
                                      ├── BrowserRunner (launch profile)
-                                     ├── CDP WebSocket (automation)
+                                     ├── CDP / Playwright (automation)
+                                     ├── Nord CLI helper (optional system VPN)
                                      └── CredentialStore (JSON persistence)
 ```
 
@@ -87,10 +125,16 @@ Frontend (React) → Tauri invoke → RegistrationEngine (Rust)
 
 ```
 CDK Input → Redeem CDK → Generate Alias → Generate User Info
+→ [Nord connect if mode=nord]
 → Launch Browser → Visit chatgpt.com → CSRF Token → Submit Email
 → Follow Authorize → Register User → Request OTP → Poll OTP
-→ Verify OTP → Create Account → Extract Tokens → Enable 2FA
+→ Verify OTP → Create Account → Extract Tokens → Free-trial gate → Enable 2FA
+→ Save inventory → [every N successes: Nord rotate + IP verify]
+→ Disconnect Nord on cancel/finish
 ```
+
+Registration itself is API-driven (CSRF / register / email-otp / create_account).
+2FA is UI-driven after a live session is available (Settings → Security → Authenticator).
 
 ## Credential Storage
 
@@ -101,8 +145,9 @@ Credentials are stored at:
 
 Each file contains:
 - Email and password
-- Access token and session token
-- Account ID and workspace ID
+- Access token
+- Account ID
+- `twoFaEnabled` + `totpSecret` (base32) when authenticator setup succeeds
 - Step logs for debugging
 
 ## Troubleshooting
@@ -123,7 +168,131 @@ Each file contains:
 - The engine automatically retries with a fresh browser session
 - Consider using a different proxy or fingerprint
 
-## 2FA Enablement (Future)
+## Free Trial Gate
 
-The 2FA enablement step navigates to Settings → Privacy → Enable Two-Factor Authentication.
-This is implemented via action recording replay. Record the flow once, then replay for each registration.
+After tokens are extracted, registration **only succeeds** if the account is eligible for a free trial / free Plus offer.
+
+### Verified detection (live account probe)
+
+Primary source of truth:
+
+`GET https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27`
+
+(with page cookies + `Authorization: Bearer <accessToken>` + `ChatGPT-Account-ID`)
+
+Key fields from a fresh free signup that **has** free Plus trial:
+
+```json
+{
+  "accounts": {
+    "<account_id>": {
+      "account": {
+        "plan_type": "free",
+        "has_previously_paid_subscription": false
+      },
+      "entitlement": {
+        "subscription_plan": "chatgptfreeplan",
+        "has_active_subscription": false,
+        "trial": null
+      },
+      "eligible_promo_campaigns": {
+        "plus": {
+          "id": "plus-1-month-free",
+          "metadata": {
+            "discount": { "percentage": 100 },
+            "duration": { "num_periods": 1, "period": "month" },
+            "plan_name": "chatgptplusplan",
+            "promotion_type_label": "1-month free trial",
+            "title": "Try Plus free for 1 month"
+          }
+        }
+      },
+      "is_eligible_for_yearly_plus_new_user_subscription": true
+    }
+  }
+}
+```
+
+Rules used by engine:
+
+1. **Eligible if** `eligible_promo_campaigns` contains a free-trial promo
+   - id/title/label contains free trial / try plus free / plus-1-month-free
+   - or discount percentage == 100
+2. **Eligible if** `entitlement.trial` is a non-null active trial object
+3. JWT claim `chatgpt_plan_type=free` alone is **not** enough (that only means free plan)
+4. `eligible_offers` alone is **not** enough (always lists plus/pro plan SKUs)
+5. DOM fallback: text like `claim offer` / `free offer` / `free trial`
+6. If no free-offer signal → account is **skipped** (not stored as success)
+
+Stored fields: `freeTrialEligible`, `planType`.
+
+Secondary endpoint:
+
+`GET /backend-api/subscriptions?account_id=<id>` (requires account_id query)
+
+Probe helper:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin probe-free-trial --   --profile-id <camoufox-profile-id>   --token-file <registered_account.json>
+```
+
+## 2FA Enablement
+
+After tokens are extracted, the engine enables ChatGPT authenticator 2FA in the same browser session:
+
+1. Open account menu → Settings (`data-testid=settings-menu-item`)
+2. Open **Security** tab
+3. Toggle **Authenticator app** (`data-testid=mfa-authenticator-toggle`)
+4. Click the underlined reveal-secret link (`button.interactive-label-accent.underline`) so the base32 secret is shown
+5. Click **Copy code** (`button[aria-label="Copy code"]`)
+6. Scrape the base32 secret from the dialog (same value that was copied)
+7. Generate a local TOTP code from that secret (RFC 6238, HMAC-SHA1, 30s, 6 digits)
+8. Fill `#totp_otp` with the 6-digit code and confirm
+
+Policy:
+- Only the 2FA step is retried (default 3 attempts) inside the same browser session
+- If 2FA still fails, the registration remains successful with `twoFaEnabled=false` and an error note
+- On success, `totpSecret` is persisted with the account for later login/automation
+
+Reference recordings: `register_1.json` / `register_2.json` (signup), `enable2FA.json` (2FA-only).
+Recipe sketch: `src-tauri/src/auto_register/recipes/enable_2fa_recipe.json`.
+
+
+## Account Inventory & Export
+
+Registered accounts are inventory records under `{data_dir}/registered_accounts/{account_id}.json`.
+
+### Inventory status
+
+- `available`: ready to sell/use
+- `exported`: already exported
+- `sold`: sold/used
+- `reserved`: held for a buyer
+- `invalid`: dead/banned
+
+### Export (UI)
+
+In **Stored Accounts**: select rows (or empty = all available), choose fields, format TXT/CSV/JSON, optional delimiter, optional auto-mark exported, then save via system dialog.
+
+Default seller TXT line: `email|password|totpSecret`
+
+### Commands
+
+```typescript
+await invoke("update_registered_account_status_cmd", {
+  accountIds: ["..."],
+  status: "sold",
+  note: "buyer-A",
+});
+```
+
+
+## Dual network troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| NordVPN CLI not found | Install NordVPN desktop app or set `nordCliPath` to NordVPN.exe |
+| Connect fails / not logged in | Open NordVPN GUI, log in, then retry |
+| Egress IP unchanged after rotate | Wait longer, try a country group; soft-warn continues batch |
+| Free trial drop after hop | Stick to a stable region group (e.g. United States) |
+| Proxy mode error without ID | Provide `proxyId` when `networkMode` is `proxy` |

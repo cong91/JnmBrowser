@@ -1,0 +1,24 @@
+# Progress Log
+
+Bead: jnmbrowser-8qs
+Started: 2026-07-17
+
+## Codebase Patterns
+
+- RegistrationEngine::run is sequential CDK × alias × retries; success save is the rotate hook site.
+- Profile create: proxy_id xor vpn_id; auto-reg currently always vpn_id=None.
+- Nord mode is system-wide CLI (NordVPN.exe -c/-d), not WireGuard vpn_id path.
+- Reuse ip_utils::fetch_public_ip(None) after Nord reconnect.
+- Windows spawn: CREATE_NO_WINDOW 0x08000000 (vpn_worker_runner / chromium_manager).
+- Dual mode user decision: Nord if active, proxy if proxy selected; rotate every N successes.
+
+---
+
+## 2026-07-17 — /plan complete
+
+- Wrote plan.md (Level 0 discovery, 3 waves, 6 tasks, TDD for config + nord_cli).
+- Insertion: engine.rs success path after free-trial save; effective_proxy_id for launch.
+- Reuse: ip_utils::fetch_public_ip, CREATE_NO_WINDOW spawn.
+- Next: /ship jnmbrowser-8qs
+
+<!-- Task logs below - APPEND ONLY -->
