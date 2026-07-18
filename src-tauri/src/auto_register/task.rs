@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 
 use super::types::RegistrationResult;
@@ -13,8 +13,7 @@ pub struct TaskHandle {
 }
 
 /// Global registry of running registration tasks.
-static TASKS: Lazy<Mutex<HashMap<String, TaskHandle>>> =
-  Lazy::new(|| Mutex::new(HashMap::new()));
+static TASKS: Lazy<Mutex<HashMap<String, TaskHandle>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn register_task(task_id: String, handle: TaskHandle) {
   TASKS.lock().unwrap().insert(task_id, handle);
@@ -22,7 +21,9 @@ pub fn register_task(task_id: String, handle: TaskHandle) {
 
 pub fn cancel_task(task_id: &str) -> bool {
   if let Some(handle) = TASKS.lock().unwrap().get(task_id) {
-    handle.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    handle
+      .cancel_flag
+      .store(true, std::sync::atomic::Ordering::SeqCst);
     true
   } else {
     false
@@ -36,5 +37,8 @@ pub fn remove_task(task_id: &str) {
 
 #[allow(dead_code)]
 pub fn cleanup_completed() {
-  TASKS.lock().unwrap().retain(|_id, handle| !handle.join_handle.is_finished());
+  TASKS
+    .lock()
+    .unwrap()
+    .retain(|_id, handle| !handle.join_handle.is_finished());
 }

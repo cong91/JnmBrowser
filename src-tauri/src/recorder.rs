@@ -8,8 +8,10 @@
 //! - On Chromium the script is installed via `Page.addScriptToEvaluateOnNewDocument`
 //!   and events are harvested from `Runtime.consoleAPICalled` over a persistent CDP
 //!   WebSocket connection.
-//! - On Camoufox the script is installed via Playwright `add_init_script` and
-//!   events are harvested from the `page::Event::Console` listener.
+//! - On Camoufox the script is installed via Playwright `add_init_script` plus
+//!   a current-document `<script>` inject, and events are harvested by polling
+//!   the in-page `__jnmbrowserRecorderBuffer` (Playwright Console events are
+//!   unreliable for Camoufox in this stack).
 //!
 //! Recordings are stored as JSON files under `data_dir()/recordings/` (one file
 //! per recording). Each recording can be:
@@ -171,6 +173,10 @@ impl RecorderManager {
     };
     // Signal the capture task to stop.
     let _ = session.cancel_tx.send(true);
+
+    // Capture tasks (especially Camoufox's poll path) perform a final buffer
+    // drain after seeing cancel. Wait briefly so those events are not lost.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let events = {
       let mut shared = session.shared.lock().await;

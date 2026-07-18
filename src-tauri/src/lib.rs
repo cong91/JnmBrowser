@@ -14,20 +14,21 @@ mod api_client;
 mod api_server;
 mod app_auto_updater;
 pub mod app_dirs;
-mod auto_register;
+pub mod auto_register;
 mod auto_updater;
 mod browser;
-mod browser_runner;
+pub mod browser_actions;
+pub mod browser_runner;
 mod browser_version_manager;
 pub mod camoufox;
-mod camoufox_manager;
+pub mod camoufox_manager;
 pub mod chromium_manager;
 mod default_browser;
 pub mod dns_blocklist;
 mod downloaded_browsers_registry;
 mod downloader;
-mod email;
-mod ephemeral_dirs;
+pub mod email;
+pub mod ephemeral_dirs;
 mod extension_manager;
 mod extraction;
 mod geoip_downloader;
@@ -35,7 +36,7 @@ mod group_manager;
 mod human_typing;
 mod ip_utils;
 mod platform_browser;
-mod profile;
+pub mod profile;
 mod profile_importer;
 mod proxy_manager;
 pub mod proxy_runner;
@@ -2301,6 +2302,7 @@ pub fn run() {
       recorder::commands::stop_recording,
       recorder::commands::get_recorder_sessions,
       recorder::commands::list_recordings,
+      recorder::commands::get_recordings_dir,
       recorder::commands::get_recording,
       recorder::commands::delete_recording,
       recorder::commands::export_recording_as_recipe,
@@ -2313,6 +2315,8 @@ pub fn run() {
       auto_register::commands::cancel_registration,
       auto_register::commands::list_registered_accounts_cmd,
       auto_register::commands::delete_registered_account_cmd,
+      auto_register::commands::update_registered_account_status_cmd,
+      auto_register::commands::update_registered_account_note_cmd,
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")

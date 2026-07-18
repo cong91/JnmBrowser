@@ -320,7 +320,116 @@ async fn handle_cdp_console_event(
   }
 }
 
-/// Camoufox capture loop via Playwright page console events.
+/// Expression that drains the in-page recorder buffer (Camoufox poll path).
+const CAMOUFOX_DRAIN_EXPRESSION: &str = r#"(function() {
+  try {
+    if (typeof window.__jnmbrowserRecorderDrain === 'function') {
+      return window.__jnmbrowserRecorderDrain();
+    }
+    var buf = window.__jnmbrowserRecorderBuffer;
+    if (Array.isArray(buf) && buf.length > 0) {
+      window.__jnmbrowserRecorderBuffer = [];
+      return buf;
+    }
+  } catch (_e) {}
+  return [];
+})()"#;
+
+/// Install the recorder content script on a Camoufox page.
+///
+/// Playwright `Console` events are unreliable for Camoufox in this stack (the
+/// MCP console capture path already abandoned them in favor of an in-page
+/// buffer). We therefore:
+/// 1. Register the script as an init script so future navigations reinstall it.
+/// 2. Inject into the *current* document via a `<script>` element (same pattern
+///    as `ensure_camoufox_console_capture`), which is more reliable than a bare
+///    `page.eval` of a large IIFE on some pages.
+async fn install_camoufox_recorder_script(page: &Page, script: &str) -> Result<(), String> {
+  page
+    .add_init_script(script)
+    .await
+    .map_err(|e| format!("Failed to add Camoufox init script: {e}"))?;
+
+  // Prefer script-element injection so the IIFE runs in page context even when
+  // a direct evaluate of a multi-kilobyte expression is flaky.
+  match page
+    .evaluate::<String, serde_json::Value>(
+      r#"source => {
+        try {
+          if (window.__jnmbrowserRecorderInstalled) return true;
+          const el = document.createElement('script');
+          el.type = 'text/javascript';
+          el.textContent = source;
+          (document.documentElement || document.head || document.body).appendChild(el);
+          el.remove();
+          return !!window.__jnmbrowserRecorderInstalled;
+        } catch (e) {
+          return String(e && e.message ? e.message : e);
+        }
+      }"#,
+      script.to_string(),
+    )
+    .await
+  {
+    Ok(serde_json::Value::Bool(true)) => Ok(()),
+    Ok(serde_json::Value::Bool(false)) => {
+      // Fall back to direct eval of the IIFE.
+      page
+        .eval::<serde_json::Value>(script)
+        .await
+        .map_err(|e| format!("Failed to inject Camoufox recorder script: {e}"))?;
+      Ok(())
+    }
+    Ok(other) => {
+      // Unexpected return — try direct eval as a last resort.
+      log::warn!("Recorder: Camoufox script-element inject returned {other}; falling back to eval");
+      page
+        .eval::<serde_json::Value>(script)
+        .await
+        .map_err(|e| format!("Failed to inject Camoufox recorder script: {e}"))?;
+      Ok(())
+    }
+    Err(e) => {
+      // Script-element path failed entirely; try direct eval.
+      log::warn!("Recorder: Camoufox script-element inject failed ({e}); falling back to eval");
+      page
+        .eval::<serde_json::Value>(script)
+        .await
+        .map_err(|err| format!("Failed to inject Camoufox recorder script: {err}"))?;
+      Ok(())
+    }
+  }
+}
+
+/// Drain tagged recorder payloads from a Camoufox page buffer.
+async fn drain_camoufox_page_buffer(
+  page: &Page,
+  shared: &Arc<AsyncMutex<crate::recorder::RecorderShared>>,
+) -> Result<usize, String> {
+  let value = page
+    .eval::<serde_json::Value>(CAMOUFOX_DRAIN_EXPRESSION)
+    .await
+    .map_err(|e| format!("Failed to drain Camoufox recorder buffer: {e}"))?;
+
+  let mut drained = 0usize;
+  if let Some(items) = value.as_array() {
+    for item in items {
+      let text = item.as_str().unwrap_or("");
+      if let Some(event) = parse_tagged_console_message(text) {
+        push_event(shared, event).await;
+        drained += 1;
+      }
+    }
+  }
+  Ok(drained)
+}
+
+/// Camoufox capture loop via in-page buffer polling.
+///
+/// Playwright's `page::Event::Console` is not a reliable harvest channel on
+/// Camoufox here (MCP already uses a page-side buffer + poll for console
+/// capture). The injected recorder dual-writes each event into
+/// `window.__jnmbrowserRecorderBuffer`; this task polls and drains it.
 pub async fn run_camoufox_recorder(
   profile_id: String,
   profile_path: String,
@@ -374,30 +483,24 @@ pub async fn run_camoufox_recorder(
   };
 
   let script = recorder_script();
-  if let Err(e) = page.add_init_script(&script).await {
-    let msg = format!("Failed to add Camoufox init script for {profile_id}: {e}");
+  if let Err(e) = install_camoufox_recorder_script(&page, &script).await {
+    let msg = format!("Recorder setup failed for {profile_id}: {e}");
     set_last_error(&shared, msg.clone()).await;
     notify(&mut ready_tx, Err(msg));
     return;
   }
-  // Apply to current document as well.
-  if let Err(e) = page.eval::<serde_json::Value>(&script).await {
-    log::warn!("Recorder: Camoufox evaluate inject failed (continuing): {e}");
-  }
 
-  let mut stream = match page.subscribe_event() {
-    Ok(stream) => stream,
-    Err(e) => {
-      let msg = format!("Failed to subscribe Camoufox console for {profile_id}: {e}");
-      set_last_error(&shared, msg.clone()).await;
-      notify(&mut ready_tx, Err(msg));
-      return;
-    }
-  };
+  // Prime the buffer once so a successful initial navigate event is not lost
+  // between arm and the first poll tick.
+  if let Err(e) = drain_camoufox_page_buffer(&page, &shared).await {
+    log::warn!("Recorder: initial Camoufox drain failed (continuing): {e}");
+  }
 
   notify(&mut ready_tx, Ok(()));
   log::info!("Recorder: Camoufox capture armed for profile {profile_id}");
 
+  let mut reinstall_ticks: u32 = 0;
+  let mut active_page = page;
   loop {
     tokio::select! {
       _ = cancel_rx.changed() => {
@@ -405,23 +508,61 @@ pub async fn run_camoufox_recorder(
           break;
         }
       }
-      event = stream.next() => {
-        let Some(event) = event else { break; };
-        match event {
-          Ok(playwright::api::page::Event::Console(message)) => {
-            let text = message.text().unwrap_or_default();
-            if let Some(ev) = parse_tagged_console_message(&text) {
-              push_event(&shared, ev).await;
+      _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+        // Refresh the active page periodically so tab switches / new pages
+        // still get the injector and contribute events.
+        reinstall_ticks = reinstall_ticks.wrapping_add(1);
+        if reinstall_ticks.is_multiple_of(8) {
+          match CamoufoxManager::instance()
+            .get_active_page(&profile_path)
+            .await
+          {
+            Ok(next_page) => {
+              // Best-effort reinstall; ignore "already installed" no-ops.
+              if let Err(e) = install_camoufox_recorder_script(&next_page, &script).await {
+                log::debug!(
+                  "Recorder: Camoufox reinstall on active page failed for {profile_id}: {e}"
+                );
+              }
+              active_page = next_page;
+            }
+            Err(e) => {
+              log::debug!(
+                "Recorder: Camoufox get_active_page during poll failed for {profile_id}: {e}"
+              );
             }
           }
-          Ok(_) => {}
+        }
+
+        match drain_camoufox_page_buffer(&active_page, &shared).await {
+          Ok(_n) => {}
           Err(e) => {
-            set_last_error(&shared, format!("Camoufox stream error: {e}")).await;
-            break;
+            // Page may have navigated mid-poll; try to re-resolve + reinstall.
+            log::debug!("Recorder: Camoufox drain error for {profile_id}: {e}");
+            if let Ok(next_page) = CamoufoxManager::instance()
+              .get_active_page(&profile_path)
+              .await
+            {
+              let _ = install_camoufox_recorder_script(&next_page, &script).await;
+              active_page = next_page;
+            }
           }
         }
       }
     }
+  }
+
+  // Final drain BEFORE the task exits. stop_recording waits briefly after
+  // cancel so these events land in the shared buffer first.
+  if let Ok(next_page) = CamoufoxManager::instance()
+    .get_active_page(&profile_path)
+    .await
+  {
+    if let Err(e) = drain_camoufox_page_buffer(&next_page, &shared).await {
+      log::debug!("Recorder: Camoufox final drain failed for {profile_id}: {e}");
+    }
+  } else if let Err(e) = drain_camoufox_page_buffer(&active_page, &shared).await {
+    log::debug!("Recorder: Camoufox final drain failed for {profile_id}: {e}");
   }
 
   log::info!("Recorder: Camoufox capture stopped for profile {profile_id}");
@@ -568,5 +709,32 @@ mod tests {
     assert_eq!(canonical_browser("chromium").unwrap(), "chromium");
     assert_eq!(canonical_browser("camoufox").unwrap(), "camoufox");
     assert!(canonical_browser("firefox").is_err());
+  }
+
+  #[test]
+  fn test_parse_buffer_payloads_like_camoufox_drain() {
+    // Simulates the JSON array the poll path receives from
+    // window.__jnmbrowserRecorderDrain().
+    let drained = serde_json::json!([
+      r##"__REC__:{"t_ms":0,"kind":"navigate","payload":{"from":"","to":"https://example.com"}}"##,
+      r##"__REC__:{"t_ms":50,"kind":"click","target":{"tag":"a","locators":[],"rect":{"x":0,"y":0,"width":1,"height":1},"attributes":{}},"payload":{"button":0,"clientX":1,"clientY":2}}"##,
+      "noise that should be ignored",
+    ]);
+    let items = drained.as_array().expect("array");
+    let mut events = Vec::new();
+    for item in items {
+      if let Some(event) = parse_tagged_console_message(item.as_str().unwrap_or("")) {
+        events.push(event);
+      }
+    }
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, "navigate");
+    assert_eq!(events[1].kind, "click");
+  }
+
+  #[test]
+  fn test_drain_expression_targets_buffer() {
+    assert!(CAMOUFOX_DRAIN_EXPRESSION.contains("__jnmbrowserRecorderDrain"));
+    assert!(CAMOUFOX_DRAIN_EXPRESSION.contains("__jnmbrowserRecorderBuffer"));
   }
 }

@@ -13,6 +13,8 @@ export interface RegistrationProgress {
   result?: RegistrationResult | null;
 }
 
+export type NetworkMode = "none" | "proxy" | "nord";
+
 export interface RegistrationConfig {
   cdks: string[];
   profileId?: string;
@@ -22,7 +24,19 @@ export interface RegistrationConfig {
   accountsPerCdk: number;
   headless: boolean;
   concurrency: number;
+  networkMode?: NetworkMode;
+  rotateEveryN?: number;
+  nordGroup?: string;
+  nordServerName?: string;
+  nordCliPath?: string;
 }
+
+export type AccountInventoryStatus =
+  | "available"
+  | "exported"
+  | "sold"
+  | "invalid"
+  | "reserved";
 
 export interface RegistrationResult {
   success: boolean;
@@ -35,8 +49,15 @@ export interface RegistrationResult {
   stepLogs: string[];
   createdAt: string;
   twoFaEnabled: boolean;
+  totpSecret?: string;
+  freeTrialEligible?: boolean;
+  planType?: string;
   cdk: string;
   baseEmail: string;
+  status?: AccountInventoryStatus;
+  note?: string;
+  exportedAt?: string | null;
+  soldAt?: string | null;
 }
 
 export function useRegistrationEvents() {
@@ -58,6 +79,12 @@ export function useRegistrationEvents() {
             next.set(event.payload.taskId, event.payload);
             return next;
           });
+          // Refresh inventory when a registration completes with a result.
+          if (event.payload.result) {
+            void invoke<RegistrationResult[]>("list_registered_accounts_cmd")
+              .then(setAccounts)
+              .catch(() => {});
+          }
         },
       );
     };
@@ -103,6 +130,30 @@ export function useRegistrationEvents() {
     await invoke("delete_registered_account_cmd", { accountId });
   }, []);
 
+  const updateAccountStatus = useCallback(
+    async (
+      accountIds: string[],
+      status: AccountInventoryStatus,
+      note?: string,
+    ) => {
+      await invoke("update_registered_account_status_cmd", {
+        accountIds,
+        status,
+        note: note ?? null,
+      });
+      await refreshAccounts();
+    },
+    [refreshAccounts],
+  );
+
+  const updateAccountNote = useCallback(
+    async (accountId: string, note: string) => {
+      await invoke("update_registered_account_note_cmd", { accountId, note });
+      await refreshAccounts();
+    },
+    [refreshAccounts],
+  );
+
   useEffect(() => {
     refreshAccounts();
   }, [refreshAccounts]);
@@ -115,5 +166,7 @@ export function useRegistrationEvents() {
     cancelRegistration,
     refreshAccounts,
     deleteAccount,
+    updateAccountStatus,
+    updateAccountNote,
   };
 }

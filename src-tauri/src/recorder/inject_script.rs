@@ -20,6 +20,17 @@ pub fn recorder_script() -> String {
   window.__jnmbrowserRecorderInstalled = true;
   var TAG = {tag:?};
   var startTs = performance.now();
+  // Dual-write sink used by Camoufox (poll path). Chromium still harvests
+  // Runtime.consoleAPICalled; Camoufox Playwright Console events are unreliable
+  // so the capture task drains this buffer instead.
+  if (!Array.isArray(window.__jnmbrowserRecorderBuffer)) {{
+    window.__jnmbrowserRecorderBuffer = [];
+  }}
+  window.__jnmbrowserRecorderDrain = function () {{
+    var buf = window.__jnmbrowserRecorderBuffer || [];
+    window.__jnmbrowserRecorderBuffer = [];
+    return buf;
+  }};
 
   function now() {{
     return Math.round(performance.now() - startTs);
@@ -27,7 +38,23 @@ pub fn recorder_script() -> String {
 
   function emit(event) {{
     try {{
-      console.log(TAG + JSON.stringify(event));
+      var payload = TAG + JSON.stringify(event);
+      try {{
+        if (!Array.isArray(window.__jnmbrowserRecorderBuffer)) {{
+          window.__jnmbrowserRecorderBuffer = [];
+        }}
+        window.__jnmbrowserRecorderBuffer.push(payload);
+        // Cap growth so a long session cannot balloon page memory.
+        if (window.__jnmbrowserRecorderBuffer.length > 5000) {{
+          window.__jnmbrowserRecorderBuffer.splice(
+            0,
+            window.__jnmbrowserRecorderBuffer.length - 5000
+          );
+        }}
+      }} catch (_bufferErr) {{
+        // Buffer is best-effort; console path may still work on Chromium.
+      }}
+      console.log(payload);
     }} catch (e) {{
       // Swallow serialization errors — never break the page.
     }}
@@ -277,5 +304,18 @@ mod tests {
     // The guard ensures re-installation after navigation is a no-op.
     let s = recorder_script();
     assert!(s.contains("if (window.__jnmbrowserRecorderInstalled) return"));
+  }
+
+  #[test]
+  fn test_recorder_script_exposes_buffer_drain() {
+    let s = recorder_script();
+    assert!(
+      s.contains("window.__jnmbrowserRecorderBuffer"),
+      "must dual-write into page buffer for Camoufox poll harvest"
+    );
+    assert!(
+      s.contains("window.__jnmbrowserRecorderDrain"),
+      "must expose drain helper for capture task"
+    );
   }
 }

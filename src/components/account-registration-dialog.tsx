@@ -1,8 +1,11 @@
 "use client";
 
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuFolderOpen, LuRocket } from "react-icons/lu";
-import { useState } from "react";
+import { toast } from "sonner";
+import { RegisteredAccountsTable } from "@/components/registered-accounts-table";
+import { RegistrationProgressCard } from "@/components/registration-progress-card";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -21,9 +24,10 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { useRegistrationEvents } from "@/hooks/use-registration-events";
-import { RegisteredAccountsTable } from "@/components/registered-accounts-table";
-import { RegistrationProgressCard } from "@/components/registration-progress-card";
+import {
+  type NetworkMode,
+  useRegistrationEvents,
+} from "@/hooks/use-registration-events";
 
 interface Props {
   open: boolean;
@@ -40,6 +44,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     cancelRegistration,
     refreshAccounts,
     deleteAccount,
+    updateAccountStatus,
   } = useRegistrationEvents();
 
   const [cdkText, setCdkText] = useState("");
@@ -48,7 +53,22 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   const [maxRetries, setMaxRetries] = useState(3);
   const [accountsPerCdk, setAccountsPerCdk] = useState(1);
   const [headless, setHeadless] = useState(false);
+  const [networkMode, setNetworkMode] = useState<NetworkMode>("none");
+  const [rotateEveryN, setRotateEveryN] = useState(1);
+  const [nordGroup, setNordGroup] = useState("Japan");
+  const [nordServerName, setNordServerName] = useState("");
   const [activeTab, setActiveTab] = useState("register");
+
+  const nordLocations = [
+    { value: "Japan", labelKey: "registration.nordLocJapan" },
+    { value: "United States", labelKey: "registration.nordLocUnitedStates" },
+    { value: "Singapore", labelKey: "registration.nordLocSingapore" },
+    { value: "Hong Kong", labelKey: "registration.nordLocHongKong" },
+    { value: "United Kingdom", labelKey: "registration.nordLocUnitedKingdom" },
+    { value: "Germany", labelKey: "registration.nordLocGermany" },
+    { value: "Canada", labelKey: "registration.nordLocCanada" },
+    { value: "Australia", labelKey: "registration.nordLocAustralia" },
+  ] as const;
 
   const progressList = Array.from(progressMap.values());
 
@@ -65,14 +85,26 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     const cdks = parseCdks(cdkText);
     if (cdks.length === 0) return;
 
+    if (networkMode === "proxy" && !proxyId.trim()) {
+      toast.error(t("registration.proxyRequired"));
+      return;
+    }
+
     await startRegistration({
       cdks,
       browserType,
-      proxyId: proxyId || undefined,
+      proxyId:
+        networkMode === "proxy" ? proxyId.trim() || undefined : undefined,
       maxRetries,
       accountsPerCdk,
       headless,
       concurrency: 1,
+      networkMode,
+      rotateEveryN: networkMode === "nord" ? rotateEveryN : 0,
+      nordGroup:
+        networkMode === "nord" ? nordGroup.trim() || undefined : undefined,
+      nordServerName:
+        networkMode === "nord" ? nordServerName.trim() || undefined : undefined,
     });
     setActiveTab("progress");
   };
@@ -84,10 +116,16 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+      <DialogContent
+        className={
+          activeTab === "stored"
+            ? "flex max-h-[90vh] max-w-6xl flex-col overflow-hidden"
+            : "flex max-h-[85vh] max-w-2xl flex-col overflow-hidden"
+        }
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <LuRocket className="h-5 w-5" />
+            <LuRocket className="h-5 w-5 text-primary" />
             {t("registration.title")}
           </DialogTitle>
         </DialogHeader>
@@ -95,26 +133,34 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
         <Tabs
           value={activeTab}
           onValueChange={setActiveTab}
-          className="flex-1 flex flex-col min-h-0"
+          className="flex min-h-0 flex-1 flex-col"
         >
-          <TabsList className="w-full">
-            <TabsTrigger value="register" className="flex-1">
+          <TabsList className="grid w-full grid-cols-3">
+            <TabsTrigger value="register">
               {t("registration.newRegistration")}
             </TabsTrigger>
-            <TabsTrigger value="progress" className="flex-1">
+            <TabsTrigger value="progress" className="gap-1.5">
               {t("registration.progress")}
               {progressList.length > 0 && (
-                <span className="ml-1.5 rounded-full bg-primary/10 px-1.5 py-0.5 text-xs">
+                <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums">
                   {progressList.length}
                 </span>
               )}
             </TabsTrigger>
-            <TabsTrigger value="stored" className="flex-1">
+            <TabsTrigger value="stored" className="gap-1.5">
               {t("registration.storedAccounts")}
+              {accounts.length > 0 && (
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                  {accounts.length}
+                </span>
+              )}
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="register" className="flex-1 overflow-auto mt-4 space-y-4">
+          <TabsContent
+            value="register"
+            className="mt-4 flex-1 space-y-4 overflow-auto"
+          >
             <div className="space-y-2">
               <Label htmlFor="cdks">{t("registration.cdkLabel")}</Label>
               <Textarea
@@ -126,7 +172,10 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                 className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                {t("registration.cdkHint", { count: cdkCount, total: totalAccounts })}
+                {t("registration.cdkHint", {
+                  count: cdkCount,
+                  total: totalAccounts,
+                })}
               </p>
             </div>
 
@@ -142,9 +191,11 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>{t("registration.browserType")}</Label>
+                <Label htmlFor="browserType">
+                  {t("registration.browserType")}
+                </Label>
                 <Select value={browserType} onValueChange={setBrowserType}>
-                  <SelectTrigger>
+                  <SelectTrigger id="browserType">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -155,6 +206,33 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               </div>
 
               <div className="space-y-2">
+                <Label htmlFor="networkMode">
+                  {t("registration.networkMode")}
+                </Label>
+                <Select
+                  value={networkMode}
+                  onValueChange={(v) => setNetworkMode(v as NetworkMode)}
+                >
+                  <SelectTrigger id="networkMode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">
+                      {t("registration.networkModeNone")}
+                    </SelectItem>
+                    <SelectItem value="proxy">
+                      {t("registration.networkModeProxy")}
+                    </SelectItem>
+                    <SelectItem value="nord">
+                      {t("registration.networkModeNord")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {networkMode === "proxy" && (
+              <div className="space-y-2">
                 <Label htmlFor="proxy">{t("registration.proxy")}</Label>
                 <Input
                   id="proxy"
@@ -163,7 +241,98 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   onChange={(e) => setProxyId(e.target.value)}
                 />
               </div>
-            </div>
+            )}
+
+            {networkMode === "nord" && (
+              <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {t("registration.nordSystemWideWarning")}
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="nordLocation">
+                      {t("registration.nordLocation")}
+                    </Label>
+                    <Select
+                      value={
+                        nordLocations.some((l) => l.value === nordGroup)
+                          ? nordGroup
+                          : "custom"
+                      }
+                      onValueChange={(v) => {
+                        if (v === "custom") {
+                          if (
+                            nordLocations.some((l) => l.value === nordGroup)
+                          ) {
+                            setNordGroup("");
+                          }
+                          return;
+                        }
+                        setNordGroup(v);
+                      }}
+                    >
+                      <SelectTrigger id="nordLocation">
+                        <SelectValue
+                          placeholder={t(
+                            "registration.nordLocationPlaceholder",
+                          )}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {nordLocations.map((loc) => (
+                          <SelectItem key={loc.value} value={loc.value}>
+                            {t(loc.labelKey)}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value="custom">
+                          {t("registration.nordLocCustom")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="rotateEveryN">
+                      {t("registration.rotateEveryN")}
+                    </Label>
+                    <Input
+                      id="rotateEveryN"
+                      type="number"
+                      min={0}
+                      max={50}
+                      value={rotateEveryN}
+                      onChange={(e) =>
+                        setRotateEveryN(Number(e.target.value) || 0)
+                      }
+                    />
+                  </div>
+                </div>
+                {(!nordLocations.some((l) => l.value === nordGroup) ||
+                  nordGroup === "") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="nordGroupCustom">
+                      {t("registration.nordGroupCustom")}
+                    </Label>
+                    <Input
+                      id="nordGroupCustom"
+                      placeholder={t("registration.nordGroupPlaceholder")}
+                      value={nordGroup}
+                      onChange={(e) => setNordGroup(e.target.value)}
+                    />
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="nordServer">
+                    {t("registration.nordServerName")}
+                  </Label>
+                  <Input
+                    id="nordServer"
+                    placeholder={t("registration.nordServerPlaceholder")}
+                    value={nordServerName}
+                    onChange={(e) => setNordServerName(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-3 gap-4">
               <div className="space-y-2">
@@ -179,7 +348,9 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="perCdk">{t("registration.accountsPerCdk")}</Label>
+                <Label htmlFor="perCdk">
+                  {t("registration.accountsPerCdk")}
+                </Label>
                 <Input
                   id="perCdk"
                   type="number"
@@ -190,16 +361,22 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                 />
               </div>
 
-              <div className="space-y-2 flex items-end pb-2">
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <div className="flex items-end pb-2">
+                <div className="flex h-9 items-center gap-2 text-sm">
                   <input
+                    id="headless"
                     type="checkbox"
                     checked={headless}
                     onChange={(e) => setHeadless(e.target.checked)}
-                    className="rounded"
+                    className="h-4 w-4 rounded border-border"
                   />
-                  {t("registration.headless")}
-                </label>
+                  <Label
+                    htmlFor="headless"
+                    className="cursor-pointer font-normal"
+                  >
+                    {t("registration.headless")}
+                  </Label>
+                </div>
               </div>
             </div>
 
@@ -211,36 +388,45 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               {loading
                 ? t("registration.starting")
                 : totalAccounts > 0
-                  ? t("registration.startRegistrationWithCount", { total: totalAccounts })
+                  ? t("registration.startRegistrationWithCount", {
+                      total: totalAccounts,
+                    })
                   : t("registration.startRegistration")}
             </Button>
           </TabsContent>
 
-          <TabsContent value="progress" className="flex-1 overflow-auto mt-4 space-y-4">
+          <TabsContent
+            value="progress"
+            className="mt-4 flex-1 space-y-3 overflow-auto"
+          >
             {progressList.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">
-                {t("registration.noActiveTasks")}
-              </p>
+              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-muted/20 px-6 py-12 text-center">
+                <p className="text-sm text-muted-foreground">
+                  {t("registration.noActiveTasks")}
+                </p>
+              </div>
             ) : (
               progressList.map((p) => (
                 <RegistrationProgressCard
                   key={p.taskId}
                   progress={p}
                   onCancel={
-                    p.result
-                      ? undefined
-                      : () => cancelRegistration(p.taskId)
+                    p.result ? undefined : () => cancelRegistration(p.taskId)
                   }
                 />
               ))
             )}
           </TabsContent>
 
-          <TabsContent value="stored" className="flex-1 overflow-auto mt-4">
+          <TabsContent
+            value="stored"
+            className="mt-4 min-h-0 flex-1 overflow-auto"
+          >
             <RegisteredAccountsTable
               accounts={accounts}
               onDelete={handleDelete}
               onRefresh={refreshAccounts}
+              onUpdateStatus={updateAccountStatus}
             />
           </TabsContent>
         </Tabs>

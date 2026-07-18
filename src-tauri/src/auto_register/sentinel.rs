@@ -80,10 +80,7 @@ async fn fetch_sentinel_challenge(
     .await
     .map_err(|e| format!("Sentinel challenge parse: {e}"))?;
 
-  let server_token = data["token"]
-    .as_str()
-    .unwrap_or("")
-    .to_string();
+  let server_token = data["token"].as_str().unwrap_or("").to_string();
   let pow = &data["proofofwork"];
   let seed = pow["seed"].as_str().unwrap_or("").to_string();
   let difficulty = pow["difficulty"].as_str().unwrap_or("0").to_string();
@@ -158,20 +155,16 @@ fn solve_pow(seed: &str, difficulty: &str, max_attempts: u32) -> String {
 
 /// Build a complete sentinel token for the `openai-sentinel-token` header.
 /// Returns None if the sentinel backend is unreachable.
-pub async fn build_sentinel_token(
-  device_id: &str,
-  flow: &str,
-) -> Option<String> {
+pub async fn build_sentinel_token(device_id: &str, flow: &str) -> Option<String> {
   let client = reqwest::Client::builder()
     .timeout(std::time::Duration::from_secs(15))
     .build()
     .ok()?;
 
-  let (server_token, seed, difficulty) =
-    match fetch_sentinel_challenge(&client, device_id).await {
-      Ok(v) => v,
-      Err(_) => return None,
-    };
+  let (server_token, seed, difficulty) = match fetch_sentinel_challenge(&client, device_id).await {
+    Ok(v) => v,
+    Err(_) => return None,
+  };
 
   let pow_token = if seed.is_empty() {
     // No PoW required — use requirements

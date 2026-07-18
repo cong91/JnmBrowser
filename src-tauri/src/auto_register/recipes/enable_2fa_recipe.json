@@ -1,26 +1,98 @@
 {
   "version": 1,
   "name": "Enable ChatGPT 2FA",
-  "description": "Recorded flow: Navigate to Settings > Privacy > Enable two-factor authentication",
+  "description": "Recorded flow: Settings → Security → Authenticator app → copy secret → enter TOTP → confirm",
   "defaults": {
-    "timeout_ms": 10000,
+    "timeout_ms": 15000,
     "auto_wait": true
   },
   "steps": [
     {
-      "id": "navigate_settings",
+      "id": "navigate_home",
       "tool": "navigate",
       "arguments": {
-        "url": "https://chatgpt.com/settings/privacy"
+        "url": "https://chatgpt.com/"
       }
     },
     {
-      "id": "click_enable_2fa",
+      "id": "open_settings_menu",
+      "tool": "click_element",
+      "arguments": {
+        "locator": {
+          "by": "testid",
+          "value": "settings-menu-item"
+        }
+      }
+    },
+    {
+      "id": "open_security_tab",
       "tool": "click_element",
       "arguments": {
         "locator": {
           "by": "text",
-          "value": "Enable two-factor authentication"
+          "value": "Security"
+        }
+      }
+    },
+    {
+      "id": "toggle_authenticator",
+      "tool": "click_element",
+      "arguments": {
+        "locator": {
+          "by": "testid",
+          "value": "mfa-authenticator-toggle"
+        }
+      }
+    },
+    {
+      "id": "reveal_secret_link",
+      "tool": "click_element",
+      "arguments": {
+        "locator": {
+          "by": "css",
+          "value": "button.interactive-label-accent.underline"
+        }
+      }
+    },
+    {
+      "id": "copy_secret_code",
+      "tool": "click_element",
+      "arguments": {
+        "locator": {
+          "by": "role",
+          "value": "button|Copy code",
+          "exact": true
+        }
+      }
+    },
+    {
+      "id": "focus_totp_input",
+      "tool": "click_element",
+      "arguments": {
+        "locator": {
+          "by": "css",
+          "value": "#totp_otp"
+        }
+      }
+    },
+    {
+      "id": "type_totp_code",
+      "tool": "type_text",
+      "arguments": {
+        "locator": {
+          "by": "css",
+          "value": "#totp_otp"
+        },
+        "text": "{{inputs.totp_code}}"
+      }
+    },
+    {
+      "id": "confirm_2fa",
+      "tool": "click_element",
+      "arguments": {
+        "locator": {
+          "by": "text",
+          "value": "Continue"
         }
       }
     }

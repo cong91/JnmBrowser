@@ -599,6 +599,13 @@ export default function Home() {
             description: t("recorder.eventCount", {
               count: recording.header.event_count,
             }),
+            duration: 8000,
+            action: {
+              label: t("recorder.viewRecordings"),
+              onClick: () => {
+                setRecorderDialogOpen(true);
+              },
+            },
           });
         } catch (error) {
           console.error("Failed to auto-save recording before kill:", error);
@@ -786,6 +793,13 @@ export default function Home() {
             description: t("recorder.eventCount", {
               count: recording.header.event_count,
             }),
+            duration: 8000,
+            action: {
+              label: t("recorder.viewRecordings"),
+              onClick: () => {
+                setRecorderDialogOpen(true);
+              },
+            },
           });
         } else {
           if (
@@ -1105,6 +1119,7 @@ export default function Home() {
             onIntegrationsDialogOpen={setIntegrationsDialogOpen}
             onExtensionManagementDialogOpen={setExtensionManagementDialogOpen}
             onAutoRegisterDialogOpen={setAutoRegisterDialogOpen}
+            onRecordingsDialogOpen={setRecorderDialogOpen}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
           />
