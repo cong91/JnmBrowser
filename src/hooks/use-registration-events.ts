@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
+import type { EmailProvider } from "@/lib/email-providers";
 
 export interface RegistrationProgress {
   taskId: string;
@@ -14,6 +15,8 @@ export interface RegistrationProgress {
 }
 
 export type NetworkMode = "none" | "proxy" | "vpn" | "nord";
+
+export type { EmailProvider };
 
 export interface RegistrationConfig {
   cdks: string[];
@@ -42,6 +45,8 @@ export interface RegistrationConfig {
   smsNetwork?: string;
   /** "vn" | "la" */
   smsCountry?: string;
+  /** Email OTP provider domain id: gmail.123452026.xyz (default) or sms.iosmq.xyz */
+  emailProvider?: EmailProvider;
 }
 
 export type AccountInventoryStatus =

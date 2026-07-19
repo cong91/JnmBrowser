@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use donutbrowser_lib::auto_service::openai::register::types::NetworkMode;
 use donutbrowser_lib::auto_service::openai::register::{RegistrationConfig, RegistrationEngine};
-use donutbrowser_lib::email::gmail_cdk::GmailCdkService;
+use donutbrowser_lib::email::{build_email_service, EmailProvider, EmailService};
 
 struct LiveArgs {
   cdk: String,
@@ -28,6 +28,7 @@ struct LiveArgs {
   nord_group: Option<String>,
   nord_server_name: Option<String>,
   vpn_id: Option<String>,
+  email_provider: EmailProvider,
 }
 
 fn parse_network_mode(s: &str) -> NetworkMode {
@@ -50,6 +51,9 @@ fn parse_args() -> LiveArgs {
   let mut nord_group = std::env::var("AUTO_REG_NORD_GROUP").ok();
   let mut nord_server_name = std::env::var("AUTO_REG_NORD_SERVER").ok();
   let mut vpn_id = std::env::var("AUTO_REG_VPN_ID").ok();
+  let mut email_provider = std::env::var("AUTO_REG_EMAIL_PROVIDER")
+    .map(|s| EmailProvider::parse(&s))
+    .unwrap_or(EmailProvider::Gmail123452026);
 
   if let Ok(m) = std::env::var("AUTO_REG_NETWORK") {
     network_mode = parse_network_mode(&m);
@@ -91,6 +95,11 @@ fn parse_args() -> LiveArgs {
       "--nord-group" => nord_group = args.next(),
       "--nord-server" => nord_server_name = args.next(),
       "--vpn-id" => vpn_id = args.next(),
+      "--email-provider" => {
+        if let Some(v) = args.next() {
+          email_provider = EmailProvider::parse(&v);
+        }
+      }
       other if other.starts_with("--cdk=") => {
         cdk = other.trim_start_matches("--cdk=").to_string();
       }
@@ -124,6 +133,9 @@ fn parse_args() -> LiveArgs {
       other if other.starts_with("--vpn-id=") => {
         vpn_id = Some(other.trim_start_matches("--vpn-id=").to_string());
       }
+      other if other.starts_with("--email-provider=") => {
+        email_provider = EmailProvider::parse(other.trim_start_matches("--email-provider="));
+      }
       _ => {}
     }
   }
@@ -132,7 +144,7 @@ fn parse_args() -> LiveArgs {
     eprintln!(
       "Usage: auto-reg-live --cdk GMAIL-XXXX [--browser camoufox] [--profile-id UUID] \
        [--network none|proxy|vpn|nord] [--vpn-id ID] [--rotate-every N] [--accounts-per-cdk N] \
-       [--nord-group \"United States\"]"
+       [--nord-group \"United States\"] [--email-provider gmail.123452026.xyz|sms.iosmq.xyz]"
     );
     std::process::exit(2);
   }
@@ -148,6 +160,7 @@ fn parse_args() -> LiveArgs {
     nord_group,
     nord_server_name,
     vpn_id,
+    email_provider,
   }
 }
 
@@ -165,6 +178,7 @@ fn main() {
   eprintln!("rotate_every_n={}", args.rotate_every_n);
   eprintln!("nord_group={:?}", args.nord_group);
   eprintln!("nord_server={:?}", args.nord_server_name);
+  eprintln!("email_provider={}", args.email_provider);
 
   tauri::Builder::default()
     .setup(move |app| {
@@ -195,6 +209,7 @@ fn main() {
             sms_service_id: None,
             sms_network: None,
             sms_country: None,
+            email_provider: args.email_provider,
           };
           config.normalize_network();
           if let Err(e) = config.validate_network() {
@@ -202,14 +217,15 @@ fn main() {
             std::process::exit(2);
           }
           eprintln!(
-            "effective network_mode={:?} rotate_every_n={}",
-            config.network_mode, config.rotate_every_n
+            "effective network_mode={:?} rotate_every_n={} email_provider={}",
+            config.network_mode, config.rotate_every_n, config.email_provider
           );
 
           let cancel = Arc::new(AtomicBool::new(false));
+          let email_provider = config.email_provider;
           let mut engine = RegistrationEngine::with_cancel_flag(config, cancel);
-          let email = GmailCdkService::new();
-          engine.run(handle, &email, None).await
+          let email: Box<dyn EmailService> = build_email_service(email_provider);
+          engine.run(handle, email.as_ref(), None).await
         });
 
         eprintln!("=== RESULT ===");

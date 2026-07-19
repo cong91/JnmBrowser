@@ -195,7 +195,7 @@ impl CamoufoxManager {
     let match_media_block = match_media_js.unwrap_or_default();
 
     Some(format!(
-      r#"(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const overrides={{{overrides_object}}};const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};for(const [key,value] of Object.entries(overrides)){{if(key!=="timezone"){{overrideValue(key,value);}}}}const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(key!=="timezone"&&!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone"){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);if(typeof overrides.timezone==='string'&&overrides.timezone){{const OriginalDateTimeFormat=Intl.DateTimeFormat;const originalResolvedOptions=OriginalDateTimeFormat.prototype.resolvedOptions;Object.defineProperty(OriginalDateTimeFormat.prototype,'resolvedOptions',{{configurable:true,writable:true,value:function(...args){{const options=originalResolvedOptions.apply(this,args);return Object.assign({{}},options,{{timeZone:overrides.timezone}});}}}});Object.defineProperty(Intl,'DateTimeFormat',{{configurable:true,writable:true,value:function(...args){{return new OriginalDateTimeFormat(...args);}}}});Intl.DateTimeFormat.prototype=OriginalDateTimeFormat.prototype;}}{match_media_block}return true;}})()"#
+      r#"(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const overrides={{{overrides_object}}};const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};for(const [key,value] of Object.entries(overrides)){{if(key!=="timezone"){{overrideValue(key,value);}}}}const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(key!=="timezone"&&!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone"){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);if(typeof overrides.timezone==='string'&&overrides.timezone){{const OriginalDateTimeFormat=Intl.DateTimeFormat;const originalResolvedOptions=OriginalDateTimeFormat.prototype.resolvedOptions;Object.defineProperty(OriginalDateTimeFormat.prototype,'resolvedOptions',{{configurable:true,writable:true,value:function(...args){{const options=originalResolvedOptions.apply(this,args);return Object.assign({{}},options,{{timeZone:overrides.timezone}});}}}});Object.defineProperty(Intl,'DateTimeFormat',{{configurable:true,writable:true,value:function(...args){{return new OriginalDateTimeFormat(...args);}}}});Intl.DateTimeFormat.prototype=OriginalDateTimeFormat.prototype;}}{match_media_block};return true;}})()"#
     ))
   }
 
@@ -1321,6 +1321,47 @@ mod tests {
     assert!(script.contains("hardwareConcurrency"));
     assert!(script.contains("Asia/Shanghai"));
     assert!(script.contains("resolvedOptions"));
+  }
+
+  #[test]
+  fn test_runtime_override_script_with_match_media_is_valid_js() {
+    // Media overrides used to concatenate as `})()return true` which breaks ASI and
+    // makes Playwright page.eval fail with: unexpected token: keyword 'return'.
+    let config = HashMap::from([
+      (
+        "navigator.userAgent".to_string(),
+        serde_json::json!(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0"
+        ),
+      ),
+      ("navigator.platform".to_string(), serde_json::json!("Win32")),
+      (
+        "timezone".to_string(),
+        serde_json::json!("Asia/Ho_Chi_Minh"),
+      ),
+      (
+        "media:prefersColorScheme".to_string(),
+        serde_json::json!("light"),
+      ),
+      (
+        "media:prefersReducedMotion".to_string(),
+        serde_json::json!("no-preference"),
+      ),
+    ]);
+
+    let script = CamoufoxManager::runtime_override_script(&config)
+      .expect("runtime override script should be generated with matchMedia");
+
+    assert!(
+      script.contains("})();return true"),
+      "matchMedia IIFE must be semicolon-terminated before return true; got tail: {}",
+      &script[script.len().saturating_sub(40)..]
+    );
+    assert!(script.contains("prefers-color-scheme"));
+    assert!(
+      !script.contains("})()return true"),
+      "ASI-breaking concatenation must not appear"
+    );
   }
 }
 

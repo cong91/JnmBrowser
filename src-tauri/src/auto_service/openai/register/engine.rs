@@ -1203,7 +1203,7 @@ impl RegistrationEngine {
     sms_service: Option<&dyn SmsService>,
   ) -> RegistrationResult {
     let total_cdks = self.config.cdks.len() as u32;
-    let accounts_per = self.config.accounts_per_cdk.clamp(1, 6);
+    let accounts_per = self.config.effective_accounts_per_cdk();
     let max_retries = self.config.max_retries.max(1);
     let cdks = self.config.cdks.clone();
     let mut last_error = String::new();
@@ -1466,9 +1466,10 @@ impl RegistrationEngine {
       let app = app_handle.clone();
       let success_count = success_count.clone();
       let sms_token = sms_token.clone();
+      let email_provider = self.config.email_provider;
       tasks.push(Box::pin(async move {
         let _permit = permit;
-        let email = crate::email::gmail_cdk::GmailCdkService::new();
+        let email = crate::email::build_email_service(email_provider);
         let viotp = if sms_enabled {
           sms_token.map(crate::sms::viotp::ViotpService::new)
         } else {
@@ -1480,7 +1481,7 @@ impl RegistrationEngine {
         let (results, err, _nord_stop) = slot
           .process_one_cdk(
             &app,
-            &email,
+            email.as_ref(),
             sms_ref,
             &cdk,
             cdk_idx as u32,

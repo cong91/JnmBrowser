@@ -1811,7 +1811,22 @@
     "concurrencyVpnHint": "El modo VPN ejecuta en paralelo hasta el máximo de sesiones Nord (cada worker CDK obtiene un peer efímero). Los CDK restantes esperan y se vacían hasta terminar el lote.",
     "nordMaxSessions": "Sesiones máximas Nord",
     "nordMaxSessionsHint": "Sesiones WireGuard Nord simultáneas de tu plan. Concurrencia efectiva = min(Concurrencia, este valor). El número de CDK no limita la concurrencia: el resto se procesa por oleadas.",
-    "concurrencyVpnAutoHint": "La concurrencia se calcula automáticamente según el presupuesto de sesiones del VPN Nord seleccionado (detectado al añadir el Access Token). Solo eliges la config VPN."
+    "concurrencyVpnAutoHint": "La concurrencia se calcula automáticamente según el presupuesto de sesiones del VPN Nord seleccionado (detectado al añadir el Access Token). Solo eliges la config VPN.",
+    "emailProvider": "Proveedor de correo",
+    "emailProviderGmailCdk": "gmail.123452026.xyz",
+    "emailProviderIosmq": "sms.iosmq.xyz",
+    "emailProviderGmailCdkHint": "Canjea códigos CDK en gmail.123452026.xyz y usa +alias (hasta 6 cuentas por CDK).",
+    "emailProviderIosmqHint": "Canjea una tarjeta MAIL en sms.iosmq.xyz (POST /api/v1/redeem) y consulta order/lookup para el OTP. Un buzón por tarjeta, sin alias.",
+    "mailCardLabel": "Códigos de tarjeta MAIL",
+    "mailCardHint": "{count} tarjeta(s) MAIL detectada(s) · {total} cuenta(s) en total",
+    "cardCodesRequired": "Introduce al menos un código de tarjeta / CDK de correo",
+    "accountsPerCard": "Cuentas por tarjeta",
+    "accountsPerCardIosmqHint": "sms.iosmq.xyz asigna un buzón por tarjeta MAIL (sin +alias).",
+    "emailProviderGmail123452026": "gmail.123452026.xyz",
+    "emailProviderSmsIosmq": "sms.iosmq.xyz",
+    "emailProviderGmail123452026Hint": "Canjea códigos CDK en gmail.123452026.xyz y usa +alias (hasta 6 cuentas por CDK).",
+    "emailProviderSmsIosmqHint": "Canjea una tarjeta MAIL en sms.iosmq.xyz (POST /api/v1/redeem) y consulta order/lookup para el OTP. Un buzón por tarjeta, sin alias.",
+    "accountsPerCardSmsIosmqHint": "sms.iosmq.xyz asigna un buzón por tarjeta MAIL (sin +alias)."
   },
   "sms": {
     "title": "Verificación SMS / OTP",

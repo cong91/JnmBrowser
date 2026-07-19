@@ -10,7 +10,7 @@ use super::task;
 use super::types::{
   AccountInventoryStatus, CdkInventoryRecord, RegistrationConfig, RegistrationResult,
 };
-use crate::email::gmail_cdk::GmailCdkService;
+use crate::email::build_email_service;
 use crate::settings_manager::SettingsManager;
 use crate::sms::viotp::ViotpService;
 use crate::sms::SmsService;
@@ -46,15 +46,20 @@ pub async fn start_auto_registration(
   let cancel_flag = Arc::new(AtomicBool::new(false));
   let cancel_flag_clone = cancel_flag.clone();
 
+  let email_provider = config.email_provider;
   let mut engine = RegistrationEngine::with_cancel_flag(config, cancel_flag);
   let task_id = engine.task_id().to_string();
 
   let join_handle = tokio::task::spawn_blocking(move || {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    let email_service = GmailCdkService::new();
+    let email_service = build_email_service(email_provider);
     let viotp = sms_token.map(ViotpService::new);
     let sms_ref: Option<&dyn SmsService> = viotp.as_ref().map(|s| s as &dyn SmsService);
-    rt.block_on(async { engine.run(app_handle, &email_service, sms_ref).await })
+    rt.block_on(async {
+      engine
+        .run(app_handle, email_service.as_ref(), sms_ref)
+        .await
+    })
   });
 
   task::register_task(

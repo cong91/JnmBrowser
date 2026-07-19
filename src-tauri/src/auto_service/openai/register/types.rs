@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::email::EmailProvider;
+
 /// How auto-registration should exit the network.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +40,8 @@ pub struct RegistrationConfig {
   /// Max full-flow retries on failure
   #[serde(default = "default_max_retries")]
   pub max_retries: u32,
-  /// Number of accounts to create per CDK (1-6, via Gmail aliases)
+  /// Number of accounts to create per card/CDK.
+  /// gmail.123452026.xyz: 1–6 via +aliases. sms.iosmq.xyz: always 1 mailbox per MAIL card.
   #[serde(default = "default_accounts_per_cdk")]
   pub accounts_per_cdk: u32,
   /// Run browser in headless mode
@@ -84,6 +87,9 @@ pub struct RegistrationConfig {
   /// Country code for SMS rental: `"vn"` (default) or `"la"`.
   #[serde(default)]
   pub sms_country: Option<String>,
+  /// Email OTP provider — domain id (`gmail.123452026.xyz` default, or `sms.iosmq.xyz`).
+  #[serde(default)]
+  pub email_provider: EmailProvider,
 }
 
 fn default_browser_type() -> String {
@@ -135,6 +141,18 @@ impl RegistrationConfig {
     {
       self.rotate_every_n = 2;
     }
+
+    // Clamp accounts/card to the selected email provider capability.
+    self.accounts_per_cdk = self
+      .email_provider
+      .clamp_accounts_per_card(self.accounts_per_cdk);
+  }
+
+  /// Accounts to create per card after provider limits are applied.
+  pub fn effective_accounts_per_cdk(&self) -> u32 {
+    self
+      .email_provider
+      .clamp_accounts_per_card(self.accounts_per_cdk)
   }
 
   /// Validate network fields before starting a task.
@@ -327,6 +345,7 @@ mod network_config_tests {
       sms_service_id: None,
       sms_network: None,
       sms_country: None,
+      email_provider: EmailProvider::Gmail123452026,
     }
   }
 

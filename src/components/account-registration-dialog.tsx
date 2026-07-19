@@ -26,10 +26,18 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  type EmailProvider,
   type NetworkMode,
   useRegistrationEvents,
 } from "@/hooks/use-registration-events";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
+import {
+  cardCodesPlaceholder,
+  clampAccountsPerCard,
+  emailProviderHintKey,
+  isEmailProvider,
+  supportsAliases,
+} from "@/lib/email-providers";
 
 interface Props {
   open: boolean;
@@ -70,7 +78,16 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   const [smsNetwork, setSmsNetwork] = useState("");
   const [smsCountry, setSmsCountry] = useState("vn");
   const [smsTokenOverride, setSmsTokenOverride] = useState("");
+  const [emailProvider, setEmailProvider] = useState<EmailProvider>(
+    "gmail.123452026.xyz",
+  );
   const [activeTab, setActiveTab] = useState("register");
+
+  const effectiveAccountsPerCdk = clampAccountsPerCard(
+    emailProvider,
+    accountsPerCdk,
+  );
+  const aliasCapable = supportsAliases(emailProvider);
 
   const nordLocations = [
     { value: "Japan", labelKey: "registration.nordLocJapan" },
@@ -107,11 +124,14 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       .filter((s) => s.length > 0);
 
   const cdkCount = parseCdks(cdkText).length;
-  const totalAccounts = cdkCount * accountsPerCdk;
+  const totalAccounts = cdkCount * effectiveAccountsPerCdk;
 
   const handleStart = async () => {
     const cdks = parseCdks(cdkText);
-    if (cdks.length === 0) return;
+    if (cdks.length === 0) {
+      toast.error(t("registration.cardCodesRequired"));
+      return;
+    }
 
     if (networkMode === "proxy" && !proxyId.trim()) {
       toast.error(t("registration.proxyRequired"));
@@ -135,7 +155,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
         networkMode === "proxy" ? proxyId.trim() || undefined : undefined,
       vpnId: networkMode === "vpn" ? vpnId.trim() || undefined : undefined,
       maxRetries,
-      accountsPerCdk,
+      accountsPerCdk: effectiveAccountsPerCdk,
       headless,
       concurrency:
         networkMode === "nord"
@@ -166,6 +186,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
         networkMode === "nord" ? nordGroup.trim() || undefined : undefined,
       nordServerName:
         networkMode === "nord" ? nordServerName.trim() || undefined : undefined,
+      emailProvider,
       smsProvider: smsEnabled ? "viotp" : undefined,
       smsServiceId: smsEnabled ? Number(smsServiceId) || undefined : undefined,
       smsNetwork: smsEnabled ? smsNetwork.trim() || undefined : undefined,
@@ -235,22 +256,62 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
             value="register"
             className="mt-4 flex-1 space-y-4 overflow-auto"
           >
-            <div className="space-y-2">
-              <Label htmlFor="cdks">{t("registration.cdkLabel")}</Label>
-              <Textarea
-                id="cdks"
-                placeholder="GMAIL-K4L5-EUW5-PHBV-A6KW&#10;GMAIL-XXXX-XXXX-XXXX-XXXX"
-                value={cdkText}
-                onChange={(e) => setCdkText(e.target.value)}
-                rows={4}
-                className="font-mono text-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t("registration.cdkHint", {
-                  count: cdkCount,
-                  total: totalAccounts,
-                })}
-              </p>
+            <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+              <div className="space-y-2">
+                <Label htmlFor="emailProvider">
+                  {t("registration.emailProvider")}
+                </Label>
+                <Select
+                  value={emailProvider}
+                  onValueChange={(v) => {
+                    if (!isEmailProvider(v)) return;
+                    setEmailProvider(v);
+                    setAccountsPerCdk(clampAccountsPerCard(v, accountsPerCdk));
+                  }}
+                >
+                  <SelectTrigger id="emailProvider">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="gmail.123452026.xyz">
+                      {t("registration.emailProviderGmail123452026")}
+                    </SelectItem>
+                    <SelectItem value="sms.iosmq.xyz">
+                      {t("registration.emailProviderSmsIosmq")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t(emailProviderHintKey(emailProvider))}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="cdks">
+                  {emailProvider === "sms.iosmq.xyz"
+                    ? t("registration.mailCardLabel")
+                    : t("registration.cdkLabel")}
+                </Label>
+                <Textarea
+                  id="cdks"
+                  placeholder={cardCodesPlaceholder(emailProvider)}
+                  value={cdkText}
+                  onChange={(e) => setCdkText(e.target.value)}
+                  rows={4}
+                  className="font-mono text-xs"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {emailProvider === "sms.iosmq.xyz"
+                    ? t("registration.mailCardHint", {
+                        count: cdkCount,
+                        total: totalAccounts,
+                      })
+                    : t("registration.cdkHint", {
+                        count: cdkCount,
+                        total: totalAccounts,
+                      })}
+                </p>
+              </div>
             </div>
 
             <div className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground space-y-1">
@@ -479,16 +540,31 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
               <div className="space-y-2">
                 <Label htmlFor="perCdk">
-                  {t("registration.accountsPerCdk")}
+                  {aliasCapable
+                    ? t("registration.accountsPerCdk")
+                    : t("registration.accountsPerCard")}
                 </Label>
                 <Input
                   id="perCdk"
                   type="number"
                   min={1}
-                  max={6}
-                  value={accountsPerCdk}
-                  onChange={(e) => setAccountsPerCdk(Number(e.target.value))}
+                  max={aliasCapable ? 6 : 1}
+                  disabled={!aliasCapable}
+                  value={effectiveAccountsPerCdk}
+                  onChange={(e) =>
+                    setAccountsPerCdk(
+                      clampAccountsPerCard(
+                        emailProvider,
+                        Number(e.target.value),
+                      ),
+                    )
+                  }
                 />
+                {!aliasCapable && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {t("registration.accountsPerCardSmsIosmqHint")}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">

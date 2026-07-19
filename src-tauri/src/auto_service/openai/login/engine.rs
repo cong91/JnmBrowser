@@ -461,6 +461,48 @@ impl BrowserSession {
     }
   }
 
+  /// Playwright selector click (Camoufox). Falls back to coordinate/DOM click on CDP.
+  /// Uses a short timeout so missing optional controls don't burn 30s each.
+  async fn selector_click(&mut self, selector: &str) -> Result<(), String> {
+    match self {
+      Self::Camoufox { page, .. } => {
+        page
+          .click_builder(selector)
+          .timeout(2500.0)
+          .click()
+          .await
+          .map_err(|e| format!("Camoufox selector click failed ({selector}): {e}"))?;
+        Ok(())
+      }
+      Self::Cdp(cdp) => {
+        // CDP path: resolve center via evaluate then Input.dispatchMouseEvent.
+        let js = format!(
+          r#"(function(){{
+            const el = document.querySelector({sel});
+            if (!el) return null;
+            try {{ el.scrollIntoView({{ block: 'center', inline: 'nearest' }}); }} catch(_) {{}}
+            const r = el.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0)) return null;
+            return {{ x: r.left + r.width/2, y: r.top + r.height/2 }};
+          }})()"#,
+          sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into())
+        );
+        let res = cdp.evaluate(&js, false).await?;
+        let x = res
+          .get("value")
+          .and_then(|v| v.get("x"))
+          .and_then(|n| n.as_f64())
+          .ok_or_else(|| format!("CDP selector not found/visible: {selector}"))?;
+        let y = res
+          .get("value")
+          .and_then(|v| v.get("y"))
+          .and_then(|n| n.as_f64())
+          .ok_or_else(|| format!("CDP selector not found/visible: {selector}"))?;
+        cdp.mouse_click(x, y).await
+      }
+    }
+  }
+
   async fn press_enter(&mut self) -> Result<(), String> {
     match self {
       Self::Cdp(cdp) => cdp.press_enter().await,
@@ -1145,11 +1187,35 @@ impl LoginEngine {
             "{prefix} Consent page detected, clicking Continue... url={cur_url}"
           ));
           // A few robust click strategies, then stop re-looping forever on the same page.
+          // Camoufox often lands on Remix "Try again" after Continue — recover and re-click.
           let mut left_consent = false;
-          for attempt in 0..3 {
+          for attempt in 0..5 {
+            // If previous Continue produced an auth route error, recover first.
+            if let Err(e) = self.recover_auth_route_error_if_any(cdp, prefix).await {
+              self.log(&format!("{prefix} Consent recover warning: {e}"));
+            }
+            cur_url = cdp.current_url().await.unwrap_or_default();
+            // If recover navigated away from consent entirely, re-classify next loop.
+            if !matches!(detect_login_page_type(&cur_url), LoginPageType::Consent) {
+              if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
+                if dom_page != LoginPageType::Consent && dom_page != LoginPageType::Unknown {
+                  self.log(&format!(
+                    "{prefix} Left consent via recover/DOM -> {dom_page:?} url={cur_url}"
+                  ));
+                  if matches!(
+                    dom_page,
+                    LoginPageType::Callback | LoginPageType::ChatgptHome
+                  ) {
+                    left_consent = true;
+                  }
+                  break;
+                }
+              }
+            }
+
             self.log(&format!("{prefix} Consent click attempt {}", attempt + 1));
             self.click_consent_button(cdp).await?;
-            for _ in 0..12 {
+            for _ in 0..14 {
               sleep(std::time::Duration::from_millis(500)).await;
               cur_url = cdp.current_url().await.unwrap_or_default();
               let after = detect_login_page_type(&cur_url);
@@ -1158,7 +1224,15 @@ impl LoginEngine {
                 left_consent = true;
                 break;
               }
-              // Still on consent — keep polling this attempt briefly.
+              // Mid-poll: if Remix error with Try again appears, recover immediately.
+              if self.detect_auth_route_error(cdp).await.is_some() {
+                self.log(&format!(
+                  "{prefix} Auth route error after consent click; recovering…"
+                ));
+                let _ = self.recover_auth_route_error_if_any(cdp, prefix).await;
+                cur_url = cdp.current_url().await.unwrap_or_default();
+                break;
+              }
             }
             if left_consent {
               break;
@@ -1655,22 +1729,62 @@ impl LoginEngine {
       return Ok(());
     };
     self.log(&format!(
-      "{prefix} Auth route error detected, clicking Try again…"
+      "{prefix} Auth route error detected, clicking Try again… ({err})"
     ));
-    let js = r#"(function(){
-      const buttons = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-      for (const b of buttons) {
-        const t = (b.innerText || b.textContent || '').toLowerCase().trim();
-        if (t === 'try again' || t.includes('try again') || t.includes('retry')) {
-          b.click();
-          return true;
+
+    // Prefer trusted selector/pointer click — bare DOM .click() is flaky on Camoufox.
+    let mut clicked = cdp
+      .selector_click(r#"button:has-text("Try again")"#)
+      .await
+      .is_ok();
+    if !clicked {
+      // Coordinate/DOM fallback for Chromium or selector engines without :has-text.
+      let locate = r#"(function(){
+        function visible(el){
+          try {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none';
+          } catch(_) { return false; }
+        }
+        const buttons = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+        for (const b of buttons) {
+          if (!visible(b)) continue;
+          const t = (b.innerText || b.textContent || '').toLowerCase().trim();
+          if (t === 'try again' || t.includes('try again') || t.includes('retry')) {
+            const r = b.getBoundingClientRect();
+            return { found: true, x: r.left + r.width/2, y: r.top + r.height/2, text: t.slice(0,40) };
+          }
+        }
+        return { found: false };
+      })()"#;
+      if let Ok(res) = cdp.evaluate(locate, false).await {
+        let v = res.get("value").cloned().unwrap_or_default();
+        if v.get("found").and_then(|b| b.as_bool()) == Some(true) {
+          let x = v.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0);
+          let y = v.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0);
+          if x > 0.0 && y > 0.0 {
+            clicked = cdp.mouse_click(x, y).await.is_ok();
+          }
         }
       }
-      return false;
-    })()"#;
-    let res = cdp.evaluate(js, false).await?;
-    if res.get("value").and_then(|v| v.as_bool()) != Some(true) {
-      return Err(format!("OpenAI auth route error (no Try again): {err}"));
+    }
+    if !clicked {
+      let js = r#"(function(){
+        const buttons = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+        for (const b of buttons) {
+          const t = (b.innerText || b.textContent || '').toLowerCase().trim();
+          if (t === 'try again' || t.includes('try again') || t.includes('retry')) {
+            b.click();
+            return true;
+          }
+        }
+        return false;
+      })()"#;
+      let res = cdp.evaluate(js, false).await?;
+      if res.get("value").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!("OpenAI auth route error (no Try again): {err}"));
+      }
     }
     sleep(std::time::Duration::from_secs(3)).await;
     if let Some(err2) = self.detect_auth_route_error(cdp).await {
@@ -1914,77 +2028,62 @@ impl LoginEngine {
         .and_then(|t| t.as_str())
         .unwrap_or("?")
     ));
-    sleep(std::time::Duration::from_millis(400)).await;
+    sleep(std::time::Duration::from_millis(500)).await;
 
-    // Wait for listbox, then type to filter (React Aria listbox often supports typeahead).
-    for _ in 0..10 {
-      let has = cdp
+    // Wait until the virtualized listbox actually mounts options.
+    // Camoufox often needs longer than Chromium before rows appear.
+    let mut options_ready = false;
+    for _ in 0..20 {
+      let state = cdp
         .evaluate(
-          r#"(function(){ return !!document.querySelector('[role="listbox"]'); })()"#,
+          r#"(function(){
+            const lb = document.querySelector('[role="listbox"]');
+            const opts = Array.from(document.querySelectorAll('[role="option"]'));
+            return {
+              hasListbox: !!lb,
+              optionCount: opts.length,
+              sample: opts.slice(0, 5).map((el) => ({
+                key: el.getAttribute('data-key') || '',
+                text: (el.innerText||'').replace(/\s+/g,' ').trim().slice(0,40)
+              }))
+            };
+          })()"#,
           false,
         )
         .await
         .ok()
-        .and_then(|r| r.get("value").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
-      if has {
+        .and_then(|r| r.get("value").cloned())
+        .unwrap_or_default();
+      let count = state
+        .get("optionCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+      if state.get("hasListbox").and_then(|v| v.as_bool()) == Some(true) && count > 0 {
+        options_ready = true;
+        self.log(&format!(
+          "Country listbox ready: {count} options mounted, sample={}",
+          state
+            .get("sample")
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+            .chars()
+            .take(180)
+            .collect::<String>()
+        ));
         break;
       }
       sleep(std::time::Duration::from_millis(200)).await;
     }
-
-    // Typeahead "Vietnam" into focused listbox via real key events, then Enter.
-    // React Aria virtualized Select often focuses the matching option on typeahead.
-    let _ = cdp
-      .evaluate(
-        r#"(function(){
-          const lb = document.querySelector('[role="listbox"]');
-          if (lb) { lb.focus(); return true; }
-          return false;
-        })()"#,
-        false,
-      )
-      .await;
-    for ch in "Vietnam".chars() {
-      cdp.key_char(ch).await?;
-      sleep(std::time::Duration::from_millis(40)).await;
-    }
-    sleep(std::time::Duration::from_millis(350)).await;
-    // Enter to commit focused/typeahead option if React Aria already highlighted VN.
-    let _ = cdp.press_enter().await;
-    sleep(std::time::Duration::from_millis(400)).await;
-
-    // If typeahead+Enter already selected Vietnam, skip click path.
-    if let Ok(res) = cdp.evaluate(check, false).await {
-      let v = res.get("value").cloned().unwrap_or_default();
-      if v.get("already").and_then(|b| b.as_bool()) == Some(true) {
-        self.log(&format!(
-          "Selected phone country via typeahead+Enter: {}",
-          v.get("text")
-            .and_then(|t| t.as_str())
-            .unwrap_or("Vietnam +84")
-        ));
-        return Ok(true);
-      }
+    if !options_ready {
+      // Re-click trigger once if first open left an empty shell.
+      let _ = cdp.evaluate(open_js, false).await;
+      sleep(std::time::Duration::from_millis(600)).await;
     }
 
-    // Pick VN option — list is virtualized, so scroll until data-key=VN mounts.
-    // DOM shape (live): listbox > presentation(height~9320) > absolute rows of options.
+    // Prefer real pointer click on VN once mounted. Typeahead on Camoufox can
+    // collapse the virtualizer (mounted=[]) so only type after options exist,
+    // and never Enter until data-key=VN is visible.
     let pick_js = r#"(function(){
-      function clickOption(opt){
-        try {
-          opt.scrollIntoView({ block: 'center' });
-          opt.focus();
-          opt.click();
-          // React Aria sometimes needs pointer sequence
-          opt.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-          opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          opt.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          opt.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          return true;
-        } catch(_) { return false; }
-      }
-
       function findVn(){
         return document.querySelector('[role="option"][data-key="VN"]')
           || Array.from(document.querySelectorAll('[role="option"]')).find((el) => {
@@ -1994,57 +2093,292 @@ impl LoginEngine {
           }) || null;
       }
 
-      const listbox = document.querySelector('[role="listbox"]');
-      if (!listbox) return { picked: false, reason: 'no_listbox' };
-
-      // Direct hit if already mounted (typeahead often mounts VN near top).
-      let opt = findVn();
-      if (opt && clickOption(opt)) {
-        return { picked: true, how: 'direct', text: (opt.innerText||'').replace(/\s+/g,' ').trim().slice(0,80) };
+      function optionRect(opt){
+        try {
+          const r = opt.getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) return null;
+          return { x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height };
+        } catch(_) {
+          return null;
+        }
       }
 
-      // Virtualized list: find the tall presentation spacer (~233 * 40px) and scroll it/parent.
+      function foundPayload(how, opt){
+        try { opt.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch(_) {}
+        // Rect MUST be measured after scroll — pre-scroll coords miss on Camoufox.
+        const rect = optionRect(opt);
+        try {
+          opt.setAttribute('aria-selected', 'true');
+          opt.focus({ preventScroll: true });
+        } catch(_) {}
+        return {
+          found: true,
+          how,
+          text: (opt.innerText||'').replace(/\s+/g,' ').trim().slice(0,80),
+          rect
+        };
+      }
+
+      const listbox = document.querySelector('[role="listbox"]');
+      if (!listbox) return { found: false, reason: 'no_listbox', mounted: [] };
+
+      let opt = findVn();
+      if (opt) return foundPayload('mounted', opt);
+
+      // Virtualized list: scroll tall spacer / listbox until VN mounts.
       const presentations = Array.from(listbox.querySelectorAll('[role="presentation"]'));
       const spacer = presentations.find((el) => {
         const h = parseFloat(el.style.height || '0') || el.getBoundingClientRect().height || 0;
         return h > 1000;
       }) || presentations[0] || listbox;
-      // Scroll container is often the listbox itself (overflow auto), not the spacer.
       const scrollers = [listbox, listbox.parentElement, spacer].filter(Boolean);
       const itemH = 40;
-      const total = 233;
-      // VN is near the end alphabetically (~ position ~220). Scan end first, then full range.
+      const total = 250;
+      // VN is near the end alphabetically — scan end first, then full range.
       const order = [];
-      for (let i = 210; i < total; i++) order.push(i);
-      for (let i = 0; i < 210; i += 2) order.push(i);
+      for (let i = 200; i < total; i++) order.push(i);
+      for (let i = 0; i < 200; i += 2) order.push(i);
       for (const i of order) {
         const top = i * itemH;
         for (const s of scrollers) {
-          try { s.scrollTop = top; } catch(_) {}
+          try {
+            s.scrollTop = top;
+            s.dispatchEvent(new Event('scroll', { bubbles: true }));
+          } catch(_) {}
         }
-        // Also set spacer transform-style virtualizers that use absolute top offsets.
+        try {
+          listbox.dispatchEvent(new WheelEvent('wheel', {
+            bubbles: true, deltaY: itemH * 3, cancelable: true
+          }));
+        } catch(_) {}
         opt = findVn();
-        if (opt && clickOption(opt)) {
-          return { picked: true, how: 'scroll_'+i, text: (opt.innerText||'').replace(/\s+/g,' ').trim().slice(0,80) };
-        }
+        if (opt) return foundPayload('scroll_'+i, opt);
       }
-      // Dump currently mounted options for debug.
-      const mounted = Array.from(document.querySelectorAll('[role="option"]')).slice(0, 16).map((el) => ({
+
+      const mounted = Array.from(document.querySelectorAll('[role="option"]')).slice(0, 20).map((el) => ({
         key: el.getAttribute('data-key') || '',
         text: (el.innerText||'').replace(/\s+/g,' ').trim().slice(0,60),
         selected: el.getAttribute('aria-selected') || '',
         pos: el.getAttribute('aria-posinset') || ''
       }));
-      return { picked: false, reason: 'vn_not_mounted', mounted };
+      return {
+        found: false,
+        reason: mounted.length ? 'vn_not_in_range' : 'vn_not_mounted',
+        mounted,
+        scrollTop: listbox.scrollTop || 0,
+        scrollHeight: listbox.scrollHeight || 0
+      };
     })()"#;
+
     let mut picked = false;
-    for attempt in 0..6 {
+    for attempt in 0..8 {
       if attempt > 0 {
-        sleep(std::time::Duration::from_millis(300)).await;
+        sleep(std::time::Duration::from_millis(250)).await;
       }
+
+      // Attempts 0-1: pure scroll/virtualizer without typeahead.
+      // Attempts 2-3: typeahead "Vietnam" only while options are mounted.
+      // Attempts 4+: reopen select and try again.
+      if attempt == 2 || attempt == 5 {
+        let focused = cdp
+          .evaluate(
+            r#"(function(){
+              const lb = document.querySelector('[role="listbox"]');
+              const count = document.querySelectorAll('[role="option"]').length;
+              if (!lb || count === 0) return { ok: false, count: count||0 };
+              lb.focus();
+              return { ok: true, count };
+            })()"#,
+            false,
+          )
+          .await
+          .ok()
+          .and_then(|r| r.get("value").cloned())
+          .unwrap_or_default();
+        if focused.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+          self.log(&format!(
+            "Country typeahead attempt {} (options={})",
+            attempt,
+            focused.get("count").and_then(|v| v.as_u64()).unwrap_or(0)
+          ));
+          for ch in "Vietnam".chars() {
+            let _ = cdp.key_char(ch).await;
+            sleep(std::time::Duration::from_millis(60)).await;
+          }
+          sleep(std::time::Duration::from_millis(400)).await;
+        }
+      } else if attempt == 4 || attempt == 7 {
+        // Escape any broken typeahead filter, reopen clean list.
+        let _ = cdp
+          .evaluate(
+            r#"(function(){
+              document.activeElement && document.activeElement.blur && document.activeElement.blur();
+              document.body && document.body.click();
+              return true;
+            })()"#,
+            false,
+          )
+          .await;
+        sleep(std::time::Duration::from_millis(200)).await;
+        let _ = cdp.evaluate(open_js, false).await;
+        sleep(std::time::Duration::from_millis(500)).await;
+      } else if attempt > 0 {
+        // Keyboard navigation helps virtualizers that ignore scrollTop assignment.
+        for _ in 0..8 {
+          let _ = cdp
+            .evaluate(
+              r#"(function(){
+                const lb = document.querySelector('[role="listbox"]') || document.activeElement;
+                if (!lb) return false;
+                lb.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', code: 'PageDown', keyCode: 34, which: 34, bubbles: true }));
+                lb.dispatchEvent(new KeyboardEvent('keyup', { key: 'PageDown', code: 'PageDown', keyCode: 34, which: 34, bubbles: true }));
+                return true;
+              })()"#,
+              false,
+            )
+            .await;
+          sleep(std::time::Duration::from_millis(40)).await;
+        }
+      }
+
       let pick_res = cdp.evaluate(pick_js, false).await?;
       let v = pick_res.get("value").cloned().unwrap_or_default();
-      if v.get("picked").and_then(|b| b.as_bool()) == Some(true) {
+      if v.get("found").and_then(|b| b.as_bool()) == Some(true) {
+        // Prefer Playwright selector click (Camoufox). React Aria needs a real
+        // trusted pointer sequence — synthetic DOM events alone often leave US selected.
+        let mut clicked = false;
+        match cdp
+          .selector_click(r#"[role="option"][data-key="VN"]"#)
+          .await
+        {
+          Ok(()) => {
+            clicked = true;
+            self.log("Clicked VN option via Playwright/CDP selector [data-key=VN]");
+          }
+          Err(e) => {
+            self.log(&format!(
+              "Selector click [data-key=VN] failed ({e}); trying text fallback"
+            ));
+            // Text fallback for builds without data-key.
+            if cdp
+              .selector_click(r#"[role="option"]:has-text("Vietnam")"#)
+              .await
+              .is_ok()
+            {
+              clicked = true;
+              self.log("Clicked VN option via text selector");
+            }
+          }
+        }
+
+        // Coordinate click as secondary path (remeasured after scroll).
+        if !clicked {
+          let rect_js = r#"(function(){
+            const opt = document.querySelector('[role="option"][data-key="VN"]')
+              || Array.from(document.querySelectorAll('[role="option"]')).find((el) => {
+                const t = (el.innerText || el.textContent || '');
+                return /vietnam/i.test(t) && /(\+84|\+\(84\)|\(84\))/i.test(t);
+              });
+            if (!opt) return null;
+            try { opt.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch(_) {}
+            const r = opt.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0)) return null;
+            return { x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height };
+          })()"#;
+          if let Ok(rect_res) = cdp.evaluate(rect_js, false).await {
+            if let Some(rect) = rect_res.get("value") {
+              let x = rect.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0);
+              let y = rect.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0);
+              if x > 1.0 && y > 1.0 {
+                self.log(&format!("Clicking VN option at ({x:.1},{y:.1})"));
+                if cdp.mouse_click(x, y).await.is_ok() {
+                  clicked = true;
+                }
+              }
+            }
+          }
+        }
+
+        // DOM activation as last resort.
+        let dom_click = cdp
+          .evaluate(
+            r#"(function(){
+              const opt = document.querySelector('[role="option"][data-key="VN"]')
+                || Array.from(document.querySelectorAll('[role="option"]')).find((el) => {
+                  const t = (el.innerText || el.textContent || '');
+                  return /vietnam/i.test(t) && /(\+84|\+\(84\)|\(84\))/i.test(t);
+                });
+              if (!opt) return { ok: false, reason: 'missing' };
+              try { opt.scrollIntoView({ block: 'center' }); } catch(_) {}
+              try { opt.focus({ preventScroll: true }); } catch(_) {}
+              const fire = (type, Ctor, init) => {
+                try { opt.dispatchEvent(new Ctor(type, Object.assign({ bubbles: true, cancelable: true, view: window }, init||{}))); } catch(_) {}
+              };
+              fire('pointerdown', PointerEvent, { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1 });
+              fire('mousedown', MouseEvent, { button: 0, buttons: 1 });
+              fire('pointerup', PointerEvent, { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0 });
+              fire('mouseup', MouseEvent, { button: 0, buttons: 0 });
+              fire('click', MouseEvent, { button: 0, buttons: 0 });
+              try { opt.click(); } catch(_) {}
+              try {
+                opt.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                opt.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+              } catch(_) {}
+              return {
+                ok: true,
+                selected: opt.getAttribute('aria-selected') || '',
+                text: (opt.innerText||'').replace(/\s+/g,' ').trim().slice(0,60)
+              };
+            })()"#,
+            false,
+          )
+          .await;
+        if let Ok(res) = dom_click {
+          self.log(&format!(
+            "DOM VN activate: {}",
+            res
+              .get("value")
+              .map(|v| v.to_string())
+              .unwrap_or_default()
+              .chars()
+              .take(160)
+              .collect::<String>()
+          ));
+        }
+        if !clicked {
+          self.log("Trusted click path failed; relied on DOM activate");
+        }
+        sleep(std::time::Duration::from_millis(350)).await;
+        // Enter only after VN is mounted/focused — commits selection on React Aria.
+        let _ = cdp.press_enter().await;
+        sleep(std::time::Duration::from_millis(400)).await;
+
+        // Early verify — if still US, keep looping attempts rather than fail once.
+        if let Ok(res) = cdp.evaluate(check, false).await {
+          let early = res.get("value").cloned().unwrap_or_default();
+          if early.get("already").and_then(|b| b.as_bool()) == Some(true) {
+            picked = true;
+            self.log(&format!(
+              "Selected phone country via {}: {}",
+              v.get("how").and_then(|h| h.as_str()).unwrap_or("?"),
+              early
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("Vietnam +84")
+            ));
+            break;
+          }
+          self.log(&format!(
+            "VN click attempt {} did not stick (still: {}); retrying",
+            attempt,
+            early.get("text").and_then(|t| t.as_str()).unwrap_or("?")
+          ));
+          // Re-open list for next attempt.
+          let _ = cdp.evaluate(open_js, false).await;
+          sleep(std::time::Duration::from_millis(400)).await;
+          continue;
+        }
+
         picked = true;
         self.log(&format!(
           "Selected phone country via {}: {}",
@@ -2055,10 +2389,10 @@ impl LoginEngine {
         ));
         break;
       }
-      if attempt == 5 {
+      if attempt == 7 {
         self.log(&format!(
           "VN option not found in listbox: {}",
-          v.to_string().chars().take(400).collect::<String>()
+          v.to_string().chars().take(500).collect::<String>()
         ));
       }
     }
@@ -2068,7 +2402,7 @@ impl LoginEngine {
       );
     }
 
-    sleep(std::time::Duration::from_millis(500)).await;
+    sleep(std::time::Duration::from_millis(300)).await;
 
     // Verify trigger now shows +84 / Vietnam.
     let verify = r#"(function(){
@@ -2362,7 +2696,31 @@ impl LoginEngine {
       v.get("text").and_then(|t| t.as_str()).unwrap_or("?")
     ));
 
-    // 1) Real mouse click via CDP
+    // 0) Playwright/CDP selector click first (most reliable on Camoufox).
+    let mut selector_ok = false;
+    for sel in [
+      r#"button[data-continue="consent"]"#,
+      r#"button[type="submit"]"#,
+      r#"button:has-text("Continue")"#,
+    ] {
+      match cdp.selector_click(sel).await {
+        Ok(()) => {
+          self.log(&format!("Consent selector click ok: {sel}"));
+          selector_ok = true;
+          break;
+        }
+        Err(e) => {
+          self.log(&format!("Consent selector click miss ({sel}): {e}"));
+        }
+      }
+    }
+    if selector_ok {
+      // Avoid multi-click storms that can trigger Remix route errors.
+      sleep(std::time::Duration::from_millis(800)).await;
+      return Ok(());
+    }
+
+    // 1) Real mouse click via CDP / Playwright coordinates
     if x > 0.0 && y > 0.0 {
       if let Err(e) = cdp.mouse_click(x, y).await {
         self.log(&format!("Consent CDP mouse_click failed: {e}"));

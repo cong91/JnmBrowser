@@ -40,6 +40,7 @@ mod tests {
       sms_service_id: None,
       sms_network: None,
       sms_country: None,
+      email_provider: crate::email::EmailProvider::Gmail123452026,
     };
 
     assert!(config.validate_network().is_ok());

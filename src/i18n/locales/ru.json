@@ -1811,7 +1811,22 @@
     "concurrencyVpnHint": "Режим VPN параллелит до лимита сессий Nord (каждому CDK worker — временный peer). Остальные CDK ждут и обрабатываются до конца batch.",
     "nordMaxSessions": "Макс. сессий Nord",
     "nordMaxSessionsHint": "Одновременные сессии Nord WireGuard по вашему тарифу. Эффективный concurrency = min(Concurrency, это значение). Число CDK не ограничивает concurrency — остальные идут волнами.",
-    "concurrencyVpnAutoHint": "Concurrency считается автоматически по лимиту сессий выбранного Nord VPN (определяется при добавлении Access Token). Достаточно выбрать VPN-конфиг."
+    "concurrencyVpnAutoHint": "Concurrency считается автоматически по лимиту сессий выбранного Nord VPN (определяется при добавлении Access Token). Достаточно выбрать VPN-конфиг.",
+    "emailProvider": "Почтовый провайдер",
+    "emailProviderGmailCdk": "gmail.123452026.xyz",
+    "emailProviderIosmq": "sms.iosmq.xyz",
+    "emailProviderGmailCdkHint": "Активируйте CDK на gmail.123452026.xyz и используйте +алиасы (до 6 аккаунтов на CDK).",
+    "emailProviderIosmqHint": "Активируйте карту MAIL на sms.iosmq.xyz (POST /api/v1/redeem), затем опрашивайте order/lookup для OTP. Один ящик на карту — без алиасов.",
+    "mailCardLabel": "Коды карт MAIL",
+    "mailCardHint": "Обнаружено карт MAIL: {count} · аккаунтов: {total}",
+    "cardCodesRequired": "Введите хотя бы один код почтовой карты / CDK",
+    "accountsPerCard": "Аккаунтов на карту",
+    "accountsPerCardIosmqHint": "sms.iosmq.xyz выдаёт один ящик на карту MAIL (без +алиасов).",
+    "emailProviderGmail123452026": "gmail.123452026.xyz",
+    "emailProviderSmsIosmq": "sms.iosmq.xyz",
+    "emailProviderGmail123452026Hint": "Активируйте CDK на gmail.123452026.xyz и используйте +алиасы (до 6 аккаунтов на CDK).",
+    "emailProviderSmsIosmqHint": "Активируйте карту MAIL на sms.iosmq.xyz (POST /api/v1/redeem), затем опрашивайте order/lookup для OTP. Один ящик на карту — без алиасов.",
+    "accountsPerCardSmsIosmqHint": "sms.iosmq.xyz выдаёт один ящик на карту MAIL (без +алиасов)."
   },
   "sms": {
     "title": "SMS / OTP проверка",

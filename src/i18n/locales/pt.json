@@ -1811,7 +1811,22 @@
     "concurrencyVpnHint": "O modo VPN roda em paralelo até o limite de sessões Nord (cada worker CDK recebe um peer efêmero). CDKs restantes aguardam e são processados até o fim do lote.",
     "nordMaxSessions": "Sessões máximas Nord",
     "nordMaxSessionsHint": "Sessões WireGuard Nord simultâneas do seu plano. Concorrência efetiva = min(Concorrência, este valor). A quantidade de CDK não limita a concorrência — o restante roda em ondas.",
-    "concurrencyVpnAutoHint": "A concorrência é calculada automaticamente pelo orçamento de sessões do VPN Nord selecionado (detectado ao adicionar o Access Token). Basta escolher a config VPN."
+    "concurrencyVpnAutoHint": "A concorrência é calculada automaticamente pelo orçamento de sessões do VPN Nord selecionado (detectado ao adicionar o Access Token). Basta escolher a config VPN.",
+    "emailProvider": "Provedor de e-mail",
+    "emailProviderGmailCdk": "gmail.123452026.xyz",
+    "emailProviderIosmq": "sms.iosmq.xyz",
+    "emailProviderGmailCdkHint": "Resgate códigos CDK em gmail.123452026.xyz e use +aliases (até 6 contas por CDK).",
+    "emailProviderIosmqHint": "Resgate um cartão MAIL em sms.iosmq.xyz (POST /api/v1/redeem) e consulte order/lookup para o OTP. Uma caixa por cartão — sem aliases.",
+    "mailCardLabel": "Códigos de cartão MAIL",
+    "mailCardHint": "{count} cartão(ões) MAIL detectado(s) · {total} conta(s) no total",
+    "cardCodesRequired": "Insira pelo menos um cartão de e-mail / código CDK",
+    "accountsPerCard": "Contas por cartão",
+    "accountsPerCardIosmqHint": "sms.iosmq.xyz atribui uma caixa por cartão MAIL (sem +aliases).",
+    "emailProviderGmail123452026": "gmail.123452026.xyz",
+    "emailProviderSmsIosmq": "sms.iosmq.xyz",
+    "emailProviderGmail123452026Hint": "Resgate códigos CDK em gmail.123452026.xyz e use +aliases (até 6 contas por CDK).",
+    "emailProviderSmsIosmqHint": "Resgate um cartão MAIL em sms.iosmq.xyz (POST /api/v1/redeem) e consulte order/lookup para o OTP. Uma caixa por cartão — sem aliases.",
+    "accountsPerCardSmsIosmqHint": "sms.iosmq.xyz atribui uma caixa por cartão MAIL (sem +aliases)."
   },
   "sms": {
     "title": "Verificação SMS / OTP",

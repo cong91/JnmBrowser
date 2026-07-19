@@ -6,11 +6,13 @@ Automatically create ChatGPT accounts using Gmail CDK codes, browser automation,
 
 The auto-registration feature automates the entire ChatGPT signup flow:
 
-1. **CDK Redemption**: Redeems a Gmail CDK code to obtain a disposable Gmail address
-2. **Alias Generation**: Creates `user+{random}@gmail.com` aliases (up to 6 per CDK)
+1. **Email provider**: Choose **gmail.123452026.xyz** or **sms.iosmq.xyz** quota-card API
+2. **Mailbox acquisition**:
+   - gmail.123452026.xyz: redeem CDK → base Gmail, then `user+{random}@gmail.com` aliases (up to 6)
+   - sms.iosmq.xyz: `POST /api/v1/redeem` with `MAIL-…` card, then poll `GET /api/v1/order/lookup?code=…&poll=true` for OTP (1 mailbox per card; no aliases)
 3. **Browser Automation**: Reuses one worker Chromium/Camoufox profile per batch; each account relaunches with a renewed fingerprint (+ optional proxy)
 4. **Registration Flow**: Automates the ChatGPT signup via CDP / Playwright
-5. **OTP Retrieval**: Polls the Gmail CDK API for the verification code
+5. **OTP Retrieval**: Polls the selected email provider for the verification code
 6. **Token Extraction**: Extracts access token, session token, and account credentials
 7. **Free-trial gate + 2FA**: Keeps free-trial eligible accounts and enables authenticator when possible
 8. **Credential Storage**: Persists inventory JSON for export/resale
@@ -18,7 +20,9 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 
 ## Prerequisites
 
-- A valid Gmail CDK code (format: `GMAIL-XXXX-XXXX-XXXX-XXXX`)
+- A valid email card:
+  - gmail.123452026.xyz: `GMAIL-XXXX-XXXX-XXXX-XXXX` (provider `gmail.123452026.xyz`)
+  - sms.iosmq.xyz: `MAIL-XXXX-XXXX-XXXX` (provider `sms.iosmq.xyz`)
 - Chromium or Camoufox browser installed (via JnmBrowser's downloader)
 - **Network (pick one mode):**
   - **None** — host egress IP
@@ -32,9 +36,10 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 
 1. Open JnmBrowser
 2. Click the **Auto Registration** button in the header
-3. Enter your CDK code(s)
-4. Configure browser type, retries, accounts per CDK
-5. Choose **Network**:
+3. Choose **Email provider** (`gmail.123452026.xyz` or `sms.iosmq.xyz`)
+4. Enter your card/CDK code(s)
+5. Configure browser type, retries, accounts per CDK (sms.iosmq.xyz forces 1 account/card)
+6. Choose **Network**:
    - **None** — no proxy / no VPN
    - **Proxy** — enter proxy ID
    - **VPN (WireGuard)** — select a config from Proxies & VPNs (preferred, per-profile)
@@ -97,10 +102,11 @@ UI: Auto Registration → **CDK stats** tab. Commands: `list_cdk_inventory_cmd`,
 ```typescript
 import { invoke } from "@tauri-apps/api/core";
 
-// Proxy mode
+// Proxy mode + Gmail CDK (default email provider)
 const taskId = await invoke("start_auto_registration", {
   config: {
     cdks: ["GMAIL-K4L5-EUW5-PHBV-A6KW"],
+    emailProvider: "gmail.123452026.xyz",
     browserType: "chromium",
     networkMode: "proxy",
     proxyId: "my-proxy-id",
@@ -108,6 +114,20 @@ const taskId = await invoke("start_auto_registration", {
     accountsPerCdk: 1,
     headless: false,
     concurrency: 2, // max parallel CDKs
+  },
+});
+
+// sms.iosmq.xyz MAIL cards — redeem + order/lookup OTP
+const smsIosmqTask = await invoke("start_auto_registration", {
+  config: {
+    cdks: ["MAIL-XXXX-XXXX-XXXX"],
+    emailProvider: "sms.iosmq.xyz",
+    browserType: "chromium",
+    networkMode: "none",
+    maxRetries: 3,
+    accountsPerCdk: 1, // one mailbox per MAIL card (no +aliases)
+    headless: false,
+    concurrency: 1,
   },
 });
 
