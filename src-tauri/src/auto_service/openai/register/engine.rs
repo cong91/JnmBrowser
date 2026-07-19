@@ -1,23 +1,26 @@
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::SinkExt;
 use rand::prelude::IndexedRandom;
 use rand::Rng;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 use super::sentinel::build_sentinel_token;
-use super::store::save_registration_result;
-use super::totp::{generate_totp_now, normalize_secret};
+use super::store::{put_cdk_inventory_record, save_registration_result};
 use super::types::{
-  should_rotate, NetworkMode, RegistrationConfig, RegistrationProgress, RegistrationResult,
-  RegistrationStep,
+  should_rotate, CdkInventoryRecord, NetworkMode, RegistrationConfig, RegistrationProgress,
+  RegistrationResult, RegistrationStep,
 };
+use crate::auto_service::common::totp::{generate_totp_now, normalize_secret};
 use crate::email::EmailService;
+use crate::sms::{NumberRequest, SmsService};
 
 // ---------------------------------------------------------------------------
 // CDP connection wrapper
@@ -956,6 +959,16 @@ pub struct RegistrationEngine {
   task_id: String,
   device_id: String,
   logs: Vec<String>,
+  /// Reused worker profile id for this engine instance (one per concurrent CDK slot).
+  worker_profile_id: Option<String>,
+  /// True when this engine created the worker and must delete it when the CDK finishes.
+  owns_worker_profile: bool,
+  /// Optional CDK index suffix for concurrent worker profile names.
+  worker_slot: u32,
+  /// Ephemeral WireGuard conf ids spawned for multi-peer concurrency (batch-owned).
+  ephemeral_vpn_ids: Vec<String>,
+  /// Slot-local VPN override (from ephemeral pool); takes precedence over config.vpn_id.
+  slot_vpn_id: Option<String>,
 }
 
 impl RegistrationEngine {
@@ -967,6 +980,11 @@ impl RegistrationEngine {
       task_id: Uuid::new_v4().to_string(),
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
+      worker_profile_id: None,
+      owns_worker_profile: false,
+      worker_slot: 0,
+      ephemeral_vpn_ids: Vec::new(),
+      slot_vpn_id: None,
     }
   }
 
@@ -977,6 +995,94 @@ impl RegistrationEngine {
       task_id: Uuid::new_v4().to_string(),
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
+      worker_profile_id: None,
+      owns_worker_profile: false,
+      worker_slot: 0,
+      ephemeral_vpn_ids: Vec::new(),
+      slot_vpn_id: None,
+    }
+  }
+
+  /// Fork a per-CDK engine that shares cancel/task/config but owns its own worker + logs.
+  /// When an ephemeral peer pool exists, assign `vpn_ids[worker_slot % len]` to this slot.
+  fn fork_for_cdk(&self, worker_slot: u32) -> Self {
+    let slot_vpn_id = if !self.ephemeral_vpn_ids.is_empty() {
+      let idx = (worker_slot as usize) % self.ephemeral_vpn_ids.len();
+      Some(self.ephemeral_vpn_ids[idx].clone())
+    } else {
+      self.slot_vpn_id.clone()
+    };
+    Self {
+      config: self.config.clone(),
+      cancel_flag: self.cancel_flag.clone(),
+      task_id: self.task_id.clone(),
+      device_id: Uuid::new_v4().to_string(),
+      logs: Vec::new(),
+      worker_profile_id: None,
+      owns_worker_profile: false,
+      worker_slot,
+      ephemeral_vpn_ids: Vec::new(), // only root owns cleanup
+      slot_vpn_id,
+    }
+  }
+
+  /// VPN id for this engine/slot: ephemeral pool assignment, else inventory vpn_id.
+  fn worker_vpn_id(&self) -> Option<String> {
+    self
+      .slot_vpn_id
+      .clone()
+      .or_else(|| self.config.effective_vpn_id())
+  }
+
+  /// Build N ephemeral Nord WireGuard confs from the base inventory conf's private key.
+  async fn spawn_vpn_peer_pool(&mut self, pool_size: usize) -> Result<(), String> {
+    let base_id = self
+      .config
+      .effective_vpn_id()
+      .ok_or_else(|| "VPN mode requires vpnId to spawn peer pool".to_string())?;
+    let base_conf = {
+      let storage = crate::vpn::VPN_STORAGE
+        .lock()
+        .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+      storage
+        .load_config(&base_id)
+        .map_err(|e| format!("Load base VPN for peer pool: {e}"))?
+        .config_data
+    };
+    let private_key = crate::vpn::extract_wireguard_private_key(&base_conf)?;
+    let prefix = format!(
+      "auto-reg-ephemeral-{}",
+      &self.task_id[..8.min(self.task_id.len())]
+    );
+    let ids =
+      crate::vpn::spawn_ephemeral_nord_peer_pool(&private_key, pool_size, None, &prefix).await?;
+    self.log(&format!(
+      "Spawned ephemeral Nord peer pool: {} conf(s) for concurrency",
+      ids.len()
+    ));
+    for (i, id) in ids.iter().enumerate() {
+      self.log(&format!("  peer pool[{i}] vpn_id={id}"));
+    }
+    self.ephemeral_vpn_ids = ids;
+    Ok(())
+  }
+
+  async fn cleanup_ephemeral_vpn_pool(&mut self) {
+    if self.ephemeral_vpn_ids.is_empty() {
+      return;
+    }
+    let ids = std::mem::take(&mut self.ephemeral_vpn_ids);
+    for id in ids {
+      let _ = crate::vpn_worker_runner::stop_vpn_worker_by_vpn_id(&id).await;
+      if let Ok(storage) = crate::vpn::VPN_STORAGE.lock() {
+        if let Err(e) = storage.delete_config(&id) {
+          self.log(&format!(
+            "WARN: failed to delete ephemeral VPN conf {id}: {e}"
+          ));
+        } else {
+          self.log(&format!("Deleted ephemeral VPN conf {id}"));
+        }
+      }
     }
   }
 
@@ -996,6 +1102,65 @@ impl RegistrationEngine {
   fn log(&mut self, msg: &str) {
     let ts = Utc::now().format("%H:%M:%S").to_string();
     self.logs.push(format!("[{ts}] {msg}"));
+  }
+
+  /// Mid-batch WireGuard peer hop: keep PrivateKey, pick a new Nord peer, rewrite
+  /// inventory conf, restart vpn-worker so the next launch gets a new egress IP.
+  async fn rotate_wireguard_peer(&mut self, vpn_id: &str) -> Result<(String, String), String> {
+    let conf = {
+      let storage = crate::vpn::VPN_STORAGE
+        .lock()
+        .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+      storage
+        .load_config(vpn_id)
+        .map_err(|e| format!("Load VPN config for rotate: {e}"))?
+        .config_data
+    };
+
+    let private_key = crate::vpn::extract_wireguard_private_key(&conf)?;
+    let avoid_station = crate::vpn::extract_wireguard_peer_endpoint_host(&conf);
+    let avoid_pk = crate::vpn::extract_wireguard_peer_public_key(&conf);
+
+    let (server, new_conf) = crate::vpn::build_rotated_nord_wireguard_conf(
+      &private_key,
+      avoid_station.as_deref(),
+      avoid_pk.as_deref(),
+      None,
+    )
+    .await?;
+
+    {
+      let storage = crate::vpn::VPN_STORAGE
+        .lock()
+        .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+      storage
+        .update_config_data(
+          vpn_id,
+          &new_conf,
+          Some(&crate::vpn::default_nord_vpn_name(&server)),
+        )
+        .map_err(|e| format!("Save rotated VPN config: {e}"))?;
+    }
+
+    // Drop old tunnel so the next profile launch starts a worker on the new conf.
+    let _ = crate::vpn_worker_runner::stop_vpn_worker_by_vpn_id(vpn_id).await;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    match crate::vpn_worker_runner::start_vpn_worker(vpn_id).await {
+      Ok(worker) => {
+        self.log(&format!(
+          "WireGuard worker restarted on {} (port {:?})",
+          server.hostname, worker.local_port
+        ));
+      }
+      Err(e) => {
+        self.log(&format!(
+          "WARN: vpn-worker restart after peer rotate failed (will retry on launch): {e}"
+        ));
+      }
+    }
+
+    Ok((server.hostname, server.station.clone()))
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -1028,21 +1193,20 @@ impl RegistrationEngine {
   }
 
   // -----------------------------------------------------------------------
-  // Main entry point — iterates CDK list
+  // Main entry point — concurrent CDK workers (1 CDK = 1 task)
   // -----------------------------------------------------------------------
 
   pub async fn run(
     &mut self,
     app_handle: tauri::AppHandle,
     email_service: &dyn EmailService,
+    sms_service: Option<&dyn SmsService>,
   ) -> RegistrationResult {
     let total_cdks = self.config.cdks.len() as u32;
-    let accounts_per = self.config.accounts_per_cdk.max(1);
+    let accounts_per = self.config.accounts_per_cdk.clamp(1, 6);
     let max_retries = self.config.max_retries.max(1);
-    let cdks = self.config.cdks.clone(); // Clone to avoid borrow conflicts
-    let mut all_results: Vec<RegistrationResult> = Vec::new();
+    let cdks = self.config.cdks.clone();
     let mut last_error = String::new();
-    let mut success_count: u32 = 0;
     let mut nord_connected_by_us = false;
 
     let cli = self.config.nord_cli_path.clone();
@@ -1050,29 +1214,115 @@ impl RegistrationEngine {
     let server = self.config.nord_server_name.clone();
     let rotate_every_n = self.config.rotate_every_n;
     let network_mode = self.config.network_mode;
+    let uses_nord_cli = self.config.uses_nord_cli();
 
-    // Nord mode: connect once at start so all accounts share a fresh egress.
-    if network_mode == NetworkMode::Nord {
+    // Concurrency policy:
+    // - Nord CLI: always 1 (system-wide).
+    // - VPN: concurrency = nord_max_sessions (policy max 6) — NOT limited by CDK count.
+    //   Peer pool size follows Nord session budget; CDKs drain in waves until done.
+    let mut concurrency = self.config.concurrency.clamp(1, 8);
+    if uses_nord_cli && concurrency > 1 {
+      self.log(&format!(
+        "Nord CLI mode: forcing concurrency 1 (was {concurrency}) — system-wide IP is not thread-safe"
+      ));
+      concurrency = 1;
+    }
+
+    if network_mode == NetworkMode::Vpn {
+      // Auto-detect session budget from the selected Nord/WireGuard inventory config.
+      // User only provides Access Token when creating the VPN — no manual session input.
+      if let Some(vpn_id) = self.config.effective_vpn_id() {
+        if let Ok(storage) = crate::vpn::VPN_STORAGE.lock() {
+          if let Ok(cfg) = storage.load_config(&vpn_id) {
+            if let Some(ms) = cfg.max_sessions.filter(|n| *n >= 1) {
+              self.config.nord_max_sessions = ms.clamp(1, 6);
+              self.log(&format!(
+                "Nord session budget auto-detected from VPN config: {ms}"
+              ));
+            } else if cfg.source.as_deref() == Some("nord") {
+              // Nord-created conf without stored budget: conservative default already on config.
+              self.log(
+                "Nord VPN config has no stored session budget; using default nord_max_sessions",
+              );
+            }
+          }
+        }
+      }
+      // Concurrency is system-calculated from Nord session budget (Access Token path).
+      // User does not set it — only selects the VPN config created with the token.
+      let nord_budget = self.config.nord_max_sessions.clamp(1, 6);
+      self.config.concurrency = nord_budget;
+      self.config.nord_max_sessions = nord_budget;
+      concurrency = nord_budget;
+      self.log(&format!(
+        "VPN concurrency auto-calculated from Nord session budget: {concurrency} (CDK count={total_cdks} does not limit concurrency)"
+      ));
+
+      if let Some(base) = self.config.effective_vpn_id() {
+        self.log(&format!(
+          "Network mode VPN (WireGuard): base vpn_id={base}; rotate every {rotate_every_n} success(es) per slot"
+        ));
+      }
+
+      // Pool size = Nord-capped concurrency only (independent of CDK count).
+      let pool_size = concurrency.clamp(1, 6) as usize;
+      if let Err(e) = self.spawn_vpn_peer_pool(pool_size).await {
+        let msg = format!("Failed to spawn ephemeral Nord peer pool: {e}");
+        self.log(&msg);
+        self.emit(
+          &app_handle,
+          RegistrationStep::Failed,
+          &msg,
+          0,
+          0,
+          total_cdks,
+          None,
+        );
+        return self.fail_result(&msg);
+      }
+      // If API returned fewer usable peers, shrink concurrency to pool size.
+      let pool_len = self.ephemeral_vpn_ids.len().max(1) as u32;
+      if concurrency > pool_len {
+        self.log(&format!(
+          "VPN peer pool size {pool_len} < Nord-capped concurrency {concurrency}; capping concurrency to pool"
+        ));
+        concurrency = pool_len;
+      }
+      self.log(&format!(
+        "VPN peer pool ready: {pool_len} concurrent Nord session(s); will drain all {total_cdks} CDK(s) in waves"
+      ));
+    }
+
+    self.log(&format!(
+      "Starting batch: {total_cdks} CDK(s), {accounts_per} account(s)/CDK, concurrency={concurrency}"
+    ));
+
+    // Nord CLI is backup/legacy only — system-wide connect when mode is Nord.
+    if uses_nord_cli {
       self.emit(
         &app_handle,
         RegistrationStep::RotatingIp,
-        "Connecting NordVPN...",
+        "Connecting NordVPN CLI (system-wide backup mode)...",
         0,
         0,
         total_cdks,
         None,
       );
-      match super::nord_cli::connect(cli.as_deref(), group.as_deref(), server.as_deref()) {
+      match crate::auto_service::common::nord_cli::connect(
+        cli.as_deref(),
+        group.as_deref(),
+        server.as_deref(),
+      ) {
         Ok(()) => {
           nord_connected_by_us = true;
-          self.log("NordVPN connected");
+          self.log("NordVPN CLI connected (backup mode)");
           sleep(std::time::Duration::from_secs(3)).await;
           if let Ok(ip) = crate::ip_utils::fetch_public_ip(None).await {
-            self.log(&format!("Egress IP after Nord connect: {ip}"));
+            self.log(&format!("Egress IP after Nord CLI connect: {ip}"));
           }
         }
         Err(e) => {
-          let msg = format!("NordVPN connect failed: {e}");
+          let msg = format!("NordVPN CLI connect failed: {e}");
           self.log(&msg);
           self.emit(
             &app_handle,
@@ -1088,190 +1338,190 @@ impl RegistrationEngine {
       }
     }
 
-    for (cdk_idx, cdk) in cdks.iter().enumerate() {
-      if self.is_cancelled() {
-        self.log("Cancelled by user");
-        break;
+    // Sequential path (concurrency=1): keep Nord rotate semantics on one engine.
+    if concurrency == 1 {
+      let mut all_results: Vec<RegistrationResult> = Vec::new();
+      let success_count = AtomicU32::new(0);
+      for (cdk_idx, cdk) in cdks.iter().enumerate() {
+        if self.is_cancelled() {
+          self.log("Cancelled by user");
+          break;
+        }
+        let mut slot = self.fork_for_cdk(cdk_idx as u32);
+        let (results, err, nord_stop) = slot
+          .process_one_cdk(
+            &app_handle,
+            email_service,
+            sms_service,
+            cdk,
+            cdk_idx as u32,
+            total_cdks,
+            accounts_per,
+            max_retries,
+            uses_nord_cli,
+            rotate_every_n,
+            cli.as_deref(),
+            group.as_deref(),
+            server.as_deref(),
+            &success_count,
+          )
+          .await;
+        self.logs.extend(slot.logs);
+        all_results.extend(results);
+        if let Some(e) = err {
+          last_error = e;
+        }
+        if nord_stop {
+          nord_connected_by_us = true;
+          break;
+        }
       }
 
-      self.log(&format!("=== CDK {}/{total_cdks}: {cdk} ===", cdk_idx + 1));
+      if nord_connected_by_us {
+        self.log("NordVPN CLI left connected after auto-reg (no auto-disconnect)");
+      }
 
-      // Redeem CDK once to get base email
+      let ok = all_results.iter().filter(|r| r.success).count();
+      let fail = all_results.iter().filter(|r| !r.success).count();
+      let free_no = all_results
+        .iter()
+        .filter(|r| !r.success && !r.email.is_empty() && !r.free_trial_eligible)
+        .count();
+      let msg = if ok > 0 || free_no > 0 {
+        format!("Done: {ok} free-trial, {free_no} no-trial, {fail} total non-success")
+      } else if !last_error.is_empty() {
+        last_error.clone()
+      } else {
+        "No accounts created".into()
+      };
+
       self.emit(
         &app_handle,
-        RegistrationStep::RedeemingCdk,
-        &format!("CDK {}/{}: redeeming...", cdk_idx + 1, total_cdks),
-        cdk_idx as u32,
+        RegistrationStep::Completed,
+        &msg,
+        0,
         0,
         total_cdks,
         None,
       );
 
-      let base_email = match email_service.redeem_cdk(cdk) {
-        Ok(info) => {
-          let email = info.email.clone();
-          self.log(&format!("CDK → {email}"));
-          email
-        }
-        Err(e) => {
-          self.log(&format!("CDK redeem failed: {e}"));
-          last_error = format!("CDK {cdk}: {e}");
-          continue; // Skip this CDK, try next
-        }
+      self.cleanup_ephemeral_vpn_pool().await;
+
+      return RegistrationResult {
+        success: ok > 0,
+        email: String::new(),
+        password: String::new(),
+        account_id: format!("batch:{ok}"),
+        access_token: String::new(),
+        device_id: String::new(),
+        error_message: if fail > 0 {
+          format!("{fail} non-success")
+        } else {
+          String::new()
+        },
+        step_logs: self.logs.clone(),
+        created_at: Utc::now(),
+        two_fa_enabled: false,
+        totp_secret: String::new(),
+        free_trial_eligible: false,
+        plan_type: String::new(),
+        cdk: format!("{total_cdks} CDKs processed"),
+        base_email: String::new(),
+        phone_number: String::new(),
+        status: super::types::AccountInventoryStatus::Available,
+        note: String::new(),
+        exported_at: None,
+        sold_at: None,
       };
+    }
 
-      // Create N accounts per CDK via aliases
-      for alias_idx in 0..accounts_per {
-        if self.is_cancelled() {
-          break;
-        }
+    // Parallel path: one concurrent future per CDK, limited by semaphore.
+    // Poll on this task via FuturesUnordered (engine futures are !Send — no JoinSet).
+    let semaphore = Arc::new(Semaphore::new(concurrency as usize));
+    let success_count = Arc::new(AtomicU32::new(0));
+    let sms_token = self.config.sms_token.clone();
+    let sms_enabled = sms_service.is_some();
 
-        let mut succeeded = false;
+    #[allow(clippy::type_complexity)]
+    let mut tasks: FuturesUnordered<
+      std::pin::Pin<
+        Box<
+          dyn std::future::Future<
+              Output = (u32, Vec<RegistrationResult>, Vec<String>, Option<String>),
+            > + '_,
+        >,
+      >,
+    > = FuturesUnordered::new();
 
-        for attempt in 0..max_retries {
-          if attempt > 0 {
-            self.log(&format!(
-              "Retry {attempt}/{max_retries} for alias {}/{accounts_per}...",
-              alias_idx + 1
-            ));
-            sleep(std::time::Duration::from_secs(2)).await;
-          }
+    for (cdk_idx, cdk) in cdks.into_iter().enumerate() {
+      if self.is_cancelled() {
+        break;
+      }
+      let permit = semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("semaphore closed");
+      let mut slot = self.fork_for_cdk(cdk_idx as u32);
+      let app = app_handle.clone();
+      let success_count = success_count.clone();
+      let sms_token = sms_token.clone();
+      tasks.push(Box::pin(async move {
+        let _permit = permit;
+        let email = crate::email::gmail_cdk::GmailCdkService::new();
+        let viotp = if sms_enabled {
+          sms_token.map(crate::sms::viotp::ViotpService::new)
+        } else {
+          None
+        };
+        let sms_ref: Option<&dyn SmsService> = viotp.as_ref().map(|s| s as &dyn SmsService);
+        // Per-slot WireGuard peer rotate is OK (each slot has its own ephemeral vpn_id).
+        // Nord CLI remains disabled under concurrency > 1.
+        let (results, err, _nord_stop) = slot
+          .process_one_cdk(
+            &app,
+            &email,
+            sms_ref,
+            &cdk,
+            cdk_idx as u32,
+            total_cdks,
+            accounts_per,
+            max_retries,
+            false,          // Nord CLI never under concurrency > 1
+            rotate_every_n, // WireGuard per-slot peer hop still allowed
+            None,
+            None,
+            None,
+            &success_count,
+          )
+          .await;
+        (cdk_idx as u32, results, slot.logs, err)
+      }));
+    }
 
-          match self
-            .run_once(
-              &app_handle,
-              email_service,
-              cdk,
-              &base_email,
-              alias_idx,
-              cdk_idx as u32,
-              total_cdks,
-              accounts_per,
-            )
-            .await
-          {
-            Ok(result) => {
-              save_registration_result(&result);
-              all_results.push(result);
-              succeeded = true;
-              success_count += 1;
-
-              // Nord: rotate egress after every N free-trial successes (browser already cleaned).
-              if network_mode == NetworkMode::Nord && should_rotate(success_count, rotate_every_n) {
-                self.emit(
-                  &app_handle,
-                  RegistrationStep::RotatingIp,
-                  &format!("Rotating NordVPN IP after {success_count} successes..."),
-                  cdk_idx as u32,
-                  alias_idx,
-                  total_cdks,
-                  None,
-                );
-                let old_ip = crate::ip_utils::fetch_public_ip(None)
-                  .await
-                  .unwrap_or_default();
-                match super::nord_cli::rotate(cli.as_deref(), group.as_deref(), server.as_deref()) {
-                  Ok(()) => {
-                    nord_connected_by_us = true;
-                    let mut new_ip = old_ip.clone();
-                    for _ in 0..20 {
-                      if self.is_cancelled() {
-                        self.log("Cancelled during Nord IP verify");
-                        break;
-                      }
-                      sleep(std::time::Duration::from_secs(3)).await;
-                      if let Ok(ip) = crate::ip_utils::fetch_public_ip(None).await {
-                        new_ip = ip;
-                        if !new_ip.is_empty() && new_ip != old_ip {
-                          break;
-                        }
-                      }
-                    }
-                    if new_ip == old_ip {
-                      self.log(&format!(
-                        "WARN: egress IP unchanged after rotate ({old_ip}); continuing"
-                      ));
-                    } else {
-                      self.log(&format!("Egress IP {old_ip} → {new_ip}"));
-                    }
-                    self.emit(
-                      &app_handle,
-                      RegistrationStep::RotatingIp,
-                      &format!("IP {old_ip} → {new_ip}"),
-                      cdk_idx as u32,
-                      alias_idx,
-                      total_cdks,
-                      None,
-                    );
-                  }
-                  Err(e) => {
-                    // Hard-stop batch if rotate fails. Do NOT disconnect Nord —
-                    // leave VPN up for the user after auto-reg ends (success or fail).
-                    let msg = format!("NordVPN rotate failed: {e}");
-                    self.log(&msg);
-                    self.emit(
-                      &app_handle,
-                      RegistrationStep::Failed,
-                      &msg,
-                      cdk_idx as u32,
-                      alias_idx,
-                      total_cdks,
-                      None,
-                    );
-                    let ok = all_results.iter().filter(|r| r.success).count();
-                    return RegistrationResult {
-                      success: ok > 0,
-                      email: String::new(),
-                      password: String::new(),
-                      account_id: format!("batch:{ok}"),
-                      access_token: String::new(),
-                      device_id: String::new(),
-                      error_message: msg,
-                      step_logs: self.logs.clone(),
-                      created_at: Utc::now(),
-                      two_fa_enabled: false,
-                      totp_secret: String::new(),
-                      free_trial_eligible: false,
-                      plan_type: String::new(),
-                      cdk: format!("{total_cdks} CDKs processed"),
-                      base_email: String::new(),
-                      status: super::types::AccountInventoryStatus::Available,
-                      note: String::new(),
-                      exported_at: None,
-                      sold_at: None,
-                    };
-                  }
-                }
-              }
-              break;
-            }
-            Err(e) => {
-              last_error = e;
-              self.log(&format!("Attempt {attempt} failed: {last_error}"));
-            }
-          }
-        }
-
-        if !succeeded {
-          self.log(&format!(
-            "Alias {}/{} failed after {max_retries} retries",
-            alias_idx + 1,
-            accounts_per
-          ));
-        }
+    let mut all_results: Vec<RegistrationResult> = Vec::new();
+    while let Some((_idx, results, logs, err)) = tasks.next().await {
+      self.logs.extend(logs);
+      all_results.extend(results);
+      if let Some(e) = err {
+        last_error = e;
       }
     }
 
-    // Keep NordVPN connected after the batch finishes (user manages disconnect).
+    self.cleanup_ephemeral_vpn_pool().await;
+
     if nord_connected_by_us {
-      self.log("NordVPN left connected after auto-reg (no auto-disconnect)");
+      self.log("NordVPN CLI left connected after auto-reg (no auto-disconnect)");
     }
 
-    // Return summary result
     let ok = all_results.iter().filter(|r| r.success).count();
     let fail = all_results.iter().filter(|r| !r.success).count();
-    let msg = if ok > 0 {
-      format!("Done: {ok} accounts created, {fail} failed")
+    let free_no = all_results
+      .iter()
+      .filter(|r| !r.success && !r.email.is_empty() && !r.free_trial_eligible)
+      .count();
+    let msg = if ok > 0 || free_no > 0 {
+      format!("Done: {ok} free-trial, {free_no} no-trial, {fail} total non-success")
     } else if !last_error.is_empty() {
       last_error.clone()
     } else {
@@ -1296,7 +1546,7 @@ impl RegistrationEngine {
       access_token: String::new(),
       device_id: String::new(),
       error_message: if fail > 0 {
-        format!("{fail} failures")
+        format!("{fail} non-success")
       } else {
         String::new()
       },
@@ -1308,11 +1558,270 @@ impl RegistrationEngine {
       plan_type: String::new(),
       cdk: format!("{total_cdks} CDKs processed"),
       base_email: String::new(),
+      phone_number: String::new(),
       status: super::types::AccountInventoryStatus::Available,
       note: String::new(),
       exported_at: None,
       sold_at: None,
     }
+  }
+
+  /// Process a single CDK: redeem → N aliases sequential → update CDK inventory.
+  /// Returns (results, last_error, nord_hard_stop).
+  #[allow(clippy::too_many_arguments)]
+  async fn process_one_cdk(
+    &mut self,
+    app_handle: &tauri::AppHandle,
+    email_service: &dyn EmailService,
+    sms_service: Option<&dyn SmsService>,
+    cdk: &str,
+    cdk_idx: u32,
+    total_cdks: u32,
+    accounts_per: u32,
+    max_retries: u32,
+    uses_nord_cli: bool,
+    rotate_every_n: u32,
+    nord_cli: Option<&str>,
+    nord_group: Option<&str>,
+    nord_server: Option<&str>,
+    success_count: &AtomicU32,
+  ) -> (Vec<RegistrationResult>, Option<String>, bool) {
+    let mut all_results: Vec<RegistrationResult> = Vec::new();
+    let mut last_error: Option<String> = None;
+    let mut nord_hard_stop = false;
+
+    let mut cdk_record = CdkInventoryRecord::new(cdk, accounts_per, &self.task_id);
+    cdk_record.status = "running".into();
+    put_cdk_inventory_record(&cdk_record);
+
+    self.log(&format!("=== CDK {}/{total_cdks}: {cdk} ===", cdk_idx + 1));
+    self.emit(
+      app_handle,
+      RegistrationStep::RedeemingCdk,
+      &format!("CDK {}/{}: redeeming...", cdk_idx + 1, total_cdks),
+      cdk_idx,
+      0,
+      total_cdks,
+      None,
+    );
+
+    let base_email = match email_service.redeem_cdk(cdk) {
+      Ok(info) => {
+        let email = info.email.clone();
+        self.log(&format!("CDK → {email}"));
+        cdk_record.base_email = email.clone();
+        put_cdk_inventory_record(&cdk_record);
+        email
+      }
+      Err(e) => {
+        let msg = format!("CDK redeem failed: {e}");
+        self.log(&msg);
+        cdk_record.last_error = msg.clone();
+        cdk_record.status = "failed".into();
+        cdk_record.updated_at = Utc::now();
+        put_cdk_inventory_record(&cdk_record);
+        self.dispose_worker_profile(app_handle).await;
+        return (all_results, Some(msg), false);
+      }
+    };
+
+    for alias_idx in 0..accounts_per {
+      if self.is_cancelled() {
+        cdk_record.status = "cancelled".into();
+        cdk_record.updated_at = Utc::now();
+        put_cdk_inventory_record(&cdk_record);
+        self.log("Cancelled by user");
+        break;
+      }
+
+      let mut finished_result: Option<RegistrationResult> = None;
+
+      for attempt in 0..max_retries {
+        if attempt > 0 {
+          self.log(&format!(
+            "Retry {attempt}/{max_retries} for alias {}/{accounts_per}...",
+            alias_idx + 1
+          ));
+          sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        match self
+          .run_once(
+            app_handle,
+            email_service,
+            sms_service,
+            cdk,
+            &base_email,
+            alias_idx,
+            cdk_idx,
+            total_cdks,
+            accounts_per,
+          )
+          .await
+        {
+          Ok(result) => {
+            // Persist every finished attempt (free-trial yes AND free-trial no).
+            save_registration_result(&result);
+            cdk_record.record_result(&result);
+            put_cdk_inventory_record(&cdk_record);
+            all_results.push(result.clone());
+            finished_result = Some(result.clone());
+
+            if result.success {
+              let sc = success_count.fetch_add(1, Ordering::SeqCst) + 1;
+              if should_rotate(sc, rotate_every_n) {
+                if uses_nord_cli {
+                  self.emit(
+                    app_handle,
+                    RegistrationStep::RotatingIp,
+                    &format!("Rotating NordVPN CLI IP after {sc} successes..."),
+                    cdk_idx,
+                    alias_idx,
+                    total_cdks,
+                    None,
+                  );
+                  let old_ip = crate::ip_utils::fetch_public_ip(None)
+                    .await
+                    .unwrap_or_default();
+                  match crate::auto_service::common::nord_cli::rotate(
+                    nord_cli,
+                    nord_group,
+                    nord_server,
+                  ) {
+                    Ok(()) => {
+                      let mut new_ip = old_ip.clone();
+                      for _ in 0..20 {
+                        if self.is_cancelled() {
+                          break;
+                        }
+                        sleep(std::time::Duration::from_secs(3)).await;
+                        if let Ok(ip) = crate::ip_utils::fetch_public_ip(None).await {
+                          new_ip = ip;
+                          if !new_ip.is_empty() && new_ip != old_ip {
+                            break;
+                          }
+                        }
+                      }
+                      if new_ip == old_ip {
+                        self.log(&format!(
+                          "WARN: egress IP unchanged after rotate ({old_ip}); continuing"
+                        ));
+                      } else {
+                        self.log(&format!("Egress IP {old_ip} → {new_ip}"));
+                      }
+                      self.emit(
+                        app_handle,
+                        RegistrationStep::RotatingIp,
+                        &format!("IP {old_ip} → {new_ip}"),
+                        cdk_idx,
+                        alias_idx,
+                        total_cdks,
+                        None,
+                      );
+                    }
+                    Err(e) => {
+                      let msg = format!("NordVPN CLI rotate failed: {e}");
+                      self.log(&msg);
+                      self.emit(
+                        app_handle,
+                        RegistrationStep::Failed,
+                        &msg,
+                        cdk_idx,
+                        alias_idx,
+                        total_cdks,
+                        None,
+                      );
+                      nord_hard_stop = true;
+                      last_error = Some(msg);
+                    }
+                  }
+                } else if let Some(vpn_id) = self.worker_vpn_id() {
+                  self.emit(
+                    app_handle,
+                    RegistrationStep::RotatingIp,
+                    &format!("Rotating WireGuard peer after {sc} successes..."),
+                    cdk_idx,
+                    alias_idx,
+                    total_cdks,
+                    None,
+                  );
+                  match self.rotate_wireguard_peer(&vpn_id).await {
+                    Ok((hostname, station)) => {
+                      self.log(&format!(
+                        "WireGuard peer rotated → {hostname} ({station}) after {sc} successes"
+                      ));
+                      self.emit(
+                        app_handle,
+                        RegistrationStep::RotatingIp,
+                        &format!("WireGuard peer → {hostname} ({station})"),
+                        cdk_idx,
+                        alias_idx,
+                        total_cdks,
+                        None,
+                      );
+                    }
+                    Err(e) => {
+                      let msg = format!("WireGuard peer rotate failed: {e}");
+                      self.log(&msg);
+                      self.emit(
+                        app_handle,
+                        RegistrationStep::Failed,
+                        &msg,
+                        cdk_idx,
+                        alias_idx,
+                        total_cdks,
+                        None,
+                      );
+                      nord_hard_stop = true;
+                      last_error = Some(msg);
+                    }
+                  }
+                }
+              }
+            }
+            break;
+          }
+          Err(e) => {
+            last_error = Some(e.clone());
+            self.log(&format!("Attempt {attempt} failed: {e}"));
+          }
+        }
+
+        if nord_hard_stop {
+          break;
+        }
+      }
+
+      if finished_result.is_none() {
+        let err = last_error
+          .clone()
+          .unwrap_or_else(|| "unknown failure".into());
+        self.log(&format!(
+          "Alias {}/{} failed after {max_retries} retries",
+          alias_idx + 1,
+          accounts_per
+        ));
+        cdk_record.record_hard_failure(&err);
+        put_cdk_inventory_record(&cdk_record);
+      }
+
+      if nord_hard_stop {
+        break;
+      }
+    }
+
+    if self.is_cancelled() && cdk_record.status == "running" {
+      cdk_record.status = "cancelled".into();
+    } else if cdk_record.status == "running" {
+      cdk_record.finalize_status();
+    }
+    cdk_record.updated_at = Utc::now();
+    put_cdk_inventory_record(&cdk_record);
+
+    // Dispose this CDK's worker profile (each concurrent slot owns one).
+    self.dispose_worker_profile(app_handle).await;
+
+    (all_results, last_error, nord_hard_stop)
   }
 
   // -----------------------------------------------------------------------
@@ -1324,6 +1833,7 @@ impl RegistrationEngine {
     &mut self,
     app_handle: &tauri::AppHandle,
     email_service: &dyn EmailService,
+    sms_service: Option<&dyn SmsService>,
     cdk: &str,
     base_email: &str,
     alias_idx: u32,
@@ -1369,12 +1879,12 @@ impl RegistrationEngine {
     let birthdate = random_birthday();
     self.log(&format!("{prefix} Name: {first_name} {last_name}"));
 
-    // Step 3: Launch a fresh browser profile for THIS account only.
-    // Lifecycle: create ephemeral profile → register → kill browser → delete profile.
+    // Step 3: Launch (or relaunch) the reused worker profile for THIS account.
+    // Lifecycle: ensure worker once → launch (new FP + ephemeral dir) → register → kill only.
     self.emit(
       app_handle,
       RegistrationStep::LaunchingBrowser,
-      &format!("{prefix} Launching fresh browser profile..."),
+      &format!("{prefix} Launching browser worker profile..."),
       cdk_idx,
       alias_idx,
       total_cdks,
@@ -1386,16 +1896,17 @@ impl RegistrationEngine {
 
     let (profile, mut session) = self.launch_and_connect(app_handle).await?;
     self.log(&format!(
-      "{prefix} Browser profile launched: {} ({})",
+      "{prefix} Browser worker launched: {} ({})",
       profile.name, profile.id
     ));
 
-    // Always clean up the active profile when this account finishes (success or failure).
+    // Kill browser after each account; keep worker profile metadata for reuse.
     let mut active_profile = profile;
     let registration_result = self
       .run_registration_in_browser(
         app_handle,
         email_service,
+        sms_service,
         &mut session,
         &mut active_profile,
         cdk,
@@ -1412,8 +1923,10 @@ impl RegistrationEngine {
       )
       .await;
 
-    self.cleanup_browser(app_handle, &active_profile).await;
-    self.log(&format!("{prefix} Browser closed and profile cleaned up"));
+    self.kill_browser_only(app_handle, &active_profile).await;
+    self.log(&format!(
+      "{prefix} Browser closed (worker profile kept for reuse)"
+    ));
 
     registration_result
   }
@@ -1424,6 +1937,7 @@ impl RegistrationEngine {
     &mut self,
     app_handle: &tauri::AppHandle,
     email_service: &dyn EmailService,
+    sms_service: Option<&dyn SmsService>,
     session: &mut BrowserSession,
     profile: &mut crate::profile::BrowserProfile,
     cdk: &str,
@@ -1529,6 +2043,7 @@ impl RegistrationEngine {
     // Step 8-12: State machine loop
     let mut register_submitted = false;
     let mut account_created = false;
+    let mut phone_number_used = String::new();
     let mut seen_states: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
 
     for _ in 0..12 {
@@ -1750,8 +2265,169 @@ impl RegistrationEngine {
         }
 
         PageType::AddPhone => {
-          self.log(&format!("{prefix} Phone required — marking pending"));
-          break;
+          let Some(sms) = sms_service else {
+            return Err(
+              "Phone verification required but no SMS provider configured (set smsProvider/smsToken/smsServiceId)"
+                .into(),
+            );
+          };
+          let service_id = self.config.sms_service_id.ok_or_else(|| {
+            "Phone verification required but smsServiceId is not configured".to_string()
+          })?;
+
+          self.emit(
+            app_handle,
+            RegistrationStep::RequestingSmsOtp,
+            &format!("{prefix} Renting SMS number..."),
+            cdk_idx,
+            alias_idx,
+            total_cdks,
+            None,
+          );
+
+          let request = NumberRequest {
+            service_id,
+            network: self.config.sms_network.clone(),
+            prefix: None,
+            except_prefix: None,
+            number: None,
+            country: self.config.sms_country.clone(),
+          };
+          let number_info = sms
+            .request_number(&request)
+            .map_err(|e| format!("SMS rent number: {e}"))?;
+          phone_number_used = number_info.phone_number.clone();
+          self.log(&format!(
+            "{prefix} SMS number: {} (request_id={})",
+            number_info.phone_number, number_info.request_id
+          ));
+
+          // Fill phone field + submit (best-effort selectors for OpenAI add-phone UI).
+          let phone_selectors = [
+            r#"input[type="tel"]"#,
+            r#"input[name="phone"]"#,
+            r#"input[name="phoneNumber"]"#,
+            r#"input[autocomplete="tel"]"#,
+            r#"input[inputmode="tel"]"#,
+          ];
+          let mut filled = false;
+          for sel in phone_selectors {
+            if self
+              .fill_input(session, sel, &number_info.phone_number)
+              .await
+              .is_ok()
+            {
+              filled = true;
+              break;
+            }
+          }
+          if !filled {
+            return Err("Could not find phone input on add-phone page".into());
+          }
+          sleep(std::time::Duration::from_millis(400)).await;
+
+          let mut submitted = false;
+          for sel in [
+            r#"button[type="submit"]"#,
+            r#"button[name="intent"]"#,
+            r#"form button"#,
+          ] {
+            if self
+              .click_selector(session, sel, "sms phone submit")
+              .await
+              .is_ok()
+            {
+              submitted = true;
+              break;
+            }
+          }
+          if !submitted {
+            let _ = self.click_by_text(session, "Continue", "button").await;
+            let _ = self.click_by_text(session, "Send code", "button").await;
+            let _ = self.click_by_text(session, "Verify", "button").await;
+          }
+
+          self.emit(
+            app_handle,
+            RegistrationStep::PollingSmsOtp,
+            &format!("{prefix} Waiting for SMS OTP..."),
+            cdk_idx,
+            alias_idx,
+            total_cdks,
+            None,
+          );
+          let otp_info = sms
+            .get_otp(&number_info.request_id, 150)
+            .map_err(|e| format!("SMS OTP poll: {e}"))?;
+          let sms_code = otp_info
+            .code
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| "SMS OTP completed without code".to_string())?;
+          self.log(&format!("{prefix} SMS OTP: {sms_code}"));
+
+          self.emit(
+            app_handle,
+            RegistrationStep::VerifyingSmsOtp,
+            &format!("{prefix} Verifying SMS OTP..."),
+            cdk_idx,
+            alias_idx,
+            total_cdks,
+            None,
+          );
+
+          // Prefer OTP input on page; fall back to OpenAI phone-otp validate API.
+          let otp_selectors = [
+            r#"input[name="code"]"#,
+            r#"input[autocomplete="one-time-code"]"#,
+            r#"input[inputmode="numeric"]"#,
+            r#"input[type="text"]"#,
+            r#"input[type="tel"]"#,
+          ];
+          let mut otp_filled = false;
+          for sel in otp_selectors {
+            if self.fill_input(session, sel, &sms_code).await.is_ok() {
+              otp_filled = true;
+              break;
+            }
+          }
+          if otp_filled {
+            let mut otp_submitted = false;
+            for sel in [r#"button[type="submit"]"#, r#"form button"#] {
+              if self
+                .click_selector(session, sel, "sms otp submit")
+                .await
+                .is_ok()
+              {
+                otp_submitted = true;
+                break;
+              }
+            }
+            if !otp_submitted {
+              let _ = self.click_by_text(session, "Continue", "button").await;
+              let _ = self.click_by_text(session, "Verify", "button").await;
+            }
+          } else {
+            let verify_js = format!(
+              "fetch('https://auth.openai.com/api/accounts/phone-otp/validate', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ code: '{code}' }}) }})",
+              did = self.device_id,
+              code = sms_code,
+            );
+            let verify = session.fetch_json(&verify_js).await?;
+            let vs = verify["_status"].as_u64().unwrap_or(200);
+            if vs != 200 {
+              let body = verify["_body"].as_str().unwrap_or("");
+              return Err(format!("SMS OTP verify HTTP {vs}: {body}"));
+            }
+            if let Some(next) = verify["continue_url"].as_str() {
+              if !next.is_empty() {
+                session.navigate(next, 30).await?;
+              }
+            }
+          }
+
+          sleep(std::time::Duration::from_secs(2)).await;
+          cur_url = session.current_url().await.unwrap_or_default();
+          continue;
         }
         PageType::ChatgptHome | PageType::Callback | PageType::Consent => {
           self.log(&format!("{prefix} ✅ Flow complete"));
@@ -1841,10 +2517,44 @@ impl RegistrationEngine {
     self.log(&format!(
       "{prefix} Free offer check: eligible={free_trial_eligible} plan={plan_type} detail={offer_detail}"
     ));
+
+    // No free trial: still persist the account under CDK stats (not resellable).
+    // Return Ok so the alias is not retried; success=false / free_trial_eligible=false.
     if !free_trial_eligible {
-      return Err(format!(
-        "Skipped account without free trial/free Plus offer (plan={plan_type}; {offer_detail})"
-      ));
+      let err = format!("No free trial/free Plus offer (plan={plan_type}; {offer_detail})");
+      self.log(&format!("{prefix} {err} — saving as free-trial-no"));
+      let result = RegistrationResult {
+        success: false,
+        email: alias_email.to_string(),
+        password: password.to_string(),
+        account_id,
+        access_token,
+        device_id: self.device_id.clone(),
+        error_message: err.clone(),
+        step_logs: self.logs.clone(),
+        created_at: Utc::now(),
+        two_fa_enabled: false,
+        totp_secret: String::new(),
+        free_trial_eligible: false,
+        plan_type: plan_type.clone(),
+        cdk: cdk.to_string(),
+        base_email: base_email.to_string(),
+        phone_number: phone_number_used,
+        status: super::types::AccountInventoryStatus::Invalid,
+        note: "free_trial_no".into(),
+        exported_at: None,
+        sold_at: None,
+      };
+      self.emit(
+        app_handle,
+        RegistrationStep::Failed,
+        &format!("{prefix} {err}"),
+        cdk_idx,
+        alias_idx,
+        total_cdks,
+        Some(result.clone()),
+      );
+      return Ok(result);
     }
 
     // Step: Enable authenticator 2FA (retry only this step; never fail the whole registration).
@@ -1923,6 +2633,7 @@ impl RegistrationEngine {
       plan_type: plan_type.clone(),
       cdk: cdk.to_string(),
       base_email: base_email.to_string(),
+      phone_number: phone_number_used,
       status: super::types::AccountInventoryStatus::Available,
       note: String::new(),
       exported_at: None,
@@ -2698,18 +3409,18 @@ impl RegistrationEngine {
     for attempt in 0..max_attempts {
       if attempt > 0 {
         self.log(&format!(
-          "Authorize retry {attempt}/{max_attempts}: closing old browser and opening a fresh profile..."
+          "Authorize retry {attempt}/{max_attempts}: relaunching same worker with new fingerprint..."
         ));
-        // Kill old browser first so we never stack multiple browser processes.
-        self.cleanup_browser(app_handle, profile).await;
+        // Kill only — keep the same worker profile metadata for relaunch.
+        self.kill_browser_only(app_handle, profile).await;
 
-        // Fresh device + fresh browser profile for Cloudflare bypass.
+        // Fresh device + relaunch same worker (FP randomize + ephemeral dir wipe).
         self.device_id = Uuid::new_v4().to_string();
         let (new_profile, new_session) = self.launch_and_connect(app_handle).await?;
         *session = new_session;
         *profile = new_profile;
 
-        // Re-seed cookies and re-visit homepage on the new browser.
+        // Re-seed cookies and re-visit homepage on the relaunched browser.
         for domain in &[
           "chatgpt.com",
           ".chatgpt.com",
@@ -2720,7 +3431,7 @@ impl RegistrationEngine {
         }
         session.navigate("https://chatgpt.com/", 20).await?;
         self.log(&format!(
-          "Fresh browser profile ready: {} ({})",
+          "Worker relaunched for authorize retry: {} ({})",
           profile.name, profile.id
         ));
       }
@@ -2820,17 +3531,128 @@ impl RegistrationEngine {
     ))
   }
 
-  /// Always launch a **brand-new ephemeral** profile per account.
+  /// Ensure a single reusable worker profile exists for this engine/batch.
   ///
-  /// `config.profile_id` is only a template: we copy browser/version/proxy defaults,
-  /// never reuse its cookie jar / choose-an-account history.
-  async fn launch_browser(
+  /// - If `config.profile_id` is set and found, adopt it (do not delete at end).
+  /// - Otherwise create one ephemeral worker once and reuse it for every account.
+  /// - Each launch regenerates fingerprint + ephemeral data dir via browser_runner.
+  async fn ensure_worker_profile(
     &mut self,
     app_handle: &tauri::AppHandle,
   ) -> Result<crate::profile::BrowserProfile, String> {
     use crate::browser::BrowserType;
-    use crate::browser_runner::BrowserRunner;
     use crate::profile::manager::create_browser_profile_with_group;
+
+    // Already have a worker for this engine — reload latest metadata.
+    if let Some(id) = self.worker_profile_id.clone() {
+      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
+        if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
+          return Ok(found);
+        }
+      }
+      self.log(&format!(
+        "Worker profile {id} missing from store — will recreate"
+      ));
+      self.worker_profile_id = None;
+      self.owns_worker_profile = false;
+    }
+
+    // Prefer an existing user-selected profile as the worker (reuse, not template-only).
+    if let Some(profile_id) = self.config.profile_id.as_ref() {
+      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
+        if let Some(mut found) = profiles
+          .into_iter()
+          .find(|p| p.id.to_string() == *profile_id)
+        {
+          // Ensure relaunches renew fingerprint even when reusing a user profile.
+          if found.browser.eq_ignore_ascii_case("camoufox") {
+            let mut cfg = found.camoufox_config.clone().unwrap_or_default();
+            if cfg.randomize_fingerprint_on_launch != Some(true) {
+              cfg.randomize_fingerprint_on_launch = Some(true);
+              found.camoufox_config = Some(cfg.clone());
+              if let Err(e) = crate::profile::ProfileManager::instance()
+                .update_camoufox_config(app_handle.clone(), &found.id.to_string(), cfg)
+                .await
+              {
+                self.log(&format!(
+                  "Warning: failed to enable Camoufox FP renew on worker: {e}"
+                ));
+              }
+            }
+          } else if found.browser.eq_ignore_ascii_case("chromium") {
+            let mut cfg = found.chromium_config.clone().unwrap_or_default();
+            if cfg.randomize_fingerprint_on_launch != Some(true) {
+              cfg.randomize_fingerprint_on_launch = Some(true);
+              found.chromium_config = Some(cfg.clone());
+              if let Err(e) = crate::profile::ProfileManager::instance()
+                .update_chromium_config(app_handle.clone(), &found.id.to_string(), cfg)
+                .await
+              {
+                self.log(&format!(
+                  "Warning: failed to enable Chromium FP renew on worker: {e}"
+                ));
+              }
+            }
+          }
+
+          // Align network attachment with batch/slot config (vpn preferred, else proxy).
+          if let Some(vpn_id) = self.worker_vpn_id() {
+            if found.vpn_id.as_deref() != Some(vpn_id.as_str()) {
+              match crate::profile::ProfileManager::instance()
+                .update_profile_vpn(
+                  app_handle.clone(),
+                  &found.id.to_string(),
+                  Some(vpn_id.clone()),
+                )
+                .await
+              {
+                Ok(updated) => {
+                  found = updated;
+                  self.log(&format!("Worker profile VPN set to {vpn_id}"));
+                }
+                Err(e) => {
+                  self.log(&format!(
+                    "Warning: failed to set worker vpn_id={vpn_id}: {e}"
+                  ));
+                }
+              }
+            }
+          } else if let Some(proxy_id) = self.config.effective_proxy_id() {
+            if found.proxy_id.as_deref() != Some(proxy_id.as_str()) {
+              match crate::profile::ProfileManager::instance()
+                .update_profile_proxy(
+                  app_handle.clone(),
+                  &found.id.to_string(),
+                  Some(proxy_id.clone()),
+                )
+                .await
+              {
+                Ok(updated) => {
+                  found = updated;
+                  self.log(&format!("Worker profile proxy set to {proxy_id}"));
+                }
+                Err(e) => {
+                  self.log(&format!(
+                    "Warning: failed to set worker proxy_id={proxy_id}: {e}"
+                  ));
+                }
+              }
+            }
+          }
+
+          self.log(&format!(
+            "Reusing configured profile as worker: {} ({}) browser={} version={}",
+            found.name, found.id, found.browser, found.version
+          ));
+          self.worker_profile_id = Some(found.id.to_string());
+          self.owns_worker_profile = false;
+          return Ok(found);
+        }
+      }
+      self.log(&format!(
+        "Configured profile_id {profile_id} not found — creating auto-reg worker"
+      ));
+    }
 
     let browser_str = if self.config.browser_type == "camoufox" {
       "camoufox"
@@ -2840,64 +3662,52 @@ impl RegistrationEngine {
     let mut version = String::new();
     let mut release_type = "stable".to_string();
 
-    // Optional template profile: version only — never reuse profile data dir / cookies.
-    if let Some(profile_id) = self.config.profile_id.as_ref() {
-      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-        if let Some(found) = profiles
-          .into_iter()
-          .find(|p| p.id.to_string() == *profile_id)
-        {
-          self.log(&format!(
-            "Template profile {} ({}) browser={} version={} — spawning fresh ephemeral clone",
-            found.name, found.id, found.browser, found.version
-          ));
-          if !found.version.is_empty() {
-            version = found.version.clone();
-          }
-          if !found.release_type.is_empty() {
-            release_type = found.release_type.clone();
-          }
+    // Prefer an installed version from any existing profile of the same browser.
+    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
+      if let Some(found) = profiles
+        .into_iter()
+        .find(|p| p.browser.eq_ignore_ascii_case(browser_str) && !p.version.is_empty())
+      {
+        version = found.version;
+        if !found.release_type.is_empty() {
+          release_type = found.release_type;
         }
+        self.log(&format!(
+          "Using installed {browser_str} version from existing profile: {version}"
+        ));
       }
     }
-
-    // Prefer an installed Camoufox version when template omitted version.
     if version.is_empty() && browser_str == "camoufox" {
-      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-        if let Some(v) = profiles
-          .into_iter()
-          .find(|p| p.browser.eq_ignore_ascii_case("camoufox") && !p.version.is_empty())
-          .map(|p| p.version)
-        {
-          version = v;
-          self.log(&format!(
-            "Using installed Camoufox version from existing profile: {version}"
-          ));
-        }
-      }
-      if version.is_empty() {
-        version = "v135.0.1-beta.24".into();
-        self.log(&format!("Using default Camoufox version: {version}"));
-      }
+      version = "v135.0.1-beta.24".into();
+      self.log(&format!("Using default Camoufox version: {version}"));
     }
 
     let browser =
       BrowserType::from_str(browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
 
-    // Unique profile name per account so concurrent/sequential runs never collide.
-    let short_id = Uuid::new_v4().to_string();
+    // One stable worker name per task+CDK slot (not per account).
     let profile_name = format!(
-      "auto-reg-{}-{}",
+      "auto-reg-worker-{}-s{}",
       &self.task_id[..8.min(self.task_id.len())],
-      &short_id[..8]
+      self.worker_slot
     );
 
-    // Camoufox: request a new fingerprint at create time (no cached FP).
     let camoufox_config = if browser_str == "camoufox" {
       Some(crate::camoufox_manager::CamoufoxConfig {
         fingerprint: None,
         randomize_fingerprint_on_launch: Some(true),
         geoip: Some(serde_json::Value::Bool(true)),
+        ..Default::default()
+      })
+    } else {
+      None
+    };
+
+    // Chromium also renews fingerprint on every launch of this worker.
+    let chromium_config = if browser_str == "chromium" {
+      Some(crate::chromium_manager::ChromiumConfig {
+        fingerprint: None,
+        randomize_fingerprint_on_launch: Some(true),
         ..Default::default()
       })
     } else {
@@ -2911,37 +3721,67 @@ impl RegistrationEngine {
       version,
       release_type,
       self.config.effective_proxy_id(),
-      None,
+      self.worker_vpn_id(),
       camoufox_config,
+      chromium_config,
       None,
-      None,
-      true, // always ephemeral for auto-reg
+      true, // ephemeral worker: data dir wiped on kill, metadata reused
       None,
       None,
     )
     .await
-    .map_err(|e| format!("Create profile: {e}"))?;
+    .map_err(|e| format!("Create worker profile: {e}"))?;
 
+    // Persist randomize flags so relaunches keep renewing fingerprints.
     if created.browser.eq_ignore_ascii_case("camoufox") {
       let mut cfg = created.camoufox_config.clone().unwrap_or_default();
-      // Ensure launch path regenerates if create-time FP is reused later.
       cfg.randomize_fingerprint_on_launch = Some(true);
       created.camoufox_config = Some(cfg);
-      self.log(&format!(
-        "Fresh ephemeral Camoufox profile {} (id={}) — no cookie cache, new fingerprint",
-        created.name, created.id
-      ));
-    } else {
-      self.log(&format!(
-        "Fresh ephemeral Chromium profile {} (id={}) — no cookie cache",
-        created.name, created.id
-      ));
+    } else if created.browser.eq_ignore_ascii_case("chromium") {
+      let mut cfg = created.chromium_config.clone().unwrap_or_default();
+      cfg.randomize_fingerprint_on_launch = Some(true);
+      created.chromium_config = Some(cfg);
+      if let Err(e) = crate::profile::ProfileManager::instance()
+        .update_chromium_config(
+          app_handle.clone(),
+          &created.id.to_string(),
+          created.chromium_config.clone().unwrap_or_default(),
+        )
+        .await
+      {
+        self.log(&format!(
+          "Warning: failed to persist Chromium randomize flag: {e}"
+        ));
+      }
     }
+
+    self.worker_profile_id = Some(created.id.to_string());
+    self.owns_worker_profile = true;
+    self.log(&format!(
+      "Created reusable worker profile {} (id={}) browser={} — relaunch renews fingerprint + data",
+      created.name, created.id, created.browser
+    ));
+
+    Ok(created)
+  }
+
+  /// Launch the reused worker profile (creates worker once if needed).
+  async fn launch_browser(
+    &mut self,
+    app_handle: &tauri::AppHandle,
+  ) -> Result<crate::profile::BrowserProfile, String> {
+    use crate::browser_runner::BrowserRunner;
+
+    let worker = self.ensure_worker_profile(app_handle).await?;
+    self.log(&format!(
+      "Launching worker {} ({}) — fingerprint renew + fresh ephemeral dir",
+      worker.name, worker.id
+    ));
 
     let launched = BrowserRunner::instance()
       .launch_browser(
         app_handle.clone(),
-        &created,
+        &worker,
         Some("about:blank".into()),
         None,
       )
@@ -2951,15 +3791,15 @@ impl RegistrationEngine {
     Ok(launched)
   }
 
-  /// Kill the browser process. Delete only ephemeral auto-created profiles.
-  async fn cleanup_browser(
+  /// Kill the browser process only. Keep worker profile metadata for reuse.
+  /// Ephemeral data dir is removed by BrowserRunner on kill.
+  async fn kill_browser_only(
     &mut self,
     app_handle: &tauri::AppHandle,
     profile: &crate::profile::BrowserProfile,
   ) {
     use crate::browser_runner::BrowserRunner;
 
-    // 1) Kill browser process first
     if let Err(e) = BrowserRunner::instance()
       .kill_browser_process(app_handle.clone(), profile)
       .await
@@ -2969,31 +3809,41 @@ impl RegistrationEngine {
         profile.id
       ));
     } else {
-      self.log(&format!("Browser killed for profile {}", profile.id));
-    }
-
-    // Auto-reg always spawns ephemeral profiles (template profile_id is never the
-    // launched id). Delete after each account so no cookie residue remains.
-    if !profile.ephemeral {
       self.log(&format!(
-        "Keeping non-ephemeral profile on disk: {} ({})",
+        "Browser killed for worker profile {} ({})",
         profile.name, profile.id
+      ));
+    }
+  }
+
+  /// Delete the auto-created worker at batch end. Never delete user-provided profile_id.
+  async fn dispose_worker_profile(&mut self, app_handle: &tauri::AppHandle) {
+    let Some(id) = self.worker_profile_id.take() else {
+      return;
+    };
+    if !self.owns_worker_profile {
+      self.log(&format!(
+        "Keeping user-provided worker profile on disk: {id}"
       ));
       return;
     }
+    self.owns_worker_profile = false;
 
-    // Give OS a moment to release file locks before deleting profile data.
+    // Best-effort kill if still running.
+    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
+      if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
+        self.kill_browser_only(app_handle, &found).await;
+      }
+    }
+
     sleep(std::time::Duration::from_millis(500)).await;
 
-    if let Err(e) =
-      crate::profile::ProfileManager::instance().delete_profile(app_handle, &profile.id.to_string())
-    {
+    if let Err(e) = crate::profile::ProfileManager::instance().delete_profile(app_handle, &id) {
       self.log(&format!(
-        "Warning: failed to delete profile {}: {e}",
-        profile.id
+        "Warning: failed to delete worker profile {id}: {e}"
       ));
     } else {
-      self.log(&format!("Ephemeral profile deleted: {}", profile.id));
+      self.log(&format!("Worker profile deleted: {id}"));
     }
   }
 
@@ -3015,6 +3865,7 @@ impl RegistrationEngine {
       plan_type: String::new(),
       cdk: String::new(),
       base_email: String::new(),
+      phone_number: String::new(),
       status: super::types::AccountInventoryStatus::Available,
       note: String::new(),
       exported_at: None,

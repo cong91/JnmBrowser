@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuFolderOpen, LuRocket } from "react-icons/lu";
 import { toast } from "sonner";
+import { CdkInventoryTable } from "@/components/cdk-inventory-table";
 import { RegisteredAccountsTable } from "@/components/registered-accounts-table";
 import { RegistrationProgressCard } from "@/components/registration-progress-card";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ import {
   type NetworkMode,
   useRegistrationEvents,
 } from "@/hooks/use-registration-events";
+import { useVpnEvents } from "@/hooks/use-vpn-events";
 
 interface Props {
   open: boolean;
@@ -39,24 +41,35 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   const {
     progressMap,
     accounts,
+    cdkInventory,
     loading,
     startRegistration,
     cancelRegistration,
     refreshAccounts,
+    refreshCdkInventory,
     deleteAccount,
+    deleteCdkRecord,
     updateAccountStatus,
   } = useRegistrationEvents();
+  const { vpnConfigs, isLoading: isLoadingVpns } = useVpnEvents();
 
   const [cdkText, setCdkText] = useState("");
   const [proxyId, setProxyId] = useState("");
+  const [vpnId, setVpnId] = useState("");
   const [browserType, setBrowserType] = useState("chromium");
   const [maxRetries, setMaxRetries] = useState(3);
   const [accountsPerCdk, setAccountsPerCdk] = useState(1);
+  const [concurrency, setConcurrency] = useState(1);
   const [headless, setHeadless] = useState(false);
   const [networkMode, setNetworkMode] = useState<NetworkMode>("none");
   const [rotateEveryN, setRotateEveryN] = useState(1);
   const [nordGroup, setNordGroup] = useState("Japan");
   const [nordServerName, setNordServerName] = useState("");
+  const [smsEnabled, setSmsEnabled] = useState(false);
+  const [smsServiceId, setSmsServiceId] = useState("");
+  const [smsNetwork, setSmsNetwork] = useState("");
+  const [smsCountry, setSmsCountry] = useState("vn");
+  const [smsTokenOverride, setSmsTokenOverride] = useState("");
   const [activeTab, setActiveTab] = useState("register");
 
   const nordLocations = [
@@ -71,6 +84,21 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   ] as const;
 
   const progressList = Array.from(progressMap.values());
+
+  // Prefer WireGuard inventory created from Nord Access Token; CLI is backup only.
+  useEffect(() => {
+    if (!open) return;
+    const nordVpns = vpnConfigs.filter(
+      (v) => v.source === "nord" || v.name.startsWith("Nord ·"),
+    );
+    if (nordVpns.length === 0) return;
+    if (networkMode === "none" || networkMode === "nord") {
+      setNetworkMode("vpn");
+    }
+    if (!vpnId || !vpnConfigs.some((v) => v.id === vpnId)) {
+      setVpnId(nordVpns[0].id);
+    }
+  }, [open, vpnConfigs, networkMode, vpnId]);
 
   const parseCdks = (text: string): string[] =>
     text
@@ -90,21 +118,59 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       return;
     }
 
+    if (networkMode === "vpn" && !vpnId.trim()) {
+      toast.error(t("registration.vpnRequired"));
+      return;
+    }
+
+    if (smsEnabled && !smsServiceId.trim()) {
+      toast.error(t("registration.smsServiceIdRequired"));
+      return;
+    }
+
     await startRegistration({
       cdks,
       browserType,
       proxyId:
         networkMode === "proxy" ? proxyId.trim() || undefined : undefined,
+      vpnId: networkMode === "vpn" ? vpnId.trim() || undefined : undefined,
       maxRetries,
       accountsPerCdk,
       headless,
-      concurrency: 1,
+      concurrency:
+        networkMode === "nord"
+          ? 1
+          : networkMode === "vpn"
+            ? Math.min(
+                6,
+                Math.max(
+                  1,
+                  vpnConfigs.find((v) => v.id === vpnId)?.max_sessions ?? 6,
+                ),
+              )
+            : Math.min(8, Math.max(1, concurrency)),
+      nordMaxSessions:
+        networkMode === "vpn"
+          ? Math.min(
+              6,
+              Math.max(
+                1,
+                vpnConfigs.find((v) => v.id === vpnId)?.max_sessions ?? 6,
+              ),
+            )
+          : undefined,
       networkMode,
-      rotateEveryN: networkMode === "nord" ? rotateEveryN : 0,
+      rotateEveryN:
+        networkMode === "nord" || networkMode === "vpn" ? rotateEveryN : 0,
       nordGroup:
         networkMode === "nord" ? nordGroup.trim() || undefined : undefined,
       nordServerName:
         networkMode === "nord" ? nordServerName.trim() || undefined : undefined,
+      smsProvider: smsEnabled ? "viotp" : undefined,
+      smsServiceId: smsEnabled ? Number(smsServiceId) || undefined : undefined,
+      smsNetwork: smsEnabled ? smsNetwork.trim() || undefined : undefined,
+      smsCountry: smsEnabled ? smsCountry : undefined,
+      smsToken: smsEnabled ? smsTokenOverride.trim() || undefined : undefined,
     });
     setActiveTab("progress");
   };
@@ -118,7 +184,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className={
-          activeTab === "stored"
+          activeTab === "stored" || activeTab === "cdks"
             ? "flex max-h-[90vh] max-w-6xl flex-col overflow-hidden"
             : "flex max-h-[85vh] max-w-2xl flex-col overflow-hidden"
         }
@@ -135,7 +201,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
           onValueChange={setActiveTab}
           className="flex min-h-0 flex-1 flex-col"
         >
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="register">
               {t("registration.newRegistration")}
             </TabsTrigger>
@@ -152,6 +218,14 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               {accounts.length > 0 && (
                 <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
                   {accounts.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="cdks" className="gap-1.5">
+              {t("registration.cdkInventoryTab")}
+              {cdkInventory.length > 0 && (
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                  {cdkInventory.length}
                 </span>
               )}
             </TabsTrigger>
@@ -223,6 +297,9 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                     <SelectItem value="proxy">
                       {t("registration.networkModeProxy")}
                     </SelectItem>
+                    <SelectItem value="vpn">
+                      {t("registration.networkModeVpn")}
+                    </SelectItem>
                     <SelectItem value="nord">
                       {t("registration.networkModeNord")}
                     </SelectItem>
@@ -240,6 +317,59 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   value={proxyId}
                   onChange={(e) => setProxyId(e.target.value)}
                 />
+              </div>
+            )}
+
+            {networkMode === "vpn" && (
+              <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+                <div className="space-y-2">
+                  <Label htmlFor="vpnId">{t("registration.vpn")}</Label>
+                  <Select
+                    value={vpnId || undefined}
+                    onValueChange={setVpnId}
+                    disabled={isLoadingVpns || vpnConfigs.length === 0}
+                  >
+                    <SelectTrigger id="vpnId">
+                      <SelectValue
+                        placeholder={
+                          isLoadingVpns
+                            ? t("registration.vpnLoading")
+                            : vpnConfigs.length === 0
+                              ? t("registration.vpnEmpty")
+                              : t("registration.vpnPlaceholder")
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {vpnConfigs.map((vpn) => (
+                        <SelectItem key={vpn.id} value={vpn.id}>
+                          {vpn.name} ({vpn.vpn_type})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {t("registration.vpnPerProfileHint")}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="vpnRotateEveryN">
+                    {t("registration.rotateEveryN")}
+                  </Label>
+                  <Input
+                    id="vpnRotateEveryN"
+                    type="number"
+                    min={0}
+                    max={50}
+                    value={rotateEveryN}
+                    onChange={(e) =>
+                      setRotateEveryN(Number(e.target.value) || 0)
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("registration.vpnRotateHint")}
+                  </p>
+                </div>
               </div>
             )}
 
@@ -334,7 +464,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               </div>
             )}
 
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
               <div className="space-y-2">
                 <Label htmlFor="retries">{t("registration.maxRetries")}</Label>
                 <Input
@@ -361,6 +491,45 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                 />
               </div>
 
+              <div className="space-y-2">
+                <Label htmlFor="concurrency">
+                  {t("registration.concurrency")}
+                </Label>
+                <Input
+                  id="concurrency"
+                  type="number"
+                  min={1}
+                  max={8}
+                  disabled={networkMode === "nord" || networkMode === "vpn"}
+                  value={
+                    networkMode === "nord"
+                      ? 1
+                      : networkMode === "vpn"
+                        ? Math.min(
+                            6,
+                            Math.max(
+                              1,
+                              vpnConfigs.find((v) => v.id === vpnId)
+                                ?.max_sessions ?? 6,
+                            ),
+                          )
+                        : concurrency
+                  }
+                  onChange={(e) =>
+                    setConcurrency(
+                      Math.min(8, Math.max(1, Number(e.target.value) || 1)),
+                    )
+                  }
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  {networkMode === "nord"
+                    ? t("registration.concurrencyNordHint")
+                    : networkMode === "vpn"
+                      ? t("registration.concurrencyVpnAutoHint")
+                      : t("registration.concurrencyHint")}
+                </p>
+              </div>
+
               <div className="flex items-end pb-2">
                 <div className="flex h-9 items-center gap-2 text-sm">
                   <input
@@ -378,6 +547,80 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   </Label>
                 </div>
               </div>
+            </div>
+
+            <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+              <div className="flex h-9 items-center gap-2 text-sm">
+                <input
+                  id="smsEnabled"
+                  type="checkbox"
+                  checked={smsEnabled}
+                  onChange={(e) => setSmsEnabled(e.target.checked)}
+                  className="h-4 w-4 rounded border-border"
+                />
+                <Label
+                  htmlFor="smsEnabled"
+                  className="cursor-pointer font-normal"
+                >
+                  {t("registration.smsEnable")}
+                </Label>
+              </div>
+              {smsEnabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="smsServiceId">
+                      {t("registration.smsServiceId")}
+                    </Label>
+                    <Input
+                      id="smsServiceId"
+                      type="number"
+                      min={1}
+                      placeholder={t("registration.smsServiceIdPlaceholder")}
+                      value={smsServiceId}
+                      onChange={(e) => setSmsServiceId(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="smsCountry">
+                      {t("registration.smsCountry")}
+                    </Label>
+                    <Select value={smsCountry} onValueChange={setSmsCountry}>
+                      <SelectTrigger id="smsCountry">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="vn">{t("sms.countryVn")}</SelectItem>
+                        <SelectItem value="la">{t("sms.countryLa")}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2 col-span-2">
+                    <Label htmlFor="smsNetwork">
+                      {t("registration.smsNetwork")}
+                    </Label>
+                    <Input
+                      id="smsNetwork"
+                      placeholder={t("registration.smsNetworkPlaceholder")}
+                      value={smsNetwork}
+                      onChange={(e) => setSmsNetwork(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2 col-span-2">
+                    <Label htmlFor="smsTokenOverride">
+                      {t("registration.smsTokenOverride")}
+                    </Label>
+                    <Input
+                      id="smsTokenOverride"
+                      type="password"
+                      placeholder={t(
+                        "registration.smsTokenOverridePlaceholder",
+                      )}
+                      value={smsTokenOverride}
+                      onChange={(e) => setSmsTokenOverride(e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             <Button
@@ -427,6 +670,17 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               onDelete={handleDelete}
               onRefresh={refreshAccounts}
               onUpdateStatus={updateAccountStatus}
+            />
+          </TabsContent>
+
+          <TabsContent
+            value="cdks"
+            className="mt-4 min-h-0 flex-1 overflow-auto"
+          >
+            <CdkInventoryTable
+              records={cdkInventory}
+              onRefresh={refreshCdkInventory}
+              onDelete={deleteCdkRecord}
             />
           </TabsContent>
         </Tabs>

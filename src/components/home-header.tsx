@@ -6,10 +6,12 @@ import { GoGear, GoKebabHorizontal, GoPlus } from "react-icons/go";
 import {
   LuCircle,
   LuCloud,
+  LuLogIn,
   LuPlug,
   LuPuzzle,
   LuRocket,
   LuSearch,
+  LuSmartphone,
   LuUsers,
   LuX,
 } from "react-icons/lu";
@@ -178,7 +180,9 @@ interface Props {
   onIntegrationsDialogOpen: (open: boolean) => void;
   onExtensionManagementDialogOpen: (open: boolean) => void;
   onAutoRegisterDialogOpen: (open: boolean) => void;
+  onAutoLoginDialogOpen: (open: boolean) => void;
   onRecordingsDialogOpen: (open: boolean) => void;
+  onSmsDialogOpen: (open: boolean) => void;
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
 }
@@ -193,7 +197,9 @@ const HomeHeader = ({
   onIntegrationsDialogOpen,
   onExtensionManagementDialogOpen,
   onAutoRegisterDialogOpen,
+  onAutoLoginDialogOpen,
   onRecordingsDialogOpen,
+  onSmsDialogOpen,
   searchQuery,
   onSearchQueryChange,
 }: Props) => {
@@ -296,6 +302,22 @@ const HomeHeader = ({
             >
               <LuRocket className="mr-2 w-4 h-4" />
               {t("header.menu.autoRegister")}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                onAutoLoginDialogOpen(true);
+              }}
+            >
+              <LuLogIn className="mr-2 w-4 h-4" />
+              {t("header.menu.autoLogin")}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                onSmsDialogOpen(true);
+              }}
+            >
+              <LuSmartphone className="mr-2 w-4 h-4" />
+              {t("header.menu.smsVerification")}
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {

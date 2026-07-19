@@ -402,6 +402,41 @@ impl CamoufoxConfigBuilder {
     );
     config.insert("canvas:aaCapOffset".to_string(), serde_json::json!(true));
 
+    // CSS Media Query defaults (can be overridden by extra_config)
+    if !config.contains_key("media:prefersColorScheme") {
+      config.insert(
+        "media:prefersColorScheme".to_string(),
+        serde_json::json!("light"),
+      );
+    }
+    if !config.contains_key("media:prefersReducedMotion") {
+      config.insert(
+        "media:prefersReducedMotion".to_string(),
+        serde_json::json!("no-preference"),
+      );
+    }
+    if !config.contains_key("media:prefersContrast") {
+      config.insert(
+        "media:prefersContrast".to_string(),
+        serde_json::json!("no-preference"),
+      );
+    }
+    if !config.contains_key("media:prefersReducedData") {
+      config.insert(
+        "media:prefersReducedData".to_string(),
+        serde_json::json!("no-preference"),
+      );
+    }
+    if !config.contains_key("media:anyHover") {
+      config.insert("media:anyHover".to_string(), serde_json::json!("hover"));
+    }
+    if !config.contains_key("media:anyPointer") {
+      config.insert("media:anyPointer".to_string(), serde_json::json!("fine"));
+    }
+    if !config.contains_key("media:colorGamut") {
+      config.insert("media:colorGamut".to_string(), serde_json::json!("srgb"));
+    }
+
     // Add extra config (user-provided)
     for (key, value) in self.extra_config {
       config.insert(key, value);

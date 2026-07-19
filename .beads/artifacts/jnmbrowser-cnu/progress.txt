@@ -1,0 +1,22 @@
+# Progress Log
+
+Bead: jnmbrowser-cnu
+Started: 2026-07-19
+
+## Codebase Patterns
+
+- Mirror `src/components/registered-accounts-table.tsx` for selection/status/export resolution.
+- Login export backend: `export_login_results_json` in `src-tauri/src/auto_service/openai/login/store.rs` (Sub2API envelope already correct).
+- Login statuses: available | exported | used | invalid (not sold/reserved).
+- Default export (no selection): success + token + available only.
+- Mark exported only after successful writeTextFile.
+
+---
+
+<!-- Task logs below - APPEND ONLY -->
+
+## 2026-07-19 ship
+- backend-1: default empty-id export excludes status=exported; explicit ids allow re-export. Tests: store::tests 4 passed.
+- frontend-1/2/3: login-accounts-table wired into Stored tab; mark exported only after writeTextFile; cancel save leaves status.
+- i18n-1: inventory keys in en/es/fr/ja/pt/ru/zh.
+- Verify: tsc clean; biome clean; cargo test store::tests 4 passed.

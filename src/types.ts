@@ -368,6 +368,15 @@ export interface CamoufoxFingerprintConfig {
   certificates?: string[];
   debug?: boolean;
   pdfViewerEnabled?: boolean;
+
+  // CSS Media Queries
+  "media:prefersColorScheme"?: "light" | "dark";
+  "media:prefersReducedMotion"?: "reduce" | "no-preference";
+  "media:prefersContrast"?: "no-preference" | "more" | "less";
+  "media:prefersReducedData"?: "reduce" | "no-preference";
+  "media:anyHover"?: "hover" | "none";
+  "media:anyPointer"?: "fine" | "coarse";
+  "media:colorGamut"?: "srgb" | "p3" | "rec2020";
 }
 
 export interface CamoufoxLaunchResult {
@@ -749,6 +758,7 @@ export type ProxyParseResult =
 
 // VPN types
 export type VpnType = "WireGuard";
+export type VpnCreateSource = "wireguard" | "nord";
 
 export interface VpnConfig {
   id: string;
@@ -759,6 +769,30 @@ export interface VpnConfig {
   last_used?: number;
   sync_enabled?: boolean;
   last_sync?: number;
+  /** "nord" when created via Access Token */
+  source?: string;
+  /** Auto-detected simultaneous session budget (Nord) */
+  max_sessions?: number;
+}
+
+export interface NordCountry {
+  id: number;
+  name: string;
+  code: string;
+}
+
+export interface NordWireGuardServer {
+  name: string;
+  hostname: string;
+  station: string;
+  load: number;
+  public_key: string;
+  country_code?: string;
+  country_name?: string;
+}
+
+export interface NordWireGuardCredentials {
+  nordlynx_private_key: string;
 }
 
 export interface VpnImportResult {
@@ -776,4 +810,57 @@ export interface VpnStatus {
   bytes_sent?: number;
   bytes_received?: number;
   last_handshake?: number;
+}
+
+// SMS / phone OTP types (provider-agnostic; first impl = VI-OTP)
+export interface SmsNetwork {
+  id: number;
+  name: string;
+}
+
+export interface SmsServiceInfo {
+  id: number;
+  name: string;
+  price: number;
+}
+
+export interface SmsNumberInfo {
+  phoneNumber: string;
+  rePhoneNumber?: string | null;
+  requestId: string;
+  balance?: number | null;
+  countryIso?: string | null;
+  countryCode?: string | null;
+}
+
+export interface SmsOtpInfo {
+  requestId: string;
+  phone: string;
+  code?: string | null;
+  smsContent?: string | null;
+  /** 0 = waiting, 1 = completed, 2 = expired */
+  status: number;
+  serviceId?: number | null;
+  serviceName?: string | null;
+  isSound: boolean;
+  phoneOriginal?: string | null;
+  countryIso?: string | null;
+  countryCode?: string | null;
+  createdTime?: string | null;
+}
+
+export interface SmsHistoryEntry {
+  id: string;
+  serviceId?: number | null;
+  serviceName?: string | null;
+  status: number;
+  price?: number | null;
+  phone: string;
+  code?: string | null;
+  smsContent?: string | null;
+  isSound: boolean;
+  phoneOriginal?: string | null;
+  countryIso?: string | null;
+  countryCode?: string | null;
+  createdTime?: string | null;
 }

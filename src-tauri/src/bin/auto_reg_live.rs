@@ -13,8 +13,8 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use donutbrowser_lib::auto_register::types::NetworkMode;
-use donutbrowser_lib::auto_register::{RegistrationConfig, RegistrationEngine};
+use donutbrowser_lib::auto_service::openai::register::types::NetworkMode;
+use donutbrowser_lib::auto_service::openai::register::{RegistrationConfig, RegistrationEngine};
 use donutbrowser_lib::email::gmail_cdk::GmailCdkService;
 
 struct LiveArgs {
@@ -27,12 +27,14 @@ struct LiveArgs {
   rotate_every_n: u32,
   nord_group: Option<String>,
   nord_server_name: Option<String>,
+  vpn_id: Option<String>,
 }
 
 fn parse_network_mode(s: &str) -> NetworkMode {
   match s.trim().to_ascii_lowercase().as_str() {
     "proxy" => NetworkMode::Proxy,
-    "nord" | "nordvpn" => NetworkMode::Nord,
+    "vpn" | "wireguard" | "wg" => NetworkMode::Vpn,
+    "nord" | "nordvpn" | "nord-cli" => NetworkMode::Nord,
     _ => NetworkMode::None,
   }
 }
@@ -47,6 +49,7 @@ fn parse_args() -> LiveArgs {
   let mut rotate_every_n = 0u32;
   let mut nord_group = std::env::var("AUTO_REG_NORD_GROUP").ok();
   let mut nord_server_name = std::env::var("AUTO_REG_NORD_SERVER").ok();
+  let mut vpn_id = std::env::var("AUTO_REG_VPN_ID").ok();
 
   if let Ok(m) = std::env::var("AUTO_REG_NETWORK") {
     network_mode = parse_network_mode(&m);
@@ -87,6 +90,7 @@ fn parse_args() -> LiveArgs {
       }
       "--nord-group" => nord_group = args.next(),
       "--nord-server" => nord_server_name = args.next(),
+      "--vpn-id" => vpn_id = args.next(),
       other if other.starts_with("--cdk=") => {
         cdk = other.trim_start_matches("--cdk=").to_string();
       }
@@ -117,6 +121,9 @@ fn parse_args() -> LiveArgs {
       other if other.starts_with("--nord-server=") => {
         nord_server_name = Some(other.trim_start_matches("--nord-server=").to_string());
       }
+      other if other.starts_with("--vpn-id=") => {
+        vpn_id = Some(other.trim_start_matches("--vpn-id=").to_string());
+      }
       _ => {}
     }
   }
@@ -124,7 +131,7 @@ fn parse_args() -> LiveArgs {
   if cdk.is_empty() {
     eprintln!(
       "Usage: auto-reg-live --cdk GMAIL-XXXX [--browser camoufox] [--profile-id UUID] \
-       [--network none|proxy|nord] [--rotate-every N] [--accounts-per-cdk N] \
+       [--network none|proxy|vpn|nord] [--vpn-id ID] [--rotate-every N] [--accounts-per-cdk N] \
        [--nord-group \"United States\"]"
     );
     std::process::exit(2);
@@ -140,6 +147,7 @@ fn parse_args() -> LiveArgs {
     rotate_every_n,
     nord_group,
     nord_server_name,
+    vpn_id,
   }
 }
 
@@ -170,16 +178,23 @@ fn main() {
             cdks: vec![args.cdk],
             profile_id: args.profile_id,
             proxy_id: None,
+            vpn_id: args.vpn_id,
             browser_type: args.browser,
             max_retries: args.max_retries,
             accounts_per_cdk: args.accounts_per_cdk.max(1),
             headless: false,
             concurrency: 1,
+            nord_max_sessions: 6,
             network_mode: args.network_mode,
             rotate_every_n: args.rotate_every_n,
             nord_group: args.nord_group,
             nord_server_name: args.nord_server_name,
             nord_cli_path: None,
+            sms_provider: None,
+            sms_token: None,
+            sms_service_id: None,
+            sms_network: None,
+            sms_country: None,
           };
           config.normalize_network();
           if let Err(e) = config.validate_network() {
@@ -194,7 +209,7 @@ fn main() {
           let cancel = Arc::new(AtomicBool::new(false));
           let mut engine = RegistrationEngine::with_cancel_flag(config, cancel);
           let email = GmailCdkService::new();
-          engine.run(handle, &email).await
+          engine.run(handle, &email, None).await
         });
 
         eprintln!("=== RESULT ===");

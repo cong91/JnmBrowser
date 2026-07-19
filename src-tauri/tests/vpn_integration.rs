@@ -135,6 +135,9 @@ fn test_vpn_storage_save_and_load() {
     last_used: None,
     sync_enabled: false,
     last_sync: None,
+
+    source: None,
+    max_sessions: None,
   };
 
   let save_result = storage.save_config(&config);
@@ -174,6 +177,9 @@ fn test_vpn_storage_list() {
       last_used: None,
       sync_enabled: false,
       last_sync: None,
+
+      source: None,
+      max_sessions: None,
     };
     storage.save_config(&config).unwrap();
   }
@@ -201,6 +207,9 @@ fn test_vpn_storage_delete() {
     last_used: None,
     sync_enabled: false,
     last_sync: None,
+
+    source: None,
+    max_sessions: None,
   };
 
   storage.save_config(&config).unwrap();
@@ -489,6 +498,8 @@ fn new_test_vpn_config(name: &str, vpn_type: VpnType, config_data: String) -> Vp
     last_used: None,
     sync_enabled: false,
     last_sync: None,
+    source: None,
+    max_sessions: None,
   }
 }
 

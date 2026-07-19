@@ -3,12 +3,17 @@ use std::sync::Arc;
 
 use super::engine::RegistrationEngine;
 use super::store::{
-  delete_registered_account, list_registered_accounts, update_registered_account_note,
-  update_registered_account_status,
+  delete_cdk_inventory, delete_registered_account, list_cdk_inventory, list_registered_accounts,
+  update_registered_account_note, update_registered_account_status,
 };
 use super::task;
-use super::types::{AccountInventoryStatus, RegistrationConfig, RegistrationResult};
+use super::types::{
+  AccountInventoryStatus, CdkInventoryRecord, RegistrationConfig, RegistrationResult,
+};
 use crate::email::gmail_cdk::GmailCdkService;
+use crate::settings_manager::SettingsManager;
+use crate::sms::viotp::ViotpService;
+use crate::sms::SmsService;
 
 /// Start a new auto-registration task. Returns the task_id.
 #[tauri::command]
@@ -20,6 +25,24 @@ pub async fn start_auto_registration(
   config.normalize_network();
   config.validate_network()?;
 
+  // Resolve SMS token: config override → encrypted settings store.
+  let mut sms_token = config
+    .sms_token
+    .clone()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty());
+  if sms_token.is_none() {
+    let manager = SettingsManager::instance();
+    sms_token = manager
+      .get_sms_api_token(&app_handle)
+      .await
+      .ok()
+      .flatten()
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty());
+  }
+  config.sms_token = sms_token.clone();
+
   let cancel_flag = Arc::new(AtomicBool::new(false));
   let cancel_flag_clone = cancel_flag.clone();
 
@@ -29,7 +52,9 @@ pub async fn start_auto_registration(
   let join_handle = tokio::task::spawn_blocking(move || {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let email_service = GmailCdkService::new();
-    rt.block_on(async { engine.run(app_handle, &email_service).await })
+    let viotp = sms_token.map(ViotpService::new);
+    let sms_ref: Option<&dyn SmsService> = viotp.as_ref().map(|s| s as &dyn SmsService);
+    rt.block_on(async { engine.run(app_handle, &email_service, sms_ref).await })
   });
 
   task::register_task(
@@ -88,6 +113,22 @@ pub fn update_registered_account_note_cmd(account_id: String, note: String) -> R
     Ok(())
   } else {
     Err(format!("Account {account_id} not found"))
+  }
+}
+
+/// List CDK inventory stats (free-trial yes/no counts per CDK).
+#[tauri::command]
+pub fn list_cdk_inventory_cmd() -> Result<Vec<CdkInventoryRecord>, String> {
+  Ok(list_cdk_inventory())
+}
+
+/// Delete a CDK inventory row.
+#[tauri::command]
+pub fn delete_cdk_inventory_cmd(cdk: String) -> Result<(), String> {
+  if delete_cdk_inventory(&cdk) {
+    Ok(())
+  } else {
+    Err(format!("CDK {cdk} not found in inventory"))
   }
 }
 

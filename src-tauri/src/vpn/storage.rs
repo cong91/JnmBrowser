@@ -36,6 +36,10 @@ struct StoredVpnConfig {
   sync_enabled: bool,
   #[serde(default)]
   last_sync: Option<u64>,
+  #[serde(default)]
+  source: Option<String>,
+  #[serde(default)]
+  max_sessions: Option<u32>,
 }
 
 /// VPN storage manager with encryption
@@ -247,6 +251,8 @@ impl VpnStorage {
       last_used: config.last_used,
       sync_enabled: config.sync_enabled,
       last_sync: config.last_sync,
+      source: config.source.clone(),
+      max_sessions: config.max_sessions,
     };
 
     // Update existing or add new
@@ -280,6 +286,8 @@ impl VpnStorage {
       last_used: stored.last_used,
       sync_enabled: stored.sync_enabled,
       last_sync: stored.last_sync,
+      source: stored.source.clone(),
+      max_sessions: stored.max_sessions,
     })
   }
 
@@ -300,6 +308,8 @@ impl VpnStorage {
           last_used: stored.last_used,
           sync_enabled: stored.sync_enabled,
           last_sync: stored.last_sync,
+          source: stored.source.clone(),
+          max_sessions: stored.max_sessions,
         })
         .collect(),
     )
@@ -356,6 +366,9 @@ impl VpnStorage {
       last_used: None,
       sync_enabled,
       last_sync: None,
+
+      source: None,
+      max_sessions: None,
     };
 
     self.save_config(&config)?;
@@ -363,10 +376,70 @@ impl VpnStorage {
     Ok(config)
   }
 
+  /// Create a non-synced WireGuard config for auto-reg peer pools (cleaned up after batch).
+  pub fn create_ephemeral_wireguard(
+    &self,
+    name: &str,
+    config_data: &str,
+  ) -> Result<VpnConfig, VpnError> {
+    super::parse_wireguard_config(config_data)?;
+
+    let config = VpnConfig {
+      id: Uuid::new_v4().to_string(),
+      name: name.to_string(),
+      vpn_type: VpnType::WireGuard,
+      config_data: config_data.to_string(),
+      created_at: Utc::now().timestamp(),
+      last_used: None,
+      sync_enabled: false,
+      last_sync: None,
+      source: Some("nord-ephemeral".into()),
+      max_sessions: None,
+    };
+
+    self.save_config(&config)?;
+    Ok(config)
+  }
+
+  /// Update metadata fields without rewriting config body.
+  pub fn update_config_meta(
+    &self,
+    id: &str,
+    source: Option<String>,
+    max_sessions: Option<u32>,
+  ) -> Result<VpnConfig, VpnError> {
+    let mut config = self.load_config(id)?;
+    if source.is_some() {
+      config.source = source;
+    }
+    if max_sessions.is_some() {
+      config.max_sessions = max_sessions;
+    }
+    self.save_config(&config)?;
+    Ok(config)
+  }
+
   /// Update the name of an existing VPN config
   pub fn update_config_name(&self, id: &str, new_name: &str) -> Result<VpnConfig, VpnError> {
     let mut config = self.load_config(id)?;
     config.name = new_name.to_string();
+    self.save_config(&config)?;
+    Ok(config)
+  }
+
+  /// Replace encrypted WireGuard config body (e.g. peer rotate) and optional display name.
+  pub fn update_config_data(
+    &self,
+    id: &str,
+    config_data: &str,
+    new_name: Option<&str>,
+  ) -> Result<VpnConfig, VpnError> {
+    super::parse_wireguard_config(config_data)?;
+    let mut config = self.load_config(id)?;
+    config.config_data = config_data.to_string();
+    if let Some(name) = new_name.map(str::trim).filter(|s| !s.is_empty()) {
+      config.name = name.to_string();
+    }
     self.save_config(&config)?;
     Ok(config)
   }
@@ -418,6 +491,8 @@ impl VpnStorage {
       config_data: content.to_string(),
       created_at: Utc::now().timestamp(),
       last_used: None,
+      source: None,
+      max_sessions: None,
       sync_enabled,
       last_sync: None,
     };
@@ -463,6 +538,9 @@ mod tests {
       last_used: None,
       sync_enabled: false,
       last_sync: None,
+
+      source: None,
+      max_sessions: None,
     };
 
     storage.save_config(&config).unwrap();
@@ -487,6 +565,9 @@ mod tests {
       last_used: None,
       sync_enabled: false,
       last_sync: None,
+
+      source: None,
+      max_sessions: None,
     };
 
     let config2 = VpnConfig {
@@ -498,6 +579,9 @@ mod tests {
       last_used: Some(3000),
       sync_enabled: false,
       last_sync: None,
+
+      source: None,
+      max_sessions: None,
     };
 
     storage.save_config(&config1).unwrap();
@@ -524,6 +608,9 @@ mod tests {
       last_used: None,
       sync_enabled: false,
       last_sync: None,
+
+      source: None,
+      max_sessions: None,
     };
 
     storage.save_config(&config).unwrap();

@@ -52,6 +52,12 @@ pub struct VpnConfig {
   pub sync_enabled: bool,
   #[serde(default)]
   pub last_sync: Option<u64>,
+  /// Origin of this config, e.g. `"nord"` for Access-Token created WireGuard.
+  #[serde(default)]
+  pub source: Option<String>,
+  /// Detected simultaneous session budget (Nord plan). Used to auto-size auto-reg concurrency.
+  #[serde(default)]
+  pub max_sessions: Option<u32>,
 }
 
 /// Parsed WireGuard configuration

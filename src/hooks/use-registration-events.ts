@@ -13,22 +13,35 @@ export interface RegistrationProgress {
   result?: RegistrationResult | null;
 }
 
-export type NetworkMode = "none" | "proxy" | "nord";
+export type NetworkMode = "none" | "proxy" | "vpn" | "nord";
 
 export interface RegistrationConfig {
   cdks: string[];
   profileId?: string;
   proxyId?: string;
+  /** WireGuard VPN config id from Proxies & VPNs (preferred over Nord CLI) */
+  vpnId?: string;
   browserType: string;
   maxRetries: number;
   accountsPerCdk: number;
   headless: boolean;
   concurrency: number;
+  /** Nord simultaneous WG session budget (caps VPN concurrency; not CDK count) */
+  nordMaxSessions?: number;
   networkMode?: NetworkMode;
   rotateEveryN?: number;
   nordGroup?: string;
   nordServerName?: string;
   nordCliPath?: string;
+  /** SMS provider id, e.g. "viotp" */
+  smsProvider?: string;
+  /** Optional override; otherwise encrypted settings token is used */
+  smsToken?: string;
+  smsServiceId?: number;
+  /** Pipe-separated carriers, e.g. "VIETTEL|MOBIFONE" */
+  smsNetwork?: string;
+  /** "vn" | "la" */
+  smsCountry?: string;
 }
 
 export type AccountInventoryStatus =
@@ -54,10 +67,37 @@ export interface RegistrationResult {
   planType?: string;
   cdk: string;
   baseEmail: string;
+  phoneNumber?: string;
   status?: AccountInventoryStatus;
   note?: string;
   exportedAt?: string | null;
   soldAt?: string | null;
+}
+
+export interface CdkAccountEntry {
+  email: string;
+  accountId?: string;
+  success: boolean;
+  freeTrialEligible: boolean;
+  planType?: string;
+  errorMessage?: string;
+  createdAt: string;
+}
+
+export interface CdkInventoryRecord {
+  cdk: string;
+  baseEmail: string;
+  targetAccounts: number;
+  attempted: number;
+  freeTrialYes: number;
+  freeTrialNo: number;
+  failed: number;
+  status: string;
+  lastError: string;
+  accounts: CdkAccountEntry[];
+  createdAt: string;
+  updatedAt: string;
+  taskId: string;
 }
 
 export function useRegistrationEvents() {
@@ -65,6 +105,7 @@ export function useRegistrationEvents() {
     Map<string, RegistrationProgress>
   >(new Map());
   const [accounts, setAccounts] = useState<RegistrationResult[]>([]);
+  const [cdkInventory, setCdkInventory] = useState<CdkInventoryRecord[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -79,10 +120,13 @@ export function useRegistrationEvents() {
             next.set(event.payload.taskId, event.payload);
             return next;
           });
-          // Refresh inventory when a registration completes with a result.
+          // Refresh inventories when a registration emits a result.
           if (event.payload.result) {
             void invoke<RegistrationResult[]>("list_registered_accounts_cmd")
               .then(setAccounts)
+              .catch(() => {});
+            void invoke<CdkInventoryRecord[]>("list_cdk_inventory_cmd")
+              .then(setCdkInventory)
               .catch(() => {});
           }
         },
@@ -126,8 +170,21 @@ export function useRegistrationEvents() {
     }
   }, []);
 
+  const refreshCdkInventory = useCallback(async () => {
+    try {
+      const list = await invoke<CdkInventoryRecord[]>("list_cdk_inventory_cmd");
+      setCdkInventory(list);
+    } catch {
+      // Silently fail — inventory may not be available yet
+    }
+  }, []);
+
   const deleteAccount = useCallback(async (accountId: string) => {
     await invoke("delete_registered_account_cmd", { accountId });
+  }, []);
+
+  const deleteCdkRecord = useCallback(async (cdk: string) => {
+    await invoke("delete_cdk_inventory_cmd", { cdk });
   }, []);
 
   const updateAccountStatus = useCallback(
@@ -155,17 +212,21 @@ export function useRegistrationEvents() {
   );
 
   useEffect(() => {
-    refreshAccounts();
-  }, [refreshAccounts]);
+    void refreshAccounts();
+    void refreshCdkInventory();
+  }, [refreshAccounts, refreshCdkInventory]);
 
   return {
     progressMap,
     accounts,
+    cdkInventory,
     loading,
     startRegistration,
     cancelRegistration,
     refreshAccounts,
+    refreshCdkInventory,
     deleteAccount,
+    deleteCdkRecord,
     updateAccountStatus,
     updateAccountNote,
   };

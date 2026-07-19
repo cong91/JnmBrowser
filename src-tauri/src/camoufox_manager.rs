@@ -175,7 +175,10 @@ impl CamoufoxManager {
       entries.push(("timezone".to_string(), serialized));
     }
 
-    if entries.is_empty() {
+    // Build matchMedia overrides from media config keys
+    let match_media_js = Self::build_match_media_override(config);
+
+    if entries.is_empty() && match_media_js.is_none() {
       return None;
     }
 
@@ -189,8 +192,43 @@ impl CamoufoxManager {
       .collect::<Option<Vec<_>>>()?
       .join(",");
 
+    let match_media_block = match_media_js.unwrap_or_default();
+
     Some(format!(
-      r#"(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const overrides={{{overrides_object}}};const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};for(const [key,value] of Object.entries(overrides)){{if(key!=="timezone"){{overrideValue(key,value);}}}}const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(key!=="timezone"&&!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone"){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);if(typeof overrides.timezone==='string'&&overrides.timezone){{const OriginalDateTimeFormat=Intl.DateTimeFormat;const originalResolvedOptions=OriginalDateTimeFormat.prototype.resolvedOptions;Object.defineProperty(OriginalDateTimeFormat.prototype,'resolvedOptions',{{configurable:true,writable:true,value:function(...args){{const options=originalResolvedOptions.apply(this,args);return Object.assign({{}},options,{{timeZone:overrides.timezone}});}}}});Object.defineProperty(Intl,'DateTimeFormat',{{configurable:true,writable:true,value:function(...args){{return new OriginalDateTimeFormat(...args);}}}});Intl.DateTimeFormat.prototype=OriginalDateTimeFormat.prototype;}}return true;}})()"#
+      r#"(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const overrides={{{overrides_object}}};const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};for(const [key,value] of Object.entries(overrides)){{if(key!=="timezone"){{overrideValue(key,value);}}}}const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone")||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(key!=="timezone"&&!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)&&prop!=="timezone"){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);if(typeof overrides.timezone==='string'&&overrides.timezone){{const OriginalDateTimeFormat=Intl.DateTimeFormat;const originalResolvedOptions=OriginalDateTimeFormat.prototype.resolvedOptions;Object.defineProperty(OriginalDateTimeFormat.prototype,'resolvedOptions',{{configurable:true,writable:true,value:function(...args){{const options=originalResolvedOptions.apply(this,args);return Object.assign({{}},options,{{timeZone:overrides.timezone}});}}}});Object.defineProperty(Intl,'DateTimeFormat',{{configurable:true,writable:true,value:function(...args){{return new OriginalDateTimeFormat(...args);}}}});Intl.DateTimeFormat.prototype=OriginalDateTimeFormat.prototype;}}{match_media_block}return true;}})()"#
+    ))
+  }
+
+  /// Build a `matchMedia` override JS block from media query config keys.
+  fn build_match_media_override(config: &HashMap<String, serde_json::Value>) -> Option<String> {
+    // Map of config key → CSS media query feature name
+    let media_mappings: &[(&str, &str)] = &[
+      ("media:prefersColorScheme", "prefers-color-scheme"),
+      ("media:prefersReducedMotion", "prefers-reduced-motion"),
+      ("media:prefersContrast", "prefers-contrast"),
+      ("media:prefersReducedData", "prefers-reduced-data"),
+      ("media:anyHover", "any-hover"),
+      ("media:anyPointer", "any-pointer"),
+      ("media:colorGamut", "color-gamut"),
+    ];
+
+    let mut overrides = Vec::new();
+    for (config_key, feature_name) in media_mappings {
+      if let Some(value) = Self::config_string(config, &[config_key]) {
+        let serialized_name = serde_json::to_string(feature_name).ok()?;
+        let serialized_value = serde_json::to_string(&value).ok()?;
+        overrides.push(format!("[{serialized_name},{serialized_value}]"));
+      }
+    }
+
+    if overrides.is_empty() {
+      return None;
+    }
+
+    let overrides_array = overrides.join(",");
+
+    Some(format!(
+      r#";(function(){{const om=window.matchMedia.bind(window);const mv=[{overrides_array}];window.matchMedia=function(q){{for(const[f,v]of mv){{if(q.includes('('+f)){{const m=q.match(new RegExp('\\(\\s*'+f.replace(/[.*+?^${{}}()|[\]\\]/g,'\\\\$&')+'\\s*:\\s*([^)]+)\\s*\\)'));const qv=m?m[1].trim():null;const mql=om(q);if(qv!==null){{Object.defineProperty(mql,'matches',{{configurable:true,get:()=>qv===v}});}}Object.defineProperty(mql,'media',{{configurable:true,get:()=>q}});return mql;}}}}return om(q);}};}})()"#
     ))
   }
 

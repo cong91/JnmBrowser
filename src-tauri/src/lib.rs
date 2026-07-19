@@ -14,7 +14,7 @@ mod api_client;
 mod api_server;
 mod app_auto_updater;
 pub mod app_dirs;
-pub mod auto_register;
+pub mod auto_service;
 mod auto_updater;
 mod browser;
 pub mod browser_actions;
@@ -44,6 +44,7 @@ pub mod proxy_server;
 pub mod proxy_storage;
 pub mod recorder;
 mod settings_manager;
+pub mod sms;
 pub mod sync;
 mod synchronizer;
 pub mod traffic_stats;
@@ -91,9 +92,11 @@ use downloader::{cancel_download, download_browser};
 
 use settings_manager::{
   decline_launch_on_login, dismiss_window_resize_warning, enable_launch_on_login, get_app_settings,
-  get_sync_settings, get_system_info, get_system_language, get_table_sorting_settings,
-  get_window_resize_warning_dismissed, save_app_settings, save_sync_settings,
-  save_table_sorting_settings, should_show_launch_on_login_prompt,
+  get_nord_access_token, get_sms_api_token, get_sync_settings, get_system_info,
+  get_system_language, get_table_sorting_settings, get_window_resize_warning_dismissed,
+  remove_nord_access_token, remove_sms_api_token, save_app_settings, save_sync_settings,
+  save_table_sorting_settings, set_nord_access_token, set_sms_api_token,
+  should_show_launch_on_login_prompt,
 };
 
 use sync::{
@@ -1219,6 +1222,77 @@ async fn create_vpn_config_manual(
 }
 
 #[tauri::command]
+async fn fetch_nord_wireguard_credentials(
+  access_token: String,
+) -> Result<vpn::NordWireGuardCredentials, String> {
+  vpn::fetch_nord_wireguard_credentials(&access_token).await
+}
+
+#[tauri::command]
+async fn list_nord_countries() -> Result<Vec<vpn::NordCountry>, String> {
+  vpn::list_nord_countries().await
+}
+
+#[tauri::command]
+async fn list_nord_wireguard_servers(
+  country_id: Option<u32>,
+  limit: Option<u32>,
+) -> Result<Vec<vpn::NordWireGuardServer>, String> {
+  vpn::list_nord_wireguard_servers(country_id, limit).await
+}
+
+#[tauri::command]
+async fn create_vpn_from_nord_token(
+  app_handle: tauri::AppHandle,
+  access_token: String,
+  country_id: Option<u32>,
+  server_hostname: Option<String>,
+  name: Option<String>,
+) -> Result<vpn::VpnConfig, String> {
+  let credentials = vpn::fetch_nord_wireguard_credentials(&access_token).await?;
+  let max_sessions = vpn::detect_nord_max_sessions(&access_token).await;
+  let servers = vpn::list_nord_wireguard_servers(country_id, Some(30)).await?;
+  let server = vpn::pick_nord_server(servers.as_slice(), server_hostname.as_deref())?.clone();
+  let conf = vpn::build_nord_wireguard_conf(&credentials.nordlynx_private_key, &server);
+  vpn::validate_nord_wireguard_conf(&conf).map_err(|e| e.to_string())?;
+
+  let vpn_name = name
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| vpn::default_nord_vpn_name(&server));
+
+  // Persist token for auto-reg (user only pastes once when creating Nord VPN).
+  let _ = settings_manager::SettingsManager::instance()
+    .store_nord_access_token(&app_handle, access_token.trim())
+    .await;
+
+  let config = {
+    let storage = vpn::VPN_STORAGE
+      .lock()
+      .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+
+    let mut created = storage
+      .create_config_manual(&vpn_name, vpn::VpnType::WireGuard, &conf)
+      .map_err(|e| format!("Failed to create VPN config: {e}"))?;
+    created = storage
+      .update_config_meta(&created.id, Some("nord".to_string()), Some(max_sessions))
+      .map_err(|e| format!("Failed to store Nord session budget: {e}"))?;
+    created
+  };
+
+  if config.sync_enabled {
+    if let Some(scheduler) = sync::get_global_scheduler() {
+      let id = config.id.clone();
+      tauri::async_runtime::spawn(async move {
+        scheduler.queue_vpn_sync(id).await;
+      });
+    }
+  }
+
+  Ok(config)
+}
+
+#[tauri::command]
 async fn update_vpn_config(vpn_id: String, name: String) -> Result<vpn::VpnConfig, String> {
   let config = {
     let storage = vpn::VPN_STORAGE
@@ -2270,6 +2344,10 @@ pub fn run() {
       get_vpn_config,
       delete_vpn_config,
       create_vpn_config_manual,
+      fetch_nord_wireguard_credentials,
+      list_nord_countries,
+      list_nord_wireguard_servers,
+      create_vpn_from_nord_token,
       update_vpn_config,
       check_vpn_validity,
       connect_vpn,
@@ -2310,13 +2388,40 @@ pub fn run() {
       // DNS blocklist commands
       dns_blocklist::get_dns_blocklist_cache_status,
       dns_blocklist::refresh_dns_blocklists,
-      // Auto-registration commands
-      auto_register::commands::start_auto_registration,
-      auto_register::commands::cancel_registration,
-      auto_register::commands::list_registered_accounts_cmd,
-      auto_register::commands::delete_registered_account_cmd,
-      auto_register::commands::update_registered_account_status_cmd,
-      auto_register::commands::update_registered_account_note_cmd,
+      // OpenAI auto-registration (auto_service::openai::register)
+      auto_service::openai::register::commands::start_auto_registration,
+      auto_service::openai::register::commands::cancel_registration,
+      auto_service::openai::register::commands::list_registered_accounts_cmd,
+      auto_service::openai::register::commands::delete_registered_account_cmd,
+      auto_service::openai::register::commands::update_registered_account_status_cmd,
+      auto_service::openai::register::commands::update_registered_account_note_cmd,
+      auto_service::openai::register::commands::list_cdk_inventory_cmd,
+      auto_service::openai::register::commands::delete_cdk_inventory_cmd,
+      // OpenAI auto-login (auto_service::openai::login)
+      auto_service::openai::login::commands::start_auto_login,
+      auto_service::openai::login::commands::cancel_login,
+      auto_service::openai::login::commands::list_login_results_cmd,
+      auto_service::openai::login::commands::delete_login_result_cmd,
+      auto_service::openai::login::commands::update_login_result_status_cmd,
+      auto_service::openai::login::commands::update_login_result_note_cmd,
+      auto_service::openai::login::commands::export_login_results_cmd,
+      auto_service::openai::login::commands::push_login_results_to_sub2api_cmd,
+      // Sub2API settings commands
+      settings_manager::get_sub2api_settings_cmd,
+      settings_manager::set_sub2api_settings_cmd,
+      // SMS / VI-OTP commands
+      sms::commands::sms_get_balance,
+      sms::commands::sms_get_networks,
+      sms::commands::sms_get_services,
+      sms::commands::sms_request_number,
+      sms::commands::sms_get_otp,
+      sms::commands::sms_get_history,
+      get_sms_api_token,
+      set_sms_api_token,
+      remove_sms_api_token,
+      get_nord_access_token,
+      set_nord_access_token,
+      remove_nord_access_token,
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")
@@ -2369,6 +2474,11 @@ mod tests {
       "get_vpn_status",
       "get_vpn_config",
       "list_active_vpn_connections",
+      // Optional Nord helper; create_vpn_from_nord_token covers the UI path
+      "fetch_nord_wireguard_credentials",
+      // Nord credential management (used by VPN subsystem, not directly by UI)
+      "set_nord_access_token",
+      "remove_nord_access_token",
       "export_profile_cookies",
       "update_extension",
       "set_extension_sync_enabled",

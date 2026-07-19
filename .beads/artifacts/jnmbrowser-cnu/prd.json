@@ -1,0 +1,122 @@
+{
+  "beadId": "jnmbrowser-cnu",
+  "prdName": "auto-login-stored-inventory-table",
+  "tasks": [
+    {
+      "id": "backend-1",
+      "category": "backend",
+      "description": "Empty account_ids export excludes already-exported results while still requiring success + non-empty access token; explicit ids still allow re-export of selected accounts.",
+      "steps": [
+        "cargo test --manifest-path src-tauri/Cargo.toml --lib auto_service::openai::login::store::tests",
+        "Unit coverage asserts empty-id selection omits status=exported when building account list logic (or pure helper test)"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": ["src-tauri/src/auto_service/openai/login/store.rs"]
+      }
+    },
+    {
+      "id": "frontend-1",
+      "category": "frontend",
+      "description": "login-accounts-table.tsx exists with checkboxes, status chips (all/available/exported/used/invalid), bulk status actions, export/push toolbar, and export target resolution matching registration (selected else available).",
+      "steps": [
+        "Component imports only theme/i18n/UI patterns consistent with registered-accounts-table.tsx",
+        "Typecheck includes new component (pnpm lint:js or tsc)"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": ["src/components/login-accounts-table.tsx"]
+      }
+    },
+    {
+      "id": "frontend-2",
+      "category": "frontend",
+      "description": "Export flow builds JSON without marking, opens save dialog, writes file, then optionally marks exported; cancel leaves statuses unchanged.",
+      "steps": [
+        "Code path: markExported false (or no mark) before write; updateAccountStatus(..., exported) only after successful write",
+        "Cancel branch does not call status update"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["frontend-1"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src/components/login-accounts-table.tsx",
+          "src/hooks/use-login-events.ts"
+        ]
+      }
+    },
+    {
+      "id": "frontend-3",
+      "category": "frontend",
+      "description": "account-login-dialog.tsx Stored tab hosts the inventory table; push uses selected-or-available rule; old flat list export-only UI removed.",
+      "steps": [
+        "Dialog compiles; Stored tab renders table",
+        "No remaining always-export-all handler that marks before save"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["frontend-1", "frontend-2"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": ["src/components/account-login-dialog.tsx"]
+      }
+    },
+    {
+      "id": "i18n-1",
+      "category": "i18n",
+      "description": "All 7 locales gain autoLogin keys for status chips, selection counts, bulk mark actions, mark-on-export toggle, export selected labels (mirror registration where applicable; used not sold).",
+      "steps": [
+        "Every new key exists in all 7 locale files with non-empty values",
+        "No t(key, fallback) usage"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": [
+          "src/i18n/locales/en.json",
+          "src/i18n/locales/es.json",
+          "src/i18n/locales/fr.json",
+          "src/i18n/locales/ja.json",
+          "src/i18n/locales/pt.json",
+          "src/i18n/locales/ru.json",
+          "src/i18n/locales/zh.json"
+        ]
+      }
+    }
+  ],
+  "context": {
+    "patterns": [
+      "RegisteredAccountsTable selection + status chips + selected-else-available export",
+      "Sub2API data export envelope already in login store",
+      "Mark status only after successful file write"
+    ],
+    "keyFiles": [
+      "src/components/registered-accounts-table.tsx",
+      "src/components/account-login-dialog.tsx",
+      "src/hooks/use-login-events.ts",
+      "src-tauri/src/auto_service/openai/login/store.rs"
+    ],
+    "nonGoals": [
+      "CSV/TXT multi-format export",
+      "OAuth engine changes",
+      "Shared abstract inventory between login and registration"
+    ]
+  },
+  "beadMetadata": {
+    "depends_on": [],
+    "parallel": false,
+    "conflicts_with": [],
+    "blocks": [],
+    "estimated_hours": 6
+  }
+}

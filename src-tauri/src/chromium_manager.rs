@@ -412,7 +412,10 @@ impl ChromiumManager {
       override_entries.push(("deviceMemory".to_string(), value));
     }
 
-    if overrides.is_empty() {
+    // Build matchMedia override for CSS media queries
+    let match_media_js = Self::build_chromium_match_media_override(fingerprint);
+
+    if overrides.is_empty() && match_media_js.is_empty() {
       return None;
     }
 
@@ -427,10 +430,152 @@ impl ChromiumManager {
       .join(",");
 
     Some(format!(
-      "(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};{}const overrides={{{}}};const overriddenKeys=new Set(Object.keys(overrides));const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop))return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop))||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);for(const key of overriddenKeys){{try{{delete nav[key];}}catch(_e){{}}}} }})();",
+      "(function(){{const nav=window.navigator;const proto=Object.getPrototypeOf(nav);const define=(target,key,getter)=>{{if(!target)return false;try{{Object.defineProperty(target,key,{{configurable:true,get:getter}});return true;}}catch(_e){{return false;}}}};const overrideValue=(key,value)=>{{const getter=()=>value;define(nav,key,getter);define(proto,key,getter);}};{}const overrides={{{}}};const overriddenKeys=new Set(Object.keys(overrides));const proxyNavigator=new Proxy(nav,{{get(target,prop,receiver){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop))return overrides[prop];const value=Reflect.get(target,prop,receiver);return typeof value==='function'?value.bind(target):value;}},has(target,prop){{return(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop))||prop in target;}},ownKeys(target){{const keys=Reflect.ownKeys(target);for(const key of Reflect.ownKeys(overrides)){{if(!keys.includes(key))keys.push(key);}}return keys;}},getOwnPropertyDescriptor(target,prop){{if(typeof prop==='string'&&Object.prototype.hasOwnProperty.call(overrides,prop)){{return{{configurable:true,enumerable:true,writable:false,value:overrides[prop]}};}}return Reflect.getOwnPropertyDescriptor(target,prop);}}}});const installNavigatorProxy=(target)=>{{if(!target)return false;try{{const descriptor=Object.getOwnPropertyDescriptor(target,'navigator');if(descriptor&&descriptor.configurable===false)return false;Object.defineProperty(target,'navigator',{{configurable:true,get:()=>proxyNavigator}});return true;}}catch(_e){{return false;}}}};installNavigatorProxy(window);installNavigatorProxy(globalThis);if(window.Window&&window.Window.prototype)installNavigatorProxy(window.Window.prototype);for(const key of overriddenKeys){{try{{delete nav[key];}}catch(_e){{}}}}{match_media_js} }})();",
       overrides.join(""),
       overrides_object
     ))
+  }
+
+  /// Build CDP `Emulation.setEmulatedMedia` media features from the fingerprint config.
+  fn build_media_emulation_features(fingerprint: &Value) -> Vec<Value> {
+    let mut features: Vec<Value> = Vec::new();
+
+    // prefers-color-scheme: from prefersDarkMode boolean
+    if let Some(dark) = fingerprint.get("prefersDarkMode").and_then(|v| v.as_bool()) {
+      features.push(json!({
+        "name": "prefers-color-scheme",
+        "value": if dark { "dark" } else { "light" }
+      }));
+    }
+
+    // prefers-reduced-motion: from prefersReducedMotion boolean
+    if let Some(reduced) = fingerprint
+      .get("prefersReducedMotion")
+      .and_then(|v| v.as_bool())
+    {
+      features.push(json!({
+        "name": "prefers-reduced-motion",
+        "value": if reduced { "reduce" } else { "no-preference" }
+      }));
+    }
+
+    // prefers-contrast: from prefersContrast string
+    if let Some(contrast) = Self::json_string(fingerprint, &["prefersContrast"]) {
+      features.push(json!({
+        "name": "prefers-contrast",
+        "value": contrast
+      }));
+    }
+
+    // prefers-reduced-data: from prefersReducedData boolean
+    if let Some(reduced) = fingerprint
+      .get("prefersReducedData")
+      .and_then(|v| v.as_bool())
+    {
+      features.push(json!({
+        "name": "prefers-reduced-data",
+        "value": if reduced { "reduce" } else { "no-preference" }
+      }));
+    }
+
+    // color-gamut: derive from colorGamut booleans
+    let gamut = if fingerprint
+      .get("colorGamutRec2020")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false)
+    {
+      "rec2020"
+    } else if fingerprint
+      .get("colorGamutP3")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false)
+    {
+      "p3"
+    } else {
+      "srgb"
+    };
+    features.push(json!({
+      "name": "color-gamut",
+      "value": gamut
+    }));
+
+    features
+  }
+
+  /// Build a `matchMedia` override JS block from Chromium fingerprint fields.
+  fn build_chromium_match_media_override(fingerprint: &Value) -> String {
+    let mut overrides: Vec<String> = Vec::new();
+
+    // prefers-color-scheme
+    if let Some(dark) = fingerprint.get("prefersDarkMode").and_then(|v| v.as_bool()) {
+      let value = if dark { "dark" } else { "light" };
+      overrides.push(format!(
+        "[\"prefers-color-scheme\",{}]",
+        serde_json::to_string(value).unwrap_or_default()
+      ));
+    }
+
+    // prefers-reduced-motion
+    if let Some(reduced) = fingerprint
+      .get("prefersReducedMotion")
+      .and_then(|v| v.as_bool())
+    {
+      let value = if reduced { "reduce" } else { "no-preference" };
+      overrides.push(format!(
+        "[\"prefers-reduced-motion\",{}]",
+        serde_json::to_string(value).unwrap_or_default()
+      ));
+    }
+
+    // prefers-contrast
+    if let Some(contrast) = Self::json_string(fingerprint, &["prefersContrast"]) {
+      overrides.push(format!(
+        "[\"prefers-contrast\",{}]",
+        serde_json::to_string(&contrast).unwrap_or_default()
+      ));
+    }
+
+    // prefers-reduced-data
+    if let Some(reduced) = fingerprint
+      .get("prefersReducedData")
+      .and_then(|v| v.as_bool())
+    {
+      let value = if reduced { "reduce" } else { "no-preference" };
+      overrides.push(format!(
+        "[\"prefers-reduced-data\",{}]",
+        serde_json::to_string(value).unwrap_or_default()
+      ));
+    }
+
+    // color-gamut
+    let gamut = if fingerprint
+      .get("colorGamutRec2020")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false)
+    {
+      "rec2020"
+    } else if fingerprint
+      .get("colorGamutP3")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false)
+    {
+      "p3"
+    } else {
+      "srgb"
+    };
+    overrides.push(format!(
+      "[\"color-gamut\",{}]",
+      serde_json::to_string(gamut).unwrap_or_default()
+    ));
+
+    if overrides.is_empty() {
+      return String::new();
+    }
+
+    format!(
+      r#";(function(){{const om=window.matchMedia.bind(window);const mv=[{}];window.matchMedia=function(q){{for(const[f,v] of mv){{if(q.includes('('+f)){{const m=q.match(new RegExp('\\(\\s*'+f.replace(/[.*+?^${{}}()|[\]\\]/g,'\\\\$&')+'\\s*:\\s*([^)]+)\\s*\\)'));const qv=m?m[1].trim():null;const mql=om(q);if(qv!==null){{Object.defineProperty(mql,'matches',{{configurable:true,get:()=>qv===v}});}}Object.defineProperty(mql,'media',{{configurable:true,get:()=>q}});return mql;}}}}return om(q);}};}})()"#,
+      overrides.join(",")
+    )
   }
 
   fn merge_geolocation_defaults(
@@ -1058,11 +1203,12 @@ impl ChromiumManager {
             json!({ "enabled": false }),
           )
           .await;
+        let media_features = Self::build_media_emulation_features(&fingerprint);
         let _ = self
           .send_cdp_command(
             ws_url,
             "Emulation.setEmulatedMedia",
-            json!({ "media": "", "features": [] }),
+            json!({ "media": "", "features": media_features }),
           )
           .await;
       }

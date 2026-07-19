@@ -138,6 +138,17 @@ pub fn create_ephemeral_dir(profile_id: &str) -> Result<PathBuf, String> {
   let base = get_ephemeral_base_dir()?;
   let dir_path = base.join(profile_id);
 
+  // Relaunching a reused worker must not inherit leftover cookies/storage.
+  // Kill normally removes this dir; if it still exists, wipe before recreate.
+  if dir_path.exists() {
+    if let Err(e) = std::fs::remove_dir_all(&dir_path) {
+      log::warn!(
+        "Failed to wipe existing ephemeral dir {}: {e}",
+        dir_path.display()
+      );
+    }
+  }
+
   std::fs::create_dir_all(&dir_path).map_err(|e| format!("Failed to create ephemeral dir: {e}"))?;
 
   EPHEMERAL_DIRS

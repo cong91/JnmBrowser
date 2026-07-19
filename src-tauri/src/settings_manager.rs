@@ -50,6 +50,8 @@ pub struct AppSettings {
   #[serde(default)]
   pub mcp_token: Option<String>, // Displayed token for user to copy (not persisted, loaded from encrypted file)
   #[serde(default)]
+  pub sms_api_token: Option<String>, // VI-OTP / SMS provider token (not persisted, loaded from encrypted file)
+  #[serde(default)]
   pub launch_on_login_declined: bool, // User permanently declined the launch-on-login prompt
   #[serde(default)]
   pub language: Option<String>, // ISO 639-1: "en", "es", "pt", "fr", "zh", "ja", "ru", or None for system default
@@ -88,6 +90,7 @@ impl Default for AppSettings {
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,
+      sms_api_token: None,
       launch_on_login_declined: false,
       language: None,
       window_resize_warning_dismissed: false,
@@ -678,6 +681,415 @@ impl SettingsManager {
     Ok(())
   }
 
+  pub async fn store_sms_api_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+    token: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let token_file = self.get_settings_dir().join("sms_token.dat");
+
+    if let Some(parent) = token_file.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+
+    let vault_password = Self::get_vault_password();
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+      .hash_password(vault_password.as_bytes(), &salt)
+      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
+    let hash_value = password_hash.hash.unwrap();
+    let hash_bytes = hash_value.as_bytes();
+    let key_bytes: [u8; 32] = hash_bytes[..32]
+      .try_into()
+      .map_err(|_| "Invalid key length")?;
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+      .encrypt(&nonce, token.as_bytes())
+      .map_err(|e| format!("Encryption failed: {e}"))?;
+
+    let mut file_data = Vec::new();
+    file_data.extend_from_slice(b"DBVIO"); // 5-byte header for SMS / VI-OTP
+    file_data.push(2u8); // Version 2 (Argon2 + AES-GCM)
+    let salt_str = salt.as_str();
+    file_data.push(salt_str.len() as u8);
+    file_data.extend_from_slice(salt_str.as_bytes());
+    file_data.extend_from_slice(&nonce);
+    file_data.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
+    file_data.extend_from_slice(&ciphertext);
+
+    std::fs::write(token_file, file_data)?;
+    Ok(())
+  }
+
+  pub async fn get_sms_api_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+  ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let token_file = self.get_settings_dir().join("sms_token.dat");
+
+    if !token_file.exists() {
+      return Ok(None);
+    }
+
+    let file_data = std::fs::read(token_file)?;
+
+    if file_data.len() < 6 || &file_data[0..5] != b"DBVIO" {
+      return Ok(None);
+    }
+
+    let version = file_data[5];
+    if version != 2 {
+      return Ok(None);
+    }
+
+    let mut offset = 6;
+    if offset >= file_data.len() {
+      return Ok(None);
+    }
+    let salt_len = file_data[offset] as usize;
+    offset += 1;
+
+    if offset + salt_len > file_data.len() {
+      return Ok(None);
+    }
+    let salt_bytes = &file_data[offset..offset + salt_len];
+    let salt_str = std::str::from_utf8(salt_bytes).map_err(|_| "Invalid salt encoding")?;
+    let salt = SaltString::from_b64(salt_str).map_err(|_| "Invalid salt format")?;
+    offset += salt_len;
+
+    if offset + 12 > file_data.len() {
+      return Ok(None);
+    }
+    let nonce_bytes: [u8; 12] = file_data[offset..offset + 12]
+      .try_into()
+      .map_err(|_| "Invalid nonce length")?;
+    let nonce = Nonce::from(nonce_bytes);
+    offset += 12;
+
+    if offset + 4 > file_data.len() {
+      return Ok(None);
+    }
+    let ciphertext_len = u32::from_le_bytes([
+      file_data[offset],
+      file_data[offset + 1],
+      file_data[offset + 2],
+      file_data[offset + 3],
+    ]) as usize;
+    offset += 4;
+
+    if offset + ciphertext_len > file_data.len() {
+      return Ok(None);
+    }
+    let ciphertext = &file_data[offset..offset + ciphertext_len];
+
+    let vault_password = Self::get_vault_password();
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+      .hash_password(vault_password.as_bytes(), &salt)
+      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
+    let hash_value = password_hash.hash.unwrap();
+    let hash_bytes = hash_value.as_bytes();
+    let key_bytes: [u8; 32] = hash_bytes[..32]
+      .try_into()
+      .map_err(|_| "Invalid key length")?;
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let plaintext = cipher
+      .decrypt(&nonce, ciphertext)
+      .map_err(|_| "Decryption failed")?;
+
+    match String::from_utf8(plaintext) {
+      Ok(token) => Ok(Some(token)),
+      Err(_) => Ok(None),
+    }
+  }
+
+  pub async fn remove_sms_api_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let token_file = self.get_settings_dir().join("sms_token.dat");
+
+    if token_file.exists() {
+      std::fs::remove_file(token_file)?;
+    }
+
+    Ok(())
+  }
+
+  /// Store Sub2API settings (URL + encrypted API key).
+  pub async fn store_nord_access_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+    token: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let token_file = self.get_settings_dir().join("nord_access_token.dat");
+    if let Some(parent) = token_file.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+    let vault_password = Self::get_vault_password();
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+      .hash_password(vault_password.as_bytes(), &salt)
+      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
+    let hash_value = password_hash.hash.unwrap();
+    let hash_bytes = hash_value.as_bytes();
+    let key_bytes: [u8; 32] = hash_bytes[..32]
+      .try_into()
+      .map_err(|_| "Invalid key length")?;
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+      .encrypt(&nonce, token.as_bytes())
+      .map_err(|e| format!("Encryption failed: {e}"))?;
+
+    let mut file_data = Vec::new();
+    file_data.extend_from_slice(b"DBNRD"); // Nord access token
+    file_data.push(2u8);
+    let salt_str = salt.as_str();
+    file_data.push(salt_str.len() as u8);
+    file_data.extend_from_slice(salt_str.as_bytes());
+    file_data.extend_from_slice(&nonce);
+    file_data.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
+    file_data.extend_from_slice(&ciphertext);
+    std::fs::write(token_file, file_data)?;
+    Ok(())
+  }
+
+  pub async fn get_nord_access_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+  ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let token_file = self.get_settings_dir().join("nord_access_token.dat");
+    if !token_file.exists() {
+      return Ok(None);
+    }
+    let file_data = std::fs::read(token_file)?;
+    if file_data.len() < 6 || &file_data[0..5] != b"DBNRD" {
+      return Ok(None);
+    }
+    let version = file_data[5];
+    if version != 2 {
+      return Ok(None);
+    }
+    let mut offset = 6;
+    if offset >= file_data.len() {
+      return Ok(None);
+    }
+    let salt_len = file_data[offset] as usize;
+    offset += 1;
+    if offset + salt_len > file_data.len() {
+      return Ok(None);
+    }
+    let salt_bytes = &file_data[offset..offset + salt_len];
+    let salt_str = std::str::from_utf8(salt_bytes).map_err(|_| "Invalid salt encoding")?;
+    let salt = SaltString::from_b64(salt_str).map_err(|_| "Invalid salt format")?;
+    offset += salt_len;
+    if offset + 12 > file_data.len() {
+      return Ok(None);
+    }
+    let nonce_bytes: [u8; 12] = file_data[offset..offset + 12]
+      .try_into()
+      .map_err(|_| "Invalid nonce length")?;
+    let nonce = Nonce::from(nonce_bytes);
+    offset += 12;
+    if offset + 4 > file_data.len() {
+      return Ok(None);
+    }
+    let ciphertext_len = u32::from_le_bytes([
+      file_data[offset],
+      file_data[offset + 1],
+      file_data[offset + 2],
+      file_data[offset + 3],
+    ]) as usize;
+    offset += 4;
+    if offset + ciphertext_len > file_data.len() {
+      return Ok(None);
+    }
+    let ciphertext = &file_data[offset..offset + ciphertext_len];
+    let vault_password = Self::get_vault_password();
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+      .hash_password(vault_password.as_bytes(), &salt)
+      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
+    let hash_value = password_hash.hash.unwrap();
+    let hash_bytes = hash_value.as_bytes();
+    let key_bytes: [u8; 32] = hash_bytes[..32]
+      .try_into()
+      .map_err(|_| "Invalid key length")?;
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let plaintext = cipher
+      .decrypt(&nonce, ciphertext)
+      .map_err(|_| "Decryption failed")?;
+    match String::from_utf8(plaintext) {
+      Ok(token) => Ok(Some(token)),
+      Err(_) => Ok(None),
+    }
+  }
+
+  pub async fn remove_nord_access_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let token_file = self.get_settings_dir().join("nord_access_token.dat");
+    if token_file.exists() {
+      std::fs::remove_file(token_file)?;
+    }
+    Ok(())
+  }
+
+  pub async fn store_sub2api_settings(
+    &self,
+    _app_handle: &tauri::AppHandle,
+    url: &str,
+    api_key: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let settings_file = self.get_settings_dir().join("sub2api.dat");
+
+    if let Some(parent) = settings_file.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+
+    let vault_password = Self::get_vault_password();
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+      .hash_password(vault_password.as_bytes(), &salt)
+      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
+    let hash_value = password_hash.hash.unwrap();
+    let hash_bytes = hash_value.as_bytes();
+    let key_bytes: [u8; 32] = hash_bytes[..32]
+      .try_into()
+      .map_err(|_| "Invalid key length")?;
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+    // Store as JSON { url, api_key } then encrypt the whole thing
+    let payload = serde_json::json!({ "url": url, "api_key": api_key });
+    let plaintext = serde_json::to_string(&payload)?;
+    let ciphertext = cipher
+      .encrypt(&nonce, plaintext.as_bytes())
+      .map_err(|e| format!("Encryption failed: {e}"))?;
+
+    let mut file_data = Vec::new();
+    file_data.extend_from_slice(b"DBS2A"); // 5-byte header for Sub2API
+    file_data.push(2u8); // Version 2 (Argon2 + AES-GCM)
+    let salt_str = salt.as_str();
+    file_data.push(salt_str.len() as u8);
+    file_data.extend_from_slice(salt_str.as_bytes());
+    file_data.extend_from_slice(&nonce);
+    file_data.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
+    file_data.extend_from_slice(&ciphertext);
+
+    std::fs::write(settings_file, file_data)?;
+    Ok(())
+  }
+
+  /// Get Sub2API settings (URL + API key).
+  pub async fn get_sub2api_settings(&self, _app_handle: &tauri::AppHandle) -> (String, String) {
+    let settings_file = self.get_settings_dir().join("sub2api.dat");
+
+    if !settings_file.exists() {
+      return (String::new(), String::new());
+    }
+
+    let file_data = match std::fs::read(&settings_file) {
+      Ok(d) => d,
+      Err(_) => return (String::new(), String::new()),
+    };
+
+    if file_data.len() < 6 || &file_data[0..5] != b"DBS2A" {
+      return (String::new(), String::new());
+    }
+
+    let version = file_data[5];
+    if version != 2 {
+      return (String::new(), String::new());
+    }
+
+    let mut offset = 6;
+    if offset >= file_data.len() {
+      return (String::new(), String::new());
+    }
+    let salt_len = file_data[offset] as usize;
+    offset += 1;
+
+    if offset + salt_len > file_data.len() {
+      return (String::new(), String::new());
+    }
+    let salt_bytes = &file_data[offset..offset + salt_len];
+    let salt_str = match std::str::from_utf8(salt_bytes) {
+      Ok(s) => s,
+      Err(_) => return (String::new(), String::new()),
+    };
+    let salt = match SaltString::from_b64(salt_str) {
+      Ok(s) => s,
+      Err(_) => return (String::new(), String::new()),
+    };
+    offset += salt_len;
+
+    if offset + 12 > file_data.len() {
+      return (String::new(), String::new());
+    }
+    let nonce_bytes: [u8; 12] = match file_data[offset..offset + 12].try_into() {
+      Ok(n) => n,
+      Err(_) => return (String::new(), String::new()),
+    };
+    let nonce = Nonce::from(nonce_bytes);
+    offset += 12;
+
+    if offset + 4 > file_data.len() {
+      return (String::new(), String::new());
+    }
+    let ct_len =
+      u32::from_le_bytes(file_data[offset..offset + 4].try_into().unwrap_or([0; 4])) as usize;
+    offset += 4;
+
+    if offset + ct_len > file_data.len() {
+      return (String::new(), String::new());
+    }
+    let ciphertext = &file_data[offset..offset + ct_len];
+
+    let vault_password = Self::get_vault_password();
+    let argon2 = Argon2::default();
+    let password_hash = match argon2.hash_password(vault_password.as_bytes(), &salt) {
+      Ok(h) => h,
+      Err(_) => return (String::new(), String::new()),
+    };
+    let hash_value = match password_hash.hash {
+      Some(h) => h,
+      None => return (String::new(), String::new()),
+    };
+    let hash_bytes = hash_value.as_bytes();
+    let key_bytes: [u8; 32] = match hash_bytes[..32].try_into() {
+      Ok(k) => k,
+      Err(_) => return (String::new(), String::new()),
+    };
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let cipher = Aes256Gcm::new(&key);
+
+    match cipher.decrypt(&nonce, ciphertext) {
+      Ok(plaintext) => {
+        let text = String::from_utf8_lossy(&plaintext);
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+          let url = json["url"].as_str().unwrap_or("").to_string();
+          let api_key = json["api_key"].as_str().unwrap_or("").to_string();
+          (url, api_key)
+        } else {
+          (String::new(), String::new())
+        }
+      }
+      Err(_) => (String::new(), String::new()),
+    }
+  }
+
   pub fn get_sync_settings(&self) -> Result<SyncSettings, Box<dyn std::error::Error>> {
     let settings = self.load_settings()?;
     Ok(SyncSettings {
@@ -713,6 +1125,11 @@ pub async fn get_app_settings(app_handle: tauri::AppHandle) -> Result<AppSetting
     .get_mcp_token(&app_handle)
     .await
     .map_err(|e| format!("Failed to load MCP token: {e}"))?;
+
+  settings.sms_api_token = manager
+    .get_sms_api_token(&app_handle)
+    .await
+    .map_err(|e| format!("Failed to load SMS API token: {e}"))?;
 
   Ok(settings)
 }
@@ -784,6 +1201,24 @@ pub async fn save_app_settings(
     settings.mcp_token = None;
   }
 
+  // Handle SMS / VI-OTP API token (user-provided; never auto-generated)
+  if let Some(ref token) = settings.sms_api_token {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+      manager
+        .remove_sms_api_token(&app_handle)
+        .await
+        .map_err(|e| format!("Failed to remove SMS API token: {e}"))?;
+      settings.sms_api_token = None;
+    } else {
+      manager
+        .store_sms_api_token(&app_handle, trimmed)
+        .await
+        .map_err(|e| format!("Failed to store SMS API token: {e}"))?;
+      settings.sms_api_token = Some(trimmed.to_string());
+    }
+  }
+
   // Preserve server-managed flags that the frontend may not have up-to-date.
   // Read directly from file to avoid load_settings' save-on-load behavior.
   if let Ok(content) = std::fs::read_to_string(manager.get_settings_file()) {
@@ -796,6 +1231,7 @@ pub async fn save_app_settings(
   let mut persist_settings = settings.clone();
   persist_settings.api_token = None;
   persist_settings.mcp_token = None;
+  persist_settings.sms_api_token = None;
 
   log::info!(
     "[settings] Saving settings: theme={}, custom_theme_keys={}",
@@ -812,6 +1248,82 @@ pub async fn save_app_settings(
     .map_err(|e| format!("Failed to save settings: {e}"))?;
 
   Ok(settings)
+}
+
+/// Load the encrypted SMS / VI-OTP API token.
+#[tauri::command]
+pub async fn get_sms_api_token(app_handle: tauri::AppHandle) -> Result<Option<String>, String> {
+  let manager = SettingsManager::instance();
+  manager
+    .get_sms_api_token(&app_handle)
+    .await
+    .map_err(|e| format!("Failed to load SMS API token: {e}"))
+}
+
+/// Store the SMS / VI-OTP API token (encrypted on disk).
+#[tauri::command]
+pub async fn set_sms_api_token(app_handle: tauri::AppHandle, token: String) -> Result<(), String> {
+  let manager = SettingsManager::instance();
+  let trimmed = token.trim();
+  if trimmed.is_empty() {
+    manager
+      .remove_sms_api_token(&app_handle)
+      .await
+      .map_err(|e| format!("Failed to remove SMS API token: {e}"))
+  } else {
+    manager
+      .store_sms_api_token(&app_handle, trimmed)
+      .await
+      .map_err(|e| format!("Failed to store SMS API token: {e}"))
+  }
+}
+
+/// Remove the encrypted SMS / VI-OTP API token.
+#[tauri::command]
+pub async fn remove_sms_api_token(app_handle: tauri::AppHandle) -> Result<(), String> {
+  let manager = SettingsManager::instance();
+  manager
+    .remove_sms_api_token(&app_handle)
+    .await
+    .map_err(|e| format!("Failed to remove SMS API token: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_nord_access_token(app_handle: tauri::AppHandle) -> Result<Option<String>, String> {
+  let manager = SettingsManager::instance();
+  manager
+    .get_nord_access_token(&app_handle)
+    .await
+    .map_err(|e| format!("Failed to get Nord access token: {e}"))
+}
+
+#[tauri::command]
+pub async fn set_nord_access_token(
+  app_handle: tauri::AppHandle,
+  token: String,
+) -> Result<(), String> {
+  let manager = SettingsManager::instance();
+  let trimmed = token.trim();
+  if trimmed.is_empty() {
+    manager
+      .remove_nord_access_token(&app_handle)
+      .await
+      .map_err(|e| format!("Failed to remove Nord access token: {e}"))?;
+    return Ok(());
+  }
+  manager
+    .store_nord_access_token(&app_handle, trimmed)
+    .await
+    .map_err(|e| format!("Failed to store Nord access token: {e}"))
+}
+
+#[tauri::command]
+pub async fn remove_nord_access_token(app_handle: tauri::AppHandle) -> Result<(), String> {
+  let manager = SettingsManager::instance();
+  manager
+    .remove_nord_access_token(&app_handle)
+    .await
+    .map_err(|e| format!("Failed to remove Nord access token: {e}"))
 }
 
 #[tauri::command]
@@ -973,6 +1485,29 @@ lazy_static::lazy_static! {
   static ref SETTINGS_MANAGER: SettingsManager = SettingsManager::new();
 }
 
+/// Get Sub2API settings (URL + API key).
+#[tauri::command]
+pub async fn get_sub2api_settings_cmd(
+  app_handle: tauri::AppHandle,
+) -> Result<(String, String), String> {
+  let manager = SettingsManager::instance();
+  Ok(manager.get_sub2api_settings(&app_handle).await)
+}
+
+/// Store Sub2API settings (URL + API key, encrypted on disk).
+#[tauri::command]
+pub async fn set_sub2api_settings_cmd(
+  app_handle: tauri::AppHandle,
+  url: String,
+  api_key: String,
+) -> Result<(), String> {
+  let manager = SettingsManager::instance();
+  manager
+    .store_sub2api_settings(&app_handle, url.trim(), api_key.trim())
+    .await
+    .map_err(|e| format!("Failed to store Sub2API settings: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1053,6 +1588,7 @@ mod tests {
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,
+      sms_api_token: None,
       launch_on_login_declined: false,
       language: None,
       window_resize_warning_dismissed: false,

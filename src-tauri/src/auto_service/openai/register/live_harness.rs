@@ -10,7 +10,7 @@
 
 #[cfg(test)]
 mod tests {
-  use crate::auto_register::types::{NetworkMode, RegistrationConfig};
+  use crate::auto_service::openai::register::types::{NetworkMode, RegistrationConfig};
 
   /// Smoke: config used by live runs deserializes / builds with dual-network defaults.
   #[test]
@@ -23,19 +23,28 @@ mod tests {
       cdks: vec![cdk],
       profile_id,
       proxy_id: None,
+      vpn_id: None,
       browser_type,
       max_retries: 1,
       accounts_per_cdk: 1,
       headless: false,
       concurrency: 1,
+      nord_max_sessions: 6,
       network_mode: NetworkMode::None,
       rotate_every_n: 0,
       nord_group: None,
       nord_server_name: None,
       nord_cli_path: None,
+      sms_provider: None,
+      sms_token: None,
+      sms_service_id: None,
+      sms_network: None,
+      sms_country: None,
     };
 
     assert!(config.validate_network().is_ok());
     assert!(config.effective_proxy_id().is_none());
+    assert!(config.effective_vpn_id().is_none());
+    assert!(!config.uses_nord_cli());
   }
 }

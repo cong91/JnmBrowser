@@ -6,14 +6,21 @@ use std::sync::Mutex;
 use chrono::Utc;
 use once_cell::sync::Lazy;
 
-use super::types::{AccountInventoryStatus, RegistrationResult};
+use super::types::{AccountInventoryStatus, CdkInventoryRecord, RegistrationResult};
 use crate::app_dirs::data_dir;
 
 static STORE: Lazy<Mutex<CredentialStore>> = Lazy::new(|| Mutex::new(CredentialStore::new()));
+static CDK_STORE: Lazy<Mutex<CdkStore>> = Lazy::new(|| Mutex::new(CdkStore::new()));
 
 /// Thread-safe JSON file store for registration results.
 struct CredentialStore {
   accounts: HashMap<String, RegistrationResult>,
+  base_dir: PathBuf,
+}
+
+/// Thread-safe JSON file store for per-CDK stats.
+struct CdkStore {
+  records: HashMap<String, CdkInventoryRecord>,
   base_dir: PathBuf,
 }
 
@@ -52,7 +59,7 @@ impl CredentialStore {
 
   fn list_all(&self) -> Vec<RegistrationResult> {
     let mut results: Vec<_> = self.accounts.values().cloned().collect();
-    results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    results.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     results
   }
 
@@ -174,4 +181,135 @@ pub fn update_registered_account_status(
 
 pub fn update_registered_account_note(account_id: &str, note: String) -> bool {
   STORE.lock().unwrap().update_note(account_id, note)
+}
+
+// --- CDK inventory ---
+
+impl CdkStore {
+  fn new() -> Self {
+    let base_dir = data_dir().join("cdk_inventory");
+    let _ = fs::create_dir_all(&base_dir);
+
+    let mut records = HashMap::new();
+    if let Ok(entries) = fs::read_dir(&base_dir) {
+      for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+          if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(record) = serde_json::from_str::<CdkInventoryRecord>(&content) {
+              let key = cdk_file_key(&record.cdk);
+              records.insert(key, record);
+            }
+          }
+        }
+      }
+    }
+
+    Self { records, base_dir }
+  }
+
+  fn save(&mut self, record: &CdkInventoryRecord) {
+    let key = cdk_file_key(&record.cdk);
+    self.records.insert(key.clone(), record.clone());
+    let file_path = self.base_dir.join(format!("{key}.json"));
+    if let Ok(json) = serde_json::to_string_pretty(record) {
+      let _ = fs::write(file_path, json);
+    }
+  }
+
+  fn list_all(&self) -> Vec<CdkInventoryRecord> {
+    let mut results: Vec<_> = self.records.values().cloned().collect();
+    results.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    results
+  }
+
+  fn get(&self, cdk: &str) -> Option<CdkInventoryRecord> {
+    let key = cdk_file_key(cdk);
+    if let Some(v) = self.records.get(&key) {
+      return Some(v.clone());
+    }
+    self
+      .records
+      .values()
+      .find(|v| v.cdk.eq_ignore_ascii_case(cdk))
+      .cloned()
+  }
+
+  fn delete(&mut self, cdk: &str) -> bool {
+    let key = cdk_file_key(cdk);
+    let removed = self.records.remove(&key).is_some();
+    if removed {
+      let file_path = self.base_dir.join(format!("{key}.json"));
+      let _ = fs::remove_file(file_path);
+    }
+    removed
+  }
+
+  fn upsert_merge(&mut self, mut incoming: CdkInventoryRecord) -> CdkInventoryRecord {
+    if let Some(existing) = self.get(&incoming.cdk) {
+      // Keep earliest created_at; append new account entries not already present by email.
+      incoming.created_at = existing.created_at;
+      if incoming.base_email.is_empty() {
+        incoming.base_email = existing.base_email;
+      }
+      // Prefer max counters from a continuous run; if task_id differs, accumulate.
+      if existing.task_id != incoming.task_id && !existing.task_id.is_empty() {
+        incoming.attempted = existing.attempted.saturating_add(incoming.attempted);
+        incoming.free_trial_yes = existing
+          .free_trial_yes
+          .saturating_add(incoming.free_trial_yes);
+        incoming.free_trial_no = existing
+          .free_trial_no
+          .saturating_add(incoming.free_trial_no);
+        incoming.failed = existing.failed.saturating_add(incoming.failed);
+        let mut accounts = existing.accounts;
+        accounts.extend(incoming.accounts);
+        incoming.accounts = accounts;
+        if incoming.target_accounts < existing.target_accounts {
+          incoming.target_accounts = existing.target_accounts;
+        }
+      }
+    }
+    self.save(&incoming);
+    incoming
+  }
+}
+
+fn cdk_file_key(cdk: &str) -> String {
+  let cleaned: String = cdk
+    .chars()
+    .map(|c| {
+      if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+        c
+      } else {
+        '_'
+      }
+    })
+    .collect();
+  if cleaned.is_empty() {
+    format!("cdk-{}", Utc::now().timestamp_millis())
+  } else {
+    cleaned
+  }
+}
+
+pub fn save_cdk_inventory_record(record: &CdkInventoryRecord) {
+  CDK_STORE.lock().unwrap().upsert_merge(record.clone());
+}
+
+pub fn list_cdk_inventory() -> Vec<CdkInventoryRecord> {
+  CDK_STORE.lock().unwrap().list_all()
+}
+
+pub fn get_cdk_inventory(cdk: &str) -> Option<CdkInventoryRecord> {
+  CDK_STORE.lock().unwrap().get(cdk)
+}
+
+pub fn delete_cdk_inventory(cdk: &str) -> bool {
+  CDK_STORE.lock().unwrap().delete(cdk)
+}
+
+/// Replace/save the exact record without cross-task accumulation (in-run updates).
+pub fn put_cdk_inventory_record(record: &CdkInventoryRecord) {
+  CDK_STORE.lock().unwrap().save(record);
 }

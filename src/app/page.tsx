@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrent } from "@tauri-apps/plugin-deep-link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AccountLoginDialog } from "@/components/account-login-dialog";
 import { AccountRegistrationDialog } from "@/components/account-registration-dialog";
 import { CamoufoxConfigDialog } from "@/components/camoufox-config-dialog";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
@@ -29,6 +30,7 @@ import { ProxyAssignmentDialog } from "@/components/proxy-assignment-dialog";
 import { ProxyManagementDialog } from "@/components/proxy-management-dialog";
 import { RecorderDialog } from "@/components/recorder-dialog";
 import { SettingsDialog } from "@/components/settings-dialog";
+import { SmsVerificationDialog } from "@/components/sms-verification-dialog";
 import { SyncAllDialog } from "@/components/sync-all-dialog";
 import { SyncConfigDialog } from "@/components/sync-config-dialog";
 import { SyncFollowerDialog } from "@/components/sync-follower-dialog";
@@ -99,6 +101,8 @@ export default function Home() {
   const { getProfileRecorderInfo } = useRecorderSessions();
   const [recorderDialogOpen, setRecorderDialogOpen] = useState(false);
   const [autoRegisterDialogOpen, setAutoRegisterDialogOpen] = useState(false);
+  const [autoLoginDialogOpen, setAutoLoginDialogOpen] = useState(false);
+  const [smsDialogOpen, setSmsDialogOpen] = useState(false);
 
   // Cloud auth for cross-OS unlock
   const crossOsUnlocked = true;
@@ -1119,7 +1123,9 @@ export default function Home() {
             onIntegrationsDialogOpen={setIntegrationsDialogOpen}
             onExtensionManagementDialogOpen={setExtensionManagementDialogOpen}
             onAutoRegisterDialogOpen={setAutoRegisterDialogOpen}
+            onAutoLoginDialogOpen={setAutoLoginDialogOpen}
             onRecordingsDialogOpen={setRecorderDialogOpen}
+            onSmsDialogOpen={setSmsDialogOpen}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
           />
@@ -1427,6 +1433,16 @@ export default function Home() {
       <AccountRegistrationDialog
         open={autoRegisterDialogOpen}
         onOpenChange={setAutoRegisterDialogOpen}
+      />
+
+      <AccountLoginDialog
+        open={autoLoginDialogOpen}
+        onOpenChange={setAutoLoginDialogOpen}
+      />
+
+      <SmsVerificationDialog
+        open={smsDialogOpen}
+        onOpenChange={setSmsDialogOpen}
       />
     </div>
   );

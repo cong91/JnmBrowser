@@ -8,13 +8,13 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 
 1. **CDK Redemption**: Redeems a Gmail CDK code to obtain a disposable Gmail address
 2. **Alias Generation**: Creates `user+{random}@gmail.com` aliases (up to 6 per CDK)
-3. **Browser Automation**: Launches a Chromium/Camoufox profile with fingerprint (+ optional proxy)
+3. **Browser Automation**: Reuses one worker Chromium/Camoufox profile per batch; each account relaunches with a renewed fingerprint (+ optional proxy)
 4. **Registration Flow**: Automates the ChatGPT signup via CDP / Playwright
 5. **OTP Retrieval**: Polls the Gmail CDK API for the verification code
 6. **Token Extraction**: Extracts access token, session token, and account credentials
 7. **Free-trial gate + 2FA**: Keeps free-trial eligible accounts and enables authenticator when possible
 8. **Credential Storage**: Persists inventory JSON for export/resale
-9. **Dual network**: Optional static proxy **or** NordVPN CLI IP rotation after N successes
+9. **Network**: Optional static proxy, **WireGuard VPN** from Proxies & VPNs (preferred), or NordVPN CLI backup (system-wide rotate)
 
 ## Prerequisites
 
@@ -23,7 +23,8 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 - **Network (pick one mode):**
   - **None** — host egress IP
   - **Proxy** — a proxy ID already configured in JnmBrowser
-  - **NordVPN** — Windows NordVPN app installed, logged in, CLI available (`NordVPN.exe` under Program Files)
+  - **VPN (WireGuard)** — a `vpnId` from Proxies & VPNs (including Nord Access Token → WG configs)
+  - **NordVPN CLI (backup)** — Windows NordVPN app installed, logged in, CLI available (`NordVPN.exe` under Program Files)
 
 ## Usage
 
@@ -34,9 +35,10 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 3. Enter your CDK code(s)
 4. Configure browser type, retries, accounts per CDK
 5. Choose **Network**:
-   - **None** — no proxy / no Nord
+   - **None** — no proxy / no VPN
    - **Proxy** — enter proxy ID
-   - **NordVPN** — optional group/server, **rotate IP every N successes** (default 2)
+   - **VPN (WireGuard)** — select a config from Proxies & VPNs (preferred, per-profile)
+   - **NordVPN CLI (backup)** — optional group/server, **rotate IP every N successes** (default 2, system-wide)
 6. Click **Start Registration**
 
 Progress is shown in real-time with step-by-step logs (including IP rotation messages in Nord mode).
@@ -46,10 +48,49 @@ Progress is shown in real-time with step-by-step logs (including IP rotation mes
 | Mode | Profile attach | Mid-batch behavior |
 |------|----------------|--------------------|
 | `none` | no `proxy_id` / no `vpn_id` | host IP sticky |
-| `proxy` | static `proxyId` on ephemeral profiles | no mid-batch hop (v1) |
-| `nord` | no profile proxy/VPN | system-wide Nord CLI; after every **N successful free-trial saves**, disconnect → connect → verify public IP |
+| `proxy` | static `proxyId` on the reused worker profile | no mid-batch hop (v1) |
+| `vpn` | WireGuard `vpnId` base from **Proxies & VPNs** (private key source) | Concurrency **auto = 6** (Nord WG policy; plan allows up to ~10 devices). At Start, spawn up to 6 ephemeral Nord peers. Process all CDKs in waves. Per-slot rotate hops only that worker’s peer. Ephemeral confs deleted when the batch ends. |
+| `nord` | no profile proxy/VPN | **backup** system-wide Nord CLI; after every **N successful free-trial saves**, disconnect → connect → verify public IP |
 
-**Important:** Nord mode is **system-wide** (affects the whole PC, including CDK HTTP and OTP polling). Modes are mutually exclusive (`proxyId` is rejected with Nord). Nord stays connected after the batch finishes (no auto-disconnect); you disconnect manually when done.
+**Important:** 
+**Nord session budget:** Fixed product policy **max 6** concurrent WireGuard sessions for auto-reg (Nord plans allow up to ~10 devices; 6 is the safe parallel cap). When you create a VPN via Access Token, JnmBrowser stores `max_sessions = 6` on that config and auto-sets concurrency. You do not enter session limits or concurrency by hand for Nord WG.
+
+Prefer **`vpn`** (WireGuard inventory / Nord Access Token configs created in Proxies & VPNs) for isolation. **`nord` is CLI backup only** — system-wide (affects the whole PC, including CDK HTTP and OTP polling). Modes are mutually exclusive (`proxyId` / `vpnId` / Nord CLI). Nord CLI stays connected after the batch finishes (no auto-disconnect); you disconnect manually when done.
+
+### Profile lifecycle (reuse, not spam)
+
+Auto-registration does **not** create a new profile metadata row for every account.
+
+| Phase | Behavior |
+|-------|----------|
+| Per CDK worker | Create **one** ephemeral worker profile (`auto-reg-worker-{task8}-s{slot}`), **or** adopt `profileId` if provided |
+| Each account (alias) | Kill → relaunch same worker: `randomize_fingerprint_on_launch` + fresh ephemeral data dir + `clear_all_site_data` + new `device_id` |
+| Cloudflare authorize retry | Relaunch the **same** worker (no extra profile create) |
+| CDK finished | Delete auto-created worker for that slot; **never** delete a user-provided `profileId` |
+
+Isolation between accounts comes from relaunch fingerprint renew + ephemeral dir wipe + cookie/storage clear — not from creating unlimited profiles.
+
+### CDK concurrency (1 CDK = 1 thread)
+
+- `concurrency` = max number of CDKs processed in parallel (UI default 1, max 8).
+- **Inside** a CDK, aliases (`accountsPerCdk`, 1–6) stay **sequential**.
+- **Nord CLI mode forces concurrency = 1** (system-wide IP is not thread-safe).
+- Proxy / VPN / none modes can run multiple CDK workers concurrently; each slot has its own worker profile.
+
+### CDK inventory stats
+
+Every CDK used is persisted under app data `cdk_inventory/`:
+
+| Field | Meaning |
+|-------|---------|
+| `targetAccounts` | `accountsPerCdk` for that run |
+| `attempted` | alias slots that finished |
+| `freeTrialYes` | free-trial eligible successes |
+| `freeTrialNo` | registered but **no** free trial (saved, status invalid) |
+| `failed` | hard failures after retries |
+| `accounts[]` | per-email detail (success / free trial / error) |
+
+UI: Auto Registration → **CDK stats** tab. Commands: `list_cdk_inventory_cmd`, `delete_cdk_inventory_cmd`.
 
 ### Via Tauri Commands
 
@@ -66,11 +107,25 @@ const taskId = await invoke("start_auto_registration", {
     maxRetries: 3,
     accountsPerCdk: 1,
     headless: false,
+    concurrency: 2, // max parallel CDKs
+  },
+});
+
+// WireGuard VPN mode (preferred; config from Proxies & VPNs)
+const vpnTask = await invoke("start_auto_registration", {
+  config: {
+    cdks: ["GMAIL-K4L5-EUW5-PHBV-A6KW"],
+    browserType: "chromium",
+    networkMode: "vpn",
+    vpnId: "your-wireguard-vpn-config-id",
+    maxRetries: 3,
+    accountsPerCdk: 1,
     concurrency: 1,
   },
 });
 
-// Nord mode with rotate every 2 successes
+// Nord CLI backup mode with rotate every 2 successes
+
 const nordTask = await invoke("start_auto_registration", {
   config: {
     cdks: ["GMAIL-K4L5-EUW5-PHBV-A6KW"],
@@ -165,8 +220,8 @@ Each file contains:
 - Increase timeout or retry
 
 ### Cloudflare Interception
-- The engine automatically retries with a fresh browser session
-- Consider using a different proxy or fingerprint
+- The engine automatically retries by relaunching the **same** worker profile with a new fingerprint / device id
+- Consider using a different proxy or fingerprint seed / network mode
 
 ## Free Trial Gate
 
@@ -255,7 +310,7 @@ Policy:
 - On success, `totpSecret` is persisted with the account for later login/automation
 
 Reference recordings: `register_1.json` / `register_2.json` (signup), `enable2FA.json` (2FA-only).
-Recipe sketch: `src-tauri/src/auto_register/recipes/enable_2fa_recipe.json`.
+Recipe sketch: `src-tauri/src/auto_service/openai/register/recipes/enable_2fa_recipe.json`.
 
 
 ## Account Inventory & Export
