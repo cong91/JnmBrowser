@@ -40,6 +40,13 @@ fn parse_network_mode(s: &str) -> NetworkMode {
   }
 }
 
+fn parse_email_provider(value: &str) -> EmailProvider {
+  EmailProvider::parse(value).unwrap_or_else(|error| {
+    eprintln!("{error}");
+    std::process::exit(2);
+  })
+}
+
 fn parse_args() -> LiveArgs {
   let mut cdk = std::env::var("AUTO_REG_CDK").unwrap_or_default();
   let mut browser = std::env::var("AUTO_REG_BROWSER").unwrap_or_else(|_| "camoufox".into());
@@ -52,7 +59,7 @@ fn parse_args() -> LiveArgs {
   let mut nord_server_name = std::env::var("AUTO_REG_NORD_SERVER").ok();
   let mut vpn_id = std::env::var("AUTO_REG_VPN_ID").ok();
   let mut email_provider = std::env::var("AUTO_REG_EMAIL_PROVIDER")
-    .map(|s| EmailProvider::parse(&s))
+    .map(|value| parse_email_provider(&value))
     .unwrap_or(EmailProvider::Gmail123452026);
 
   if let Ok(m) = std::env::var("AUTO_REG_NETWORK") {
@@ -97,7 +104,7 @@ fn parse_args() -> LiveArgs {
       "--vpn-id" => vpn_id = args.next(),
       "--email-provider" => {
         if let Some(v) = args.next() {
-          email_provider = EmailProvider::parse(&v);
+          email_provider = parse_email_provider(&v);
         }
       }
       other if other.starts_with("--cdk=") => {
@@ -134,7 +141,7 @@ fn parse_args() -> LiveArgs {
         vpn_id = Some(other.trim_start_matches("--vpn-id=").to_string());
       }
       other if other.starts_with("--email-provider=") => {
-        email_provider = EmailProvider::parse(other.trim_start_matches("--email-provider="));
+        email_provider = parse_email_provider(other.trim_start_matches("--email-provider="));
       }
       _ => {}
     }
@@ -212,6 +219,10 @@ fn main() {
             email_provider: args.email_provider,
           };
           config.normalize_network();
+          if let Err(e) = config.validate_cdks() {
+            eprintln!("config error: {e}");
+            std::process::exit(2);
+          }
           if let Err(e) = config.validate_network() {
             eprintln!("config error: {e}");
             std::process::exit(2);

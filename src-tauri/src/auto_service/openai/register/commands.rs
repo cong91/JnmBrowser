@@ -22,6 +22,7 @@ pub async fn start_auto_registration(
   config: RegistrationConfig,
 ) -> Result<String, String> {
   let mut config = config;
+  config.validate_cdks()?;
   config.normalize_network();
   config.validate_network()?;
 
