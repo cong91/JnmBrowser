@@ -36,7 +36,6 @@ import {
   clampAccountsPerCard,
   emailProviderHintKey,
   isEmailProvider,
-  supportsAliases,
 } from "@/lib/email-providers";
 
 interface Props {
@@ -87,7 +86,6 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     emailProvider,
     accountsPerCdk,
   );
-  const aliasCapable = supportsAliases(emailProvider);
 
   const nordLocations = [
     { value: "Japan", labelKey: "registration.nordLocJapan" },
@@ -540,16 +538,13 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
               <div className="space-y-2">
                 <Label htmlFor="perCdk">
-                  {aliasCapable
-                    ? t("registration.accountsPerCdk")
-                    : t("registration.accountsPerCard")}
+                  {t("registration.accountsPerCdk")}
                 </Label>
                 <Input
                   id="perCdk"
                   type="number"
                   min={1}
-                  max={aliasCapable ? 6 : 1}
-                  disabled={!aliasCapable}
+                  max={6}
                   value={effectiveAccountsPerCdk}
                   onChange={(e) =>
                     setAccountsPerCdk(
@@ -560,11 +555,6 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                     )
                   }
                 />
-                {!aliasCapable && (
-                  <p className="text-[11px] text-muted-foreground">
-                    {t("registration.accountsPerCardSmsIosmqHint")}
-                  </p>
-                )}
               </div>
 
               <div className="space-y-2">

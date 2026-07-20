@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::email::EmailProvider;
 
@@ -40,8 +41,7 @@ pub struct RegistrationConfig {
   /// Max full-flow retries on failure
   #[serde(default = "default_max_retries")]
   pub max_retries: u32,
-  /// Number of accounts to create per card/CDK.
-  /// gmail.123452026.xyz: 1–6 via +aliases. sms.iosmq.xyz: always 1 mailbox per MAIL card.
+  /// Number of accounts to create per card/CDK (1–6 via +aliases).
   #[serde(default = "default_accounts_per_cdk")]
   pub accounts_per_cdk: u32,
   /// Run browser in headless mode
@@ -119,6 +119,21 @@ pub fn should_rotate(success_count: u32, every_n: u32) -> bool {
 }
 
 impl RegistrationConfig {
+  /// Reject blank or duplicate cards before scheduling concurrent workers.
+  pub fn validate_cdks(&self) -> Result<(), String> {
+    let mut seen = HashSet::with_capacity(self.cdks.len());
+    for cdk in &self.cdks {
+      let normalized = cdk.trim();
+      if normalized.is_empty() {
+        return Err("CDK list contains an empty code".into());
+      }
+      if !seen.insert(normalized.to_ascii_uppercase()) {
+        return Err(format!("duplicate CDK/card in batch: {normalized}"));
+      }
+    }
+    Ok(())
+  }
+
   fn non_empty(opt: &Option<String>) -> bool {
     opt.as_ref().is_some_and(|s| !s.trim().is_empty())
   }
@@ -311,6 +326,33 @@ mod network_config_tests {
     let c: RegistrationConfig = serde_json::from_str(json).unwrap();
     assert_eq!(c.network_mode, NetworkMode::None);
     assert_eq!(c.rotate_every_n, 0);
+  }
+
+  #[test]
+  fn validate_cdks_rejects_blank_codes() {
+    let mut c = base_config(NetworkMode::None);
+    c.cdks = vec!["GMAIL-X".into(), "  ".into()];
+    assert_eq!(
+      c.validate_cdks().unwrap_err(),
+      "CDK list contains an empty code"
+    );
+  }
+
+  #[test]
+  fn validate_cdks_rejects_normalized_duplicates() {
+    let mut c = base_config(NetworkMode::None);
+    c.cdks = vec![" mail-abcd ".into(), "MAIL-ABCD".into()];
+    assert_eq!(
+      c.validate_cdks().unwrap_err(),
+      "duplicate CDK/card in batch: MAIL-ABCD"
+    );
+  }
+
+  #[test]
+  fn validate_cdks_accepts_distinct_codes() {
+    let mut c = base_config(NetworkMode::None);
+    c.cdks = vec!["MAIL-ABCD".into(), "MAIL-EFGH".into()];
+    assert!(c.validate_cdks().is_ok());
   }
 
   #[test]

@@ -1813,20 +1813,13 @@
     "nordMaxSessionsHint": "Simultaneous Nord WireGuard sessions allowed on your plan. Effective concurrency = min(Concurrency, this). CDK count does not limit concurrency — remaining CDKs run in waves.",
     "concurrencyVpnAutoHint": "Concurrency is auto-calculated from the selected Nord VPN session budget (detected when you added the Access Token). You only choose the VPN config.",
     "emailProvider": "Email provider",
-    "emailProviderGmailCdk": "gmail.123452026.xyz",
-    "emailProviderIosmq": "sms.iosmq.xyz",
-    "emailProviderGmailCdkHint": "Redeem CDK codes via gmail.123452026.xyz and use +aliases (up to 6 accounts per CDK).",
-    "emailProviderIosmqHint": "Redeem a MAIL card on sms.iosmq.xyz (POST /api/v1/redeem), then poll order/lookup for OTP. One mailbox per card — no aliases.",
     "mailCardLabel": "MAIL card codes",
     "mailCardHint": "{count} MAIL card(s) detected · {total} account(s) total",
     "cardCodesRequired": "Enter at least one email card / CDK code",
-    "accountsPerCard": "Accounts per card",
-    "accountsPerCardIosmqHint": "sms.iosmq.xyz assigns one mailbox per MAIL card (no +aliases).",
     "emailProviderGmail123452026": "gmail.123452026.xyz",
     "emailProviderSmsIosmq": "sms.iosmq.xyz",
     "emailProviderGmail123452026Hint": "Redeem CDK codes via gmail.123452026.xyz and use +aliases (up to 6 accounts per CDK).",
-    "emailProviderSmsIosmqHint": "Redeem a MAIL card on sms.iosmq.xyz (POST /api/v1/redeem), then poll order/lookup for OTP. One mailbox per card — no aliases.",
-    "accountsPerCardSmsIosmqHint": "sms.iosmq.xyz assigns one mailbox per MAIL card (no +aliases)."
+    "emailProviderSmsIosmqHint": "Redeem a MAIL card on sms.iosmq.xyz (POST /api/v1/redeem), then poll order/lookup for the mailbox and newest OTP. Generate +aliases (up to 6 accounts per card)."
   },
   "sms": {
     "title": "SMS / OTP Verification",

@@ -1,12 +1,14 @@
+mod alias;
 pub mod error;
-pub mod gmail_cdk;
-pub mod iosmq;
+pub mod gmail_123452026;
+pub mod sms_iosmq;
 
 use serde::{Deserialize, Serialize};
 
+pub use alias::{EmailAliasGenerator, MAX_ALIASES_PER_EMAIL};
 pub use error::EmailServiceError;
-pub use gmail_cdk::GmailCdkService;
-pub use iosmq::IosmqMailService;
+pub use gmail_123452026::Gmail123452026Service;
+pub use sms_iosmq::SmsIosmqService;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailInfo {
@@ -31,10 +33,11 @@ pub enum EmailProvider {
   #[serde(
     rename = "gmail.123452026.xyz",
     alias = "gmail_cdk",
-    alias = "gmail-cdk"
+    alias = "gmail-cdk",
+    alias = "123452026"
   )]
   Gmail123452026,
-  /// https://sms.iosmq.xyz — MAIL redeem + order/lookup (1 mailbox per card).
+  /// https://sms.iosmq.xyz — MAIL redeem + order/lookup +aliases (up to 6).
   #[serde(
     rename = "sms.iosmq.xyz",
     alias = "iosmq",
@@ -56,27 +59,27 @@ impl EmailProvider {
     }
   }
 
-  pub fn parse(raw: &str) -> Self {
-    let s = raw.trim().to_ascii_lowercase();
-    match s.as_str() {
-      // Domain id + legacy aliases
-      "sms.iosmq.xyz" | "iosmq" | "sms.iosmq" | "iosmq.xyz" | "mail" => Self::SmsIosmq,
-      // Domain id + legacy aliases / default
-      "gmail.123452026.xyz" | "gmail_cdk" | "gmail-cdk" | "123452026" => Self::Gmail123452026,
-      _ => Self::Gmail123452026,
+  pub fn parse(raw: &str) -> Result<Self, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+      "gmail.123452026.xyz" | "gmail_cdk" | "gmail-cdk" | "123452026" => Ok(Self::Gmail123452026),
+      "sms.iosmq.xyz" | "iosmq" | "sms.iosmq" | "iosmq.xyz" | "mail" => Ok(Self::SmsIosmq),
+      other => Err(format!(
+        "unsupported email provider '{other}'; expected {} or {}",
+        Self::GMAIL_123452026_ID,
+        Self::SMS_IOSMQ_ID
+      )),
     }
   }
 
   /// Whether this provider supports multiple accounts via aliases per card.
   pub fn supports_aliases(self) -> bool {
-    matches!(self, Self::Gmail123452026)
+    matches!(self, Self::Gmail123452026 | Self::SmsIosmq)
   }
 
   /// Max accounts that can be created from one card/CDK.
   pub fn max_accounts_per_card(self) -> u32 {
     match self {
-      Self::Gmail123452026 => 6,
-      Self::SmsIosmq => 1,
+      Self::Gmail123452026 | Self::SmsIosmq => 6,
     }
   }
 
@@ -98,8 +101,7 @@ pub trait EmailService: Send + Sync {
   /// Redeem a card/CDK to obtain a base email address.
   fn redeem_cdk(&self, cdk: &str) -> Result<EmailInfo, EmailServiceError>;
 
-  /// Generate an alias from a base email when the provider supports it.
-  /// Providers without alias support should return `base_email` unchanged.
+  /// Generate an alias from a base email.
   fn generate_alias(&self, base_email: &str) -> Result<String, EmailServiceError>;
 
   /// Poll for a verification code sent to the email associated with the card/CDK.
@@ -117,14 +119,9 @@ pub trait EmailService: Send + Sync {
 /// Build the email OTP provider selected by auto-registration config.
 pub fn build_email_service(provider: EmailProvider) -> Box<dyn EmailService> {
   match provider {
-    EmailProvider::SmsIosmq => Box::new(IosmqMailService::new()),
-    EmailProvider::Gmail123452026 => Box::new(GmailCdkService::new()),
+    EmailProvider::SmsIosmq => Box::new(SmsIosmqService::new()),
+    EmailProvider::Gmail123452026 => Box::new(Gmail123452026Service::new()),
   }
-}
-
-/// Convenience for callers that still hold a free-form provider id string.
-pub fn build_email_service_from_str(provider: &str) -> Box<dyn EmailService> {
-  build_email_service(EmailProvider::parse(provider))
 }
 
 #[cfg(test)]
@@ -135,34 +132,34 @@ mod tests {
   fn parse_provider_by_domain() {
     assert_eq!(
       EmailProvider::parse("gmail.123452026.xyz"),
-      EmailProvider::Gmail123452026
+      Ok(EmailProvider::Gmail123452026)
     );
     assert_eq!(
       EmailProvider::parse("sms.iosmq.xyz"),
-      EmailProvider::SmsIosmq
+      Ok(EmailProvider::SmsIosmq)
     );
   }
 
   #[test]
-  fn parse_provider_legacy_aliases() {
-    assert_eq!(
-      EmailProvider::parse("gmail_cdk"),
-      EmailProvider::Gmail123452026
-    );
-    assert_eq!(EmailProvider::parse("iosmq"), EmailProvider::SmsIosmq);
-    assert_eq!(EmailProvider::parse("mail"), EmailProvider::SmsIosmq);
-    assert_eq!(
-      EmailProvider::parse("unknown"),
-      EmailProvider::Gmail123452026
-    );
+  fn accept_legacy_provider_ids() {
+    for alias in ["gmail_cdk", "gmail-cdk", "123452026"] {
+      assert_eq!(
+        EmailProvider::parse(alias),
+        Ok(EmailProvider::Gmail123452026)
+      );
+    }
+    for alias in ["iosmq", "sms.iosmq", "iosmq.xyz", "mail"] {
+      assert_eq!(EmailProvider::parse(alias), Ok(EmailProvider::SmsIosmq));
+    }
+    assert!(EmailProvider::parse("unknown").is_err());
   }
 
   #[test]
   fn provider_account_limits() {
     assert!(EmailProvider::Gmail123452026.supports_aliases());
-    assert!(!EmailProvider::SmsIosmq.supports_aliases());
+    assert!(EmailProvider::SmsIosmq.supports_aliases());
     assert_eq!(EmailProvider::Gmail123452026.clamp_accounts_per_card(9), 6);
-    assert_eq!(EmailProvider::SmsIosmq.clamp_accounts_per_card(3), 1);
+    assert_eq!(EmailProvider::SmsIosmq.clamp_accounts_per_card(9), 6);
   }
 
   #[test]
@@ -176,8 +173,6 @@ mod tests {
       r#""gmail.123452026.xyz""#
     );
     assert_eq!(serde_json::to_string(&i).unwrap(), r#""sms.iosmq.xyz""#);
-
-    // Legacy aliases still deserialize.
     let legacy_g: EmailProvider = serde_json::from_str(r#""gmail_cdk""#).unwrap();
     let legacy_i: EmailProvider = serde_json::from_str(r#""iosmq""#).unwrap();
     assert_eq!(legacy_g, EmailProvider::Gmail123452026);
