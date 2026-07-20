@@ -62,3 +62,11 @@ nodecar/nodecar-bin
 
 # claude
 .claude/
+
+# agent / local tooling noise (do not commit)
+**/.zcode/
+.zcode/
+**/session-summary.json
+**/session-summary.md
+src/i18n/locales/.zcode/
+scripts/patch_*.py
