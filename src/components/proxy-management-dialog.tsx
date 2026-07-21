@@ -297,6 +297,30 @@ export function ProxyManagementDialog({
     setEditingProxy(null);
   }, []);
 
+  const resolveSyncToggleError = useCallback(
+    (error: unknown) => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : String(error ?? "");
+      const normalized = message.toLowerCase();
+      if (
+        normalized.includes("sync server not configured") ||
+        normalized.includes("sync token not configured") ||
+        normalized.includes("please configure sync settings first")
+      ) {
+        return t("sync.mode.notConfigured");
+      }
+      if (message.trim()) {
+        return message;
+      }
+      return t("proxies.management.updateSyncFailed");
+    },
+    [t],
+  );
+
   const handleToggleSync = useCallback(
     async (proxy: StoredProxy) => {
       setIsTogglingSync((prev) => ({ ...prev, [proxy.id]: true }));
@@ -313,16 +337,12 @@ export function ProxyManagementDialog({
         await emit("stored-proxies-changed");
       } catch (error) {
         console.error("Failed to toggle sync:", error);
-        showErrorToast(
-          error instanceof Error
-            ? error.message
-            : t("proxies.management.updateSyncFailed"),
-        );
+        showErrorToast(resolveSyncToggleError(error));
       } finally {
         setIsTogglingSync((prev) => ({ ...prev, [proxy.id]: false }));
       }
     },
-    [t],
+    [resolveSyncToggleError, t],
   );
 
   // VPN handlers
@@ -377,16 +397,12 @@ export function ProxyManagementDialog({
         await emit("vpn-configs-changed");
       } catch (error) {
         console.error("Failed to toggle VPN sync:", error);
-        showErrorToast(
-          error instanceof Error
-            ? error.message
-            : t("proxies.management.updateSyncFailed"),
-        );
+        showErrorToast(resolveSyncToggleError(error));
       } finally {
         setIsTogglingVpnSync((prev) => ({ ...prev, [vpn.id]: false }));
       }
     },
-    [t],
+    [resolveSyncToggleError, t],
   );
 
   return (

@@ -34,7 +34,10 @@ fn get_ephemeral_base_dir() -> Result<PathBuf, String> {
       if let Ok(mount) = get_or_create_windows_ramdisk() {
         return Ok(mount);
       }
-      log::warn!("Failed to create Windows RAM disk, ephemeral profiles may use disk");
+      // imdisk is optional. Falling back to %TEMP% is expected on most machines.
+      log::debug!(
+        "Windows RAM disk unavailable (imdisk not installed/usable); ephemeral profiles use temp disk"
+      );
     }
 
     // Fallback
