@@ -250,28 +250,53 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     (r) => (r.remaining ?? 0) > 0 && r.status !== "running",
   );
 
-  const cdkCount = parseCdks(cdkText).length;
-  const totalAccounts = cdkCount * effectiveAccountsPerCdk;
+  const parsedCdks = parseCdks(cdkText);
+  const cdkCount = parsedCdks.length;
+
+  /** Live remaining for a single known inventory CDK (prefer list over top-up snapshot). */
+  const liveSingleRemaining = (() => {
+    if (parsedCdks.length !== 1) return null;
+    const key = parsedCdks[0].trim().toUpperCase();
+    if (remainingByCdk.has(key)) {
+      return remainingByCdk.get(key) ?? 0;
+    }
+    if (topUpRemaining != null) return topUpRemaining;
+    return null;
+  })();
+
+  const accountsPerCdkCap =
+    liveSingleRemaining != null
+      ? Math.max(0, Math.min(6, liveSingleRemaining))
+      : 6;
+
+  const displayAccountsPerCdk =
+    liveSingleRemaining != null
+      ? Math.min(effectiveAccountsPerCdk, Math.max(0, liveSingleRemaining))
+      : effectiveAccountsPerCdk;
+
+  const totalAccounts = cdkCount * Math.max(displayAccountsPerCdk, 0);
 
   const resolveStartAccountsPerCdk = (cdks: string[]): number => {
     let n = effectiveAccountsPerCdk;
-    if (topUpRemaining != null && cdks.length === 1) {
-      n = Math.min(n, Math.max(1, topUpRemaining));
-    } else if (cdks.length === 1) {
-      const rem = remainingByCdk.get(cdks[0].trim().toUpperCase());
-      if (typeof rem === "number" && rem > 0) {
-        n = Math.min(n, rem);
-      } else if (rem === 0) {
-        n = 0;
+    if (cdks.length === 1) {
+      const key = cdks[0].trim().toUpperCase();
+      const rem = remainingByCdk.has(key)
+        ? (remainingByCdk.get(key) ?? 0)
+        : topUpRemaining;
+      if (typeof rem === "number") {
+        n = Math.min(n, Math.max(0, rem));
       }
     }
     return n;
   };
 
   const handleTopUp = (cdk: string, remaining: number) => {
-    const slots = Math.max(1, remaining);
+    if (remaining < 1) {
+      toast.error(t("registration.cdkTopUpDisabledFull"));
+      return;
+    }
     setCdkText(cdk);
-    setAccountsPerCdk(clampAccountsPerCard(emailProvider, slots));
+    setAccountsPerCdk(clampAccountsPerCard(emailProvider, remaining));
     setTopUpRemaining(remaining);
     setActiveTab("register");
     toast.message(t("registration.cdkTopUpTitle"), {
@@ -606,28 +631,20 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   id="perCdk"
                   type="number"
                   min={1}
-                  max={
-                    topUpRemaining != null
-                      ? Math.max(1, Math.min(6, topUpRemaining))
-                      : 6
-                  }
-                  value={
-                    topUpRemaining != null
-                      ? Math.min(effectiveAccountsPerCdk, topUpRemaining)
-                      : effectiveAccountsPerCdk
-                  }
+                  max={Math.max(1, accountsPerCdkCap || 6)}
+                  value={Math.max(displayAccountsPerCdk, 0)}
                   onChange={(e) => {
                     let n = Number(e.target.value);
-                    if (topUpRemaining != null) {
-                      n = Math.min(n, topUpRemaining);
+                    if (liveSingleRemaining != null) {
+                      n = Math.min(n, Math.max(0, liveSingleRemaining));
                     }
                     setAccountsPerCdk(clampAccountsPerCard(emailProvider, n));
                   }}
                 />
-                {topUpRemaining != null ? (
+                {liveSingleRemaining != null ? (
                   <p className="text-[11px] text-muted-foreground">
                     {t("registration.cdkRemainingOfMax", { max: 6 })}:{" "}
-                    {topUpRemaining}
+                    {liveSingleRemaining}
                   </p>
                 ) : null}
               </div>

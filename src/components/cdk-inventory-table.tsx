@@ -191,7 +191,13 @@ export function CdkInventoryTable({
                                   ? t("registration.cdkTopUpDisabledFull")
                                   : t("registration.cdkTopUpTitle")
                             }
-                            aria-label={t("registration.cdkTopUpTitle")}
+                            aria-label={
+                              isRunning
+                                ? t("registration.cdkTopUpDisabledRunning")
+                                : remaining <= 0
+                                  ? t("registration.cdkTopUpDisabledFull")
+                                  : t("registration.cdkTopUpTitle")
+                            }
                             onClick={(e) => {
                               e.stopPropagation();
                               if (!canTopUp) return;
