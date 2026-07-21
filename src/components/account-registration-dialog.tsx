@@ -38,7 +38,6 @@ import {
   clampAccountsPerCard,
   emailProviderHintKey,
   isEmailProvider,
-  supportsAliases,
 } from "@/lib/email-providers";
 
 interface Props {
@@ -90,7 +89,6 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     emailProvider,
     accountsPerCdk,
   );
-  const aliasCapable = supportsAliases(emailProvider);
 
   const nordLocations = [
     { value: "Japan", labelKey: "registration.nordLocJapan" },
@@ -304,7 +302,9 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       rotateEveryN:
         networkMode === "nord" || networkMode === "vpn" ? rotateEveryN : 0,
       nordGroup:
-        networkMode === "nord" ? nordGroup.trim() || undefined : undefined,
+        networkMode === "nord" || networkMode === "vpn"
+          ? nordGroup.trim() || undefined
+          : undefined,
       nordServerName:
         networkMode === "nord" ? nordServerName.trim() || undefined : undefined,
       emailProvider,
@@ -324,7 +324,10 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[min(92vh,860px)] w-[min(96vw,1100px)] max-w-none flex-col overflow-hidden">
+      <DialogContent
+        aria-describedby={undefined}
+        className="flex h-[min(92vh,860px)] w-[min(96vw,1100px)] max-w-none flex-col overflow-hidden"
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <LuRocket className="h-5 w-5 text-primary" />
@@ -494,16 +497,13 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               <div className="space-y-2">
                 <Label htmlFor="perCdk">
-                  {aliasCapable
-                    ? t("registration.accountsPerCdk")
-                    : t("registration.accountsPerCard")}
+                  {t("registration.accountsPerCdk")}
                 </Label>
                 <Input
                   id="perCdk"
                   type="number"
                   min={1}
-                  max={aliasCapable ? 6 : 1}
-                  disabled={!aliasCapable}
+                  max={6}
                   value={effectiveAccountsPerCdk}
                   onChange={(e) =>
                     setAccountsPerCdk(
@@ -514,11 +514,6 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                     )
                   }
                 />
-                {!aliasCapable && (
-                  <p className="text-[11px] text-muted-foreground">
-                    {t("registration.accountsPerCardSmsIosmqHint")}
-                  </p>
-                )}
               </div>
 
               <div className="space-y-2">

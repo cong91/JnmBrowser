@@ -818,7 +818,7 @@ export function LoginAccountsTable({
           if (!open) setEditing(null);
         }}
       >
-        <DialogContent className="max-w-lg">
+        <DialogContent aria-describedby={undefined} className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{t("autoLogin.editAccount")}</DialogTitle>
           </DialogHeader>

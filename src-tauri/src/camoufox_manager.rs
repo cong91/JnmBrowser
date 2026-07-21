@@ -949,13 +949,23 @@ impl CamoufoxManager {
     {
       use std::os::windows::process::CommandExt;
       const CREATE_NO_WINDOW: u32 = 0x08000000;
+      // /F /T: force-kill full process tree (matches chromium + platform_browser).
       let result = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T"])
+        .args(["/F", "/T", "/PID", &pid.to_string()])
         .creation_flags(CREATE_NO_WINDOW)
         .status();
 
       match result {
-        Ok(status) => status.success(),
+        Ok(status) => {
+          if status.success() {
+            true
+          } else {
+            // Already-gone PID is success for concurrent worker teardown.
+            use sysinfo::{Pid, System};
+            let system = System::new_all();
+            system.process(Pid::from_u32(pid)).is_none()
+          }
+        }
         Err(e) => {
           log::warn!("Failed to kill process {}: {}", pid, e);
           false

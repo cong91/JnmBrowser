@@ -485,45 +485,71 @@ pub mod windows {
   pub async fn kill_browser_process_impl(
     pid: u32,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // First try using sysinfo (cross-platform approach)
-    use sysinfo::{Pid, System};
-    let system = System::new_all();
-    if let Some(process) = system.process(Pid::from(pid as usize)) {
-      if process.kill() {
-        log::info!("Successfully killed browser process with PID: {pid}");
-        return Ok(());
-      }
-    }
-
-    // Fallback to Windows-specific process termination
-    use std::process::Command;
-
-    // Try taskkill command as fallback
+    // Kill the entire process tree first.
+    // Camoufox/Chromium spawn many child processes; sysinfo's process.kill()
+    // only reaps the parent and leaves children holding the profile files,
+    // which blocks the next ephemeral-dir wipe and accumulates live browsers
+    // (root cause of "1 CDK spawns multiple browsers at once" on Windows).
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let output = Command::new("taskkill")
-      .args(["/F", "/PID", &pid.to_string()])
+      .args(["/F", "/T", "/PID", &pid.to_string()])
       .creation_flags(CREATE_NO_WINDOW)
       .output();
 
     match output {
-      Ok(result) => {
-        if result.status.success() {
-          log::info!("Successfully killed browser process with PID: {pid} using taskkill");
-          Ok(())
-        } else {
-          Err(
-            format!(
-              "Failed to kill process {} with taskkill: {}",
-              pid,
-              String::from_utf8_lossy(&result.stderr)
-            )
-            .into(),
-          )
-        }
+      Ok(result) if result.status.success() => {
+        log::info!("Successfully killed process tree for PID: {pid} using taskkill /F /T");
+        return Ok(());
       }
-      Err(e) => Err(format!("Failed to execute taskkill for process {}: {}", pid, e).into()),
+      Ok(result) => {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let stderr_lower = stderr.to_ascii_lowercase();
+        // taskkill exits non-zero when the PID is already gone — that is success
+        // for auto-reg teardown (browser already exited / prior stop won the race).
+        if stderr_lower.contains("not found")
+          || stderr_lower.contains("no running instance")
+          || stderr_lower.contains("not running")
+        {
+          log::info!(
+            "Process {pid} already gone (taskkill: {}); treating kill as success",
+            stderr.trim()
+          );
+          return Ok(());
+        }
+        log::debug!(
+          "taskkill /F /T for PID {pid} returned non-zero: {}; falling back to sysinfo",
+          stderr.trim()
+        );
+      }
+      Err(e) => {
+        log::debug!("taskkill /F /T for PID {pid} failed to spawn: {e}; falling back to sysinfo");
+      }
     }
+
+    // Fallback: reap any remaining process via sysinfo.
+    use sysinfo::{Pid, System};
+    let system = System::new_all();
+    if let Some(process) = system.process(Pid::from_u32(pid)) {
+      if process.kill() {
+        log::info!("Successfully killed browser process with PID: {pid} via sysinfo fallback");
+        return Ok(());
+      }
+      // kill() returned false — re-check; process may have exited mid-call.
+      let system = System::new_all();
+      if system.process(Pid::from_u32(pid)).is_none() {
+        log::info!("Process {pid} exited after sysinfo kill attempt; treating as success");
+        return Ok(());
+      }
+      return Err(
+        format!("Failed to kill process {pid}: taskkill /F /T and sysinfo kill both failed").into(),
+      );
+    }
+
+    // Process is not in the table → already dead. Concurrent auto-reg workers
+    // previously treated this as hard failure and aborted the whole CDK.
+    log::info!("Process {pid} not found after taskkill; treating kill as success");
+    Ok(())
   }
 }
 

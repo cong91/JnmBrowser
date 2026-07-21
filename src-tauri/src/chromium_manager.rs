@@ -1270,10 +1270,13 @@ impl ChromiumManager {
         }
         #[cfg(windows)]
         {
+          // /T kills the full process tree (renderer/GPU/utility children).
+          // Without it, parent dies but children hold the profile dir open —
+          // concurrent auto-reg then fails force-kill and aborts the CDK.
           use std::os::windows::process::CommandExt;
           const CREATE_NO_WINDOW: u32 = 0x08000000;
           let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
+            .args(["/F", "/T", "/PID", &pid.to_string()])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
         }

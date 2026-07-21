@@ -1,26 +1,23 @@
-use rand::Rng;
-use std::collections::HashSet;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::{EmailInfo, EmailService, EmailServiceError, VerificationCodeResponse};
+use super::{
+  EmailAliasGenerator, EmailInfo, EmailService, EmailServiceError, VerificationCodeResponse,
+};
 
 const API_BASE: &str = "http://gmail.123452026.xyz/api";
 const POLL_INTERVAL_SECS: u64 = 3;
-const MAX_ALIASES_PER_EMAIL: usize = 6;
 
-/// Gmail CDK email service.
-/// Redeems CDK codes for Gmail addresses and polls for verification codes.
+/// Email service for `gmail.123452026.xyz`.
+/// Redeems cards for Gmail addresses and polls for verification codes.
 /// Uses `reqwest` (async) internally — calls are bridged via `tokio::runtime::Handle`.
-pub struct GmailCdkService {
-  /// Tracks used aliases per base email to stay within the 6-alias budget.
-  used_aliases: Mutex<Vec<(String, HashSet<String>)>>,
+pub struct Gmail123452026Service {
+  aliases: EmailAliasGenerator,
 }
 
-impl GmailCdkService {
+impl Gmail123452026Service {
   pub fn new() -> Self {
     Self {
-      used_aliases: Mutex::new(Vec::new()),
+      aliases: EmailAliasGenerator::default(),
     }
   }
 
@@ -42,14 +39,14 @@ impl GmailCdkService {
         std::thread::scope(|s| {
           s.spawn(move || handle.block_on(future))
             .join()
-            .expect("gmail cdk nested runtime thread panicked")
+            .expect("gmail.123452026.xyz nested runtime thread panicked")
         })
       }
       Err(_) => {
         let rt = tokio::runtime::Builder::new_current_thread()
           .enable_all()
           .build()
-          .expect("Failed to create gmail cdk runtime");
+          .expect("Failed to create gmail.123452026.xyz runtime");
         rt.block_on(future)
       }
     }
@@ -62,49 +59,9 @@ impl GmailCdkService {
       .build()
       .expect("Failed to build reqwest Client")
   }
-
-  /// Extract the username portion from a Gmail address.
-  fn extract_username(email: &str) -> &str {
-    email.split('@').next().unwrap_or(email)
-  }
-
-  /// Check if an alias is already used for a given base email.
-  fn is_alias_used(&self, base_email: &str, alias: &str) -> bool {
-    let guard = self.used_aliases.lock().unwrap();
-    for (email, aliases) in guard.iter() {
-      if email == base_email {
-        return aliases.contains(alias);
-      }
-    }
-    false
-  }
-
-  /// Register an alias as used for a base email.
-  fn mark_alias_used(&self, base_email: &str, alias: &str) {
-    let mut guard = self.used_aliases.lock().unwrap();
-    for (email, aliases) in guard.iter_mut() {
-      if email == base_email {
-        aliases.insert(alias.to_string());
-        return;
-      }
-    }
-    let mut set = HashSet::new();
-    set.insert(alias.to_string());
-    guard.push((base_email.to_string(), set));
-  }
-
-  /// Count used aliases for a base email.
-  fn used_alias_count(&self, base_email: &str) -> usize {
-    let guard = self.used_aliases.lock().unwrap();
-    guard
-      .iter()
-      .find(|(e, _)| e == base_email)
-      .map(|(_, aliases)| aliases.len())
-      .unwrap_or(0)
-  }
 }
 
-impl EmailService for GmailCdkService {
+impl EmailService for Gmail123452026Service {
   fn redeem_cdk(&self, cdk: &str) -> Result<EmailInfo, EmailServiceError> {
     let url = format!("{API_BASE}/mailbox/redeem");
     let body = serde_json::json!({ "cdk": cdk });
@@ -166,39 +123,7 @@ impl EmailService for GmailCdkService {
   }
 
   fn generate_alias(&self, base_email: &str) -> Result<String, EmailServiceError> {
-    let username = Self::extract_username(base_email);
-    let domain = base_email.split('@').nth(1).unwrap_or("gmail.com");
-
-    let used_count = self.used_alias_count(base_email);
-    if used_count >= MAX_ALIASES_PER_EMAIL {
-      return Err(EmailServiceError::EmailInvalid(format!(
-        "maximum {MAX_ALIASES_PER_EMAIL} aliases already used for {base_email}"
-      )));
-    }
-
-    // Generate random 5-char alphanumeric alias
-    let mut rng = rand::rng();
-    for _ in 0..50 {
-      let alias: String = (0..5)
-        .map(|_| {
-          let idx = (rng.next_u32() % 36) as u8;
-          if idx < 10 {
-            (b'0' + idx) as char
-          } else {
-            (b'a' + (idx - 10)) as char
-          }
-        })
-        .collect();
-
-      if !self.is_alias_used(base_email, &alias) {
-        self.mark_alias_used(base_email, &alias);
-        return Ok(format!("{username}+{alias}@{domain}"));
-      }
-    }
-
-    Err(EmailServiceError::Internal(
-      "failed to generate unique alias after 50 attempts".into(),
-    ))
+    self.aliases.generate(base_email)
   }
 
   fn poll_verification_code(
@@ -300,7 +225,7 @@ impl EmailService for GmailCdkService {
   }
 }
 
-impl Default for GmailCdkService {
+impl Default for Gmail123452026Service {
   fn default() -> Self {
     Self::new()
   }

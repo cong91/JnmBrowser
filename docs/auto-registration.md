@@ -9,7 +9,7 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 1. **Email provider**: Choose **gmail.123452026.xyz** or **sms.iosmq.xyz** quota-card API
 2. **Mailbox acquisition**:
    - gmail.123452026.xyz: redeem CDK → base Gmail, then `user+{random}@gmail.com` aliases (up to 6)
-   - sms.iosmq.xyz: `POST /api/v1/redeem` with `MAIL-…` card, then poll `GET /api/v1/order/lookup?code=…&poll=true` for OTP (1 mailbox per card; no aliases)
+   - sms.iosmq.xyz: `POST /api/v1/redeem` with `MAIL-…` card to claim the base mailbox, then poll `GET /api/v1/order/lookup?code=…&poll=true` for the mailbox and newest OTP; generate `user+{random}@gmail.com` aliases (up to 6) against the same card lookup
 3. **Browser Automation**: Reuses one worker Chromium/Camoufox profile per batch; each account relaunches with a renewed fingerprint (+ optional proxy)
 4. **Registration Flow**: Automates the ChatGPT signup via CDP / Playwright
 5. **OTP Retrieval**: Polls the selected email provider for the verification code
@@ -22,7 +22,7 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 
 - A valid email card:
   - gmail.123452026.xyz: `GMAIL-XXXX-XXXX-XXXX-XXXX` (provider `gmail.123452026.xyz`)
-  - sms.iosmq.xyz: `MAIL-XXXX-XXXX-XXXX` (provider `sms.iosmq.xyz`)
+  - sms.iosmq.xyz: `MAIL-XXXX-XXXX-XXXX` (provider `sms.iosmq.xyz`); redeem the MAIL card, then poll `order/lookup` for the mailbox and newest OTP
 - Chromium or Camoufox browser installed (via JnmBrowser's downloader)
 - **Network (pick one mode):**
   - **None** — host egress IP
@@ -38,7 +38,7 @@ The auto-registration feature automates the entire ChatGPT signup flow:
 2. Click the **Auto Registration** button in the header
 3. Choose **Email provider** (`gmail.123452026.xyz` or `sms.iosmq.xyz`)
 4. Enter your card/CDK code(s)
-5. Configure browser type, retries, accounts per CDK (sms.iosmq.xyz forces 1 account/card)
+5. Configure browser type, retries, and accounts per CDK (1–6 aliases for either provider)
 6. Choose **Network**:
    - **None** — no proxy / no VPN
    - **Proxy** — enter proxy ID
@@ -88,14 +88,16 @@ Every CDK used is persisted under app data `cdk_inventory/`:
 
 | Field | Meaning |
 |-------|---------|
-| `targetAccounts` | `accountsPerCdk` for that run |
-| `attempted` | alias slots that finished |
+| `targetAccounts` | Cumulative account slots requested for this card |
+| `attempted` | Cumulative alias slots that finished |
 | `freeTrialYes` | free-trial eligible successes |
 | `freeTrialNo` | registered but **no** free trial (saved, status invalid) |
 | `failed` | hard failures after retries |
 | `accounts[]` | per-email detail (success / free trial / error) |
 
 UI: Auto Registration → **CDK stats** tab. Commands: `list_cdk_inventory_cmd`, `delete_cdk_inventory_cmd`.
+
+Each canonical card (`trim` + case-insensitive) has a lifetime budget of six logical account slots. Active tasks reserve slots atomically so the same card cannot be over-allocated concurrently; full-flow retries reuse one slot and one account identity. The usage ledger stores only one-way SHA-256 card identifiers and is kept separately from the CDK stats rows, so deleting a stats row does not reset the provider/card quota.
 
 ### Via Tauri Commands
 
@@ -125,7 +127,7 @@ const smsIosmqTask = await invoke("start_auto_registration", {
     browserType: "chromium",
     networkMode: "none",
     maxRetries: 3,
-    accountsPerCdk: 1, // one mailbox per MAIL card (no +aliases)
+    accountsPerCdk: 1, // 1–6 aliases per card/CDK
     headless: false,
     concurrency: 1,
   },
@@ -189,7 +191,8 @@ await invoke("delete_registered_account_cmd", { accountId: "..." });
 
 ```
 Frontend (React) → Tauri invoke → RegistrationEngine (Rust)
-                                     ├── GmailCdkService (HTTP API)
+                                     ├── Gmail123452026Service (HTTP API)
+                                     ├── SmsIosmqService (HTTP API)
                                      ├── BrowserRunner (launch profile)
                                      ├── CDP / Playwright (automation)
                                      ├── Nord CLI helper (optional system VPN)
@@ -228,15 +231,16 @@ Each file contains:
 ## Troubleshooting
 
 ### CDK Redeem Fails
-- Verify the CDK is valid and not expired
-- Check network connectivity to `http://gmail.123452026.xyz`
+- gmail.123452026.xyz: redeem the CDK and poll the Gmail mailbox API for OTP
+- sms.iosmq.xyz: redeem the MAIL card, then poll `order/lookup` for the mailbox and newest OTP
 
 ### Browser Launch Fails
 - Ensure the browser binary is downloaded
 - Check proxy connectivity
 
 ### OTP Never Arrives
-- The Gmail CDK API may be rate-limited
+- The selected provider API may be rate-limited or temporarily unavailable
+- Confirm the selected domain provider is reachable and the card/CDK is active
 - Increase timeout or retry
 
 ### Cloudflare Interception

@@ -8,9 +8,9 @@ export const EMAIL_PROVIDERS = [
 export type EmailProvider = (typeof EMAIL_PROVIDERS)[number];
 
 const LEGACY_ALIASES: Record<string, EmailProvider> = {
+  "123452026": "gmail.123452026.xyz",
   gmail_cdk: "gmail.123452026.xyz",
   "gmail-cdk": "gmail.123452026.xyz",
-  "123452026": "gmail.123452026.xyz",
   iosmq: "sms.iosmq.xyz",
   "sms.iosmq": "sms.iosmq.xyz",
   "iosmq.xyz": "sms.iosmq.xyz",
@@ -35,18 +35,8 @@ export function parseEmailProvider(
 }
 
 /** Max accounts that can be created from one card/CDK for the provider. */
-export function maxAccountsPerCard(provider: EmailProvider): number {
-  switch (provider) {
-    case "sms.iosmq.xyz":
-      return 1;
-    case "gmail.123452026.xyz":
-    default:
-      return 6;
-  }
-}
-
-export function supportsAliases(provider: EmailProvider): boolean {
-  return provider === "gmail.123452026.xyz";
+export function maxAccountsPerCard(_provider: EmailProvider): number {
+  return 6;
 }
 
 export function clampAccountsPerCard(
@@ -65,7 +55,6 @@ export function cardCodesPlaceholder(provider: EmailProvider): string {
   switch (provider) {
     case "sms.iosmq.xyz":
       return "MAIL-XXXX-XXXX-XXXX\nMAIL-YYYY-YYYY-YYYY";
-    case "gmail.123452026.xyz":
     default:
       return "GMAIL-K4L5-EUW5-PHBV-A6KW\nGMAIL-XXXX-XXXX-XXXX-XXXX";
   }
@@ -76,7 +65,6 @@ export function emailProviderLabelKey(provider: EmailProvider): string {
   switch (provider) {
     case "sms.iosmq.xyz":
       return "registration.emailProviderSmsIosmq";
-    case "gmail.123452026.xyz":
     default:
       return "registration.emailProviderGmail123452026";
   }
@@ -87,7 +75,6 @@ export function emailProviderHintKey(provider: EmailProvider): string {
   switch (provider) {
     case "sms.iosmq.xyz":
       return "registration.emailProviderSmsIosmqHint";
-    case "gmail.123452026.xyz":
     default:
       return "registration.emailProviderGmail123452026Hint";
   }

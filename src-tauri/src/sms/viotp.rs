@@ -24,7 +24,7 @@ impl ViotpService {
 
   /// Helper to run an async future safely from sync trait methods.
   ///
-  /// Same bridging pattern as `GmailCdkService`: avoid nested `block_on` panics
+  /// Same bridging pattern as `Gmail123452026Service`: avoid nested `block_on` panics
   /// when already inside a Tokio runtime worker.
   fn block_on<F, T>(future: F) -> T
   where

@@ -13,7 +13,10 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 use uuid::Uuid;
 
 use super::sentinel::build_sentinel_token;
-use super::store::{put_cdk_inventory_record, save_registration_result};
+use super::store::{
+  cdk_remaining_capacity, get_cdk_inventory, put_cdk_inventory_record, reserve_cdk_slots_per,
+  save_registration_result, CdkSlotReservation, MAX_ACCOUNTS_PER_CDK,
+};
 use super::types::{
   should_rotate, CdkInventoryRecord, NetworkMode, RegistrationConfig, RegistrationProgress,
   RegistrationResult, RegistrationStep,
@@ -1011,6 +1014,29 @@ fn is_cloudflare_block(url: &str) -> bool {
 // Registration Engine
 // ---------------------------------------------------------------------------
 
+struct AccountIdentity {
+  alias_email: String,
+  password: String,
+  first_name: String,
+  last_name: String,
+  birthdate: String,
+  device_id: String,
+}
+
+impl AccountIdentity {
+  fn new(alias_email: String) -> Self {
+    let (first_name, last_name) = random_name();
+    Self {
+      alias_email,
+      password: random_password(),
+      first_name,
+      last_name,
+      birthdate: random_birthday(),
+      device_id: Uuid::new_v4().to_string(),
+    }
+  }
+}
+
 pub struct RegistrationEngine {
   config: RegistrationConfig,
   cancel_flag: Arc<AtomicBool>,
@@ -1112,11 +1138,49 @@ impl RegistrationEngine {
       "auto-reg-ephemeral-{}",
       &self.task_id[..8.min(self.task_id.len())]
     );
+
+    // Resolve preferred Nord country (UI default: "Japan") so peer pool egress
+    // matches the OpenAI-friendly location selected in the dialog. Without this,
+    // `country_id=None` returns any Nord server and ChatGPT region-blocks VN egress.
+    let country_id = if let Some(group) = self
+      .config
+      .nord_group
+      .as_deref()
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+    {
+      // `nord_group` may be a country name ("Japan") or a VPN display name
+      // ("Nord · Japan #42"); infer_country_code_from_vpn_name handles both.
+      let code = crate::vpn::infer_country_code_from_vpn_name(group)
+        .or_else(|| crate::vpn::infer_country_code_from_vpn_name(&format!("Nord · {group}")));
+      match code.as_deref() {
+        Some(code) => match crate::vpn::list_nord_countries().await {
+          Ok(countries) => crate::vpn::resolve_country_id_by_code(&countries, code),
+          Err(e) => {
+            self.log(&format!(
+              "WARN: failed to list Nord countries for group {group:?}: {e}; spawning pool without country filter"
+            ));
+            None
+          }
+        },
+        None => {
+          self.log(&format!(
+            "WARN: nord_group {group:?} did not resolve to a known country code; spawning pool without country filter"
+          ));
+          None
+        }
+      }
+    } else {
+      None
+    };
+
     let ids =
-      crate::vpn::spawn_ephemeral_nord_peer_pool(&private_key, pool_size, None, &prefix).await?;
+      crate::vpn::spawn_ephemeral_nord_peer_pool(&private_key, pool_size, country_id, &prefix)
+        .await?;
     self.log(&format!(
-      "Spawned ephemeral Nord peer pool: {} conf(s) for concurrency",
-      ids.len()
+      "Spawned ephemeral Nord peer pool: {} conf(s) for concurrency (country_id={:?})",
+      ids.len(),
+      country_id
     ));
     for (i, id) in ids.iter().enumerate() {
       self.log(&format!("  peer pool[{i}] vpn_id={id}"));
@@ -1323,6 +1387,82 @@ impl RegistrationEngine {
     let accounts_per = self.config.effective_accounts_per_cdk();
     let max_retries = self.config.max_retries.max(1);
     let cdks = self.config.cdks.clone();
+
+    // Retry-cap flow: clamp the per-CDK request to the CDK's remaining capacity
+    // so a partial run can be retried without tripping quota validation. CDKs
+    // already at `MAX_ACCOUNTS_PER_CDK` used slots are skipped (the user must
+    // delete that CDK's stats row to wipe its usage ledger and start fresh).
+    let mut per_cdk_target: Vec<u32> = Vec::with_capacity(cdks.len());
+    for cdk in &cdks {
+      let remaining = cdk_remaining_capacity(cdk);
+      if remaining == 0 {
+        self.log(&format!(
+          "CDK {cdk} is at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK}); skipping — delete its CDK stats row to reset"
+        ));
+        per_cdk_target.push(0);
+        continue;
+      }
+      let target = accounts_per.min(remaining);
+      if target < accounts_per {
+        self.log(&format!(
+          "CDK {cdk}: retrying — capping request {accounts_per} → {target} ({} of {MAX_ACCOUNTS_PER_CDK} slots already used)",
+          MAX_ACCOUNTS_PER_CDK - remaining
+        ));
+      }
+      per_cdk_target.push(target);
+    }
+    if per_cdk_target.iter().all(|&t| t == 0) {
+      let msg = format!(
+        "All CDKs are at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK}); nothing to retry — delete a CDK stats row to reset its usage"
+      );
+      self.log(&msg);
+      self.emit(
+        &app_handle,
+        RegistrationStep::Failed,
+        &msg,
+        0,
+        0,
+        total_cdks,
+        None,
+      );
+      return self.fail_result(&msg);
+    }
+    let targets: Vec<(String, u32)> = cdks
+      .iter()
+      .zip(per_cdk_target.iter())
+      .filter(|(_, &t)| t > 0)
+      .map(|(c, &t)| (c.clone(), t))
+      .collect();
+    let mut reserved_iter = match reserve_cdk_slots_per(&targets, &self.task_id) {
+      Ok(reservations) => reservations.into_iter(),
+      Err(error) => {
+        let msg = format!("CDK/card quota validation failed: {error}");
+        self.log(&msg);
+        self.emit(
+          &app_handle,
+          RegistrationStep::Failed,
+          &msg,
+          0,
+          0,
+          total_cdks,
+          None,
+        );
+        return self.fail_result(&msg);
+      }
+    };
+    let mut reservations: Vec<Option<CdkSlotReservation>> = Vec::with_capacity(cdks.len());
+    for &target in &per_cdk_target {
+      if target > 0 {
+        reservations.push(Some(
+          reserved_iter
+            .next()
+            .expect("reservation count must match non-zero target count"),
+        ));
+      } else {
+        reservations.push(None);
+      }
+    }
+    let mut reservations = reservations;
     let mut last_error = String::new();
     let mut nord_connected_by_us = false;
 
@@ -1464,6 +1604,11 @@ impl RegistrationEngine {
           self.log("Cancelled by user");
           break;
         }
+        let Some(reservation) = reservations[cdk_idx].take() else {
+          // Skipped during retry-cap flow — CDK is already at max capacity.
+          continue;
+        };
+        let target = per_cdk_target[cdk_idx];
         let mut slot = self.fork_for_cdk(cdk_idx as u32);
         let (results, err, nord_stop) = slot
           .process_one_cdk(
@@ -1471,9 +1616,10 @@ impl RegistrationEngine {
             email_service,
             sms_service,
             cdk,
+            reservation,
             cdk_idx as u32,
             total_cdks,
-            accounts_per,
+            target,
             max_retries,
             uses_nord_cli,
             rotate_every_n,
@@ -1574,18 +1720,19 @@ impl RegistrationEngine {
       if self.is_cancelled() {
         break;
       }
-      let permit = semaphore
-        .clone()
-        .acquire_owned()
-        .await
-        .expect("semaphore closed");
+      let Some(reservation) = reservations[cdk_idx].take() else {
+        // Skipped during retry-cap flow — CDK is already at max capacity.
+        continue;
+      };
+      let target = per_cdk_target[cdk_idx];
+      let semaphore = semaphore.clone();
       let mut slot = self.fork_for_cdk(cdk_idx as u32);
       let app = app_handle.clone();
       let success_count = success_count.clone();
       let sms_token = sms_token.clone();
       let email_provider = self.config.email_provider;
       tasks.push(Box::pin(async move {
-        let _permit = permit;
+        let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
         let email = crate::email::build_email_service(email_provider);
         let viotp = if sms_enabled {
           sms_token.map(crate::sms::viotp::ViotpService::new)
@@ -1601,9 +1748,10 @@ impl RegistrationEngine {
             email.as_ref(),
             sms_ref,
             &cdk,
+            reservation,
             cdk_idx as u32,
             total_cdks,
-            accounts_per,
+            target,
             max_retries,
             false,          // Nord CLI never under concurrency > 1
             rotate_every_n, // WireGuard per-slot peer hop still allowed
@@ -1693,6 +1841,7 @@ impl RegistrationEngine {
     email_service: &dyn EmailService,
     sms_service: Option<&dyn SmsService>,
     cdk: &str,
+    mut reservation: CdkSlotReservation,
     cdk_idx: u32,
     total_cdks: u32,
     accounts_per: u32,
@@ -1708,8 +1857,14 @@ impl RegistrationEngine {
     let mut last_error: Option<String> = None;
     let mut nord_hard_stop = false;
 
-    let mut cdk_record = CdkInventoryRecord::new(cdk, accounts_per, &self.task_id);
+    let mut cdk_record =
+      get_cdk_inventory(cdk).unwrap_or_else(|| CdkInventoryRecord::new(cdk, 0, &self.task_id));
+    cdk_record.cdk = cdk.trim().to_ascii_uppercase();
+    cdk_record.target_accounts = cdk_record.target_accounts.saturating_add(accounts_per);
+    cdk_record.task_id.clone_from(&self.task_id);
     cdk_record.status = "running".into();
+    cdk_record.last_error.clear();
+    cdk_record.updated_at = Utc::now();
     put_cdk_inventory_record(&cdk_record);
 
     self.log(&format!("=== CDK {}/{total_cdks}: {cdk} ===", cdk_idx + 1));
@@ -1755,8 +1910,49 @@ impl RegistrationEngine {
       let mut finished_result: Option<RegistrationResult> = None;
       let mut location_fallbacks: u32 = 0;
       let mut tried_locations: Vec<String> = Vec::new();
+      let identity = match email_service.generate_alias(&base_email) {
+        Ok(alias) => AccountIdentity::new(alias),
+        Err(e) => {
+          let msg = format!("Alias: {e}");
+          last_error = Some(msg.clone());
+          self.log(&format!(
+            "[CDK {}/{} Alias {}/{}] {msg}",
+            cdk_idx + 1,
+            total_cdks,
+            alias_idx + 1,
+            accounts_per
+          ));
+          cdk_record.record_hard_failure(&msg);
+          put_cdk_inventory_record(&cdk_record);
+          continue;
+        }
+      };
+      if let Err(error) = reservation.claim_slot() {
+        last_error = Some(error.clone());
+        self.log(&format!(
+          "[CDK {}/{} Alias {}/{}] {error}",
+          cdk_idx + 1,
+          total_cdks,
+          alias_idx + 1,
+          accounts_per
+        ));
+        cdk_record.record_hard_failure(&error);
+        put_cdk_inventory_record(&cdk_record);
+        break;
+      }
 
       for attempt in 0..max_retries {
+        if self.is_cancelled() {
+          last_error = Some("Cancelled".into());
+          // Roll back the claimed slot so usage ledger does not count a
+          // cancelled attempt as a used account.
+          if let Err(e) = reservation.release_slot() {
+            self.log(&format!(
+              "WARN: failed to release CDK slot after cancel: {e}"
+            ));
+          }
+          break;
+        }
         if attempt > 0 {
           self.log(&format!(
             "Retry {attempt}/{max_retries} for alias {}/{accounts_per}...",
@@ -1772,6 +1968,7 @@ impl RegistrationEngine {
             sms_service,
             cdk,
             &base_email,
+            &identity,
             alias_idx,
             cdk_idx,
             total_cdks,
@@ -1945,6 +2142,20 @@ impl RegistrationEngine {
                 }
               }
             }
+            // Browser-kill failure is unrecoverable for this CDK: another
+            // alias launch would stack a second browser on the still-running
+            // one and freeze the machine. Aborts the CDK immediately.
+            if e.contains("browser kill failed") {
+              cdk_record.record_hard_failure(&e);
+              put_cdk_inventory_record(&cdk_record);
+              if let Err(re_err) = reservation.release_slot() {
+                self.log(&format!(
+                  "WARN: failed to release CDK slot after browser kill failure: {re_err}"
+                ));
+              }
+              self.dispose_worker_profile(app_handle).await;
+              return (all_results, Some(e), nord_hard_stop);
+            }
           }
         }
 
@@ -1962,6 +2173,13 @@ impl RegistrationEngine {
           alias_idx + 1,
           accounts_per
         ));
+        // Roll back the claimed slot — the account was never created, so the
+        // CDK usage ledger must not count this attempt. Lets retry work.
+        if let Err(e) = reservation.release_slot() {
+          self.log(&format!(
+            "WARN: failed to release CDK slot after failure: {e}"
+          ));
+        }
         cdk_record.record_hard_failure(&err);
         put_cdk_inventory_record(&cdk_record);
       }
@@ -1997,6 +2215,7 @@ impl RegistrationEngine {
     sms_service: Option<&dyn SmsService>,
     cdk: &str,
     base_email: &str,
+    identity: &AccountIdentity,
     alias_idx: u32,
     cdk_idx: u32,
     total_cdks: u32,
@@ -2010,35 +2229,32 @@ impl RegistrationEngine {
       total_aliases
     );
 
-    // Step 1: Generate alias from base email
+    // Step 1: Use the alias reserved for this logical account slot.
     self.emit(
       app_handle,
       RegistrationStep::GeneratingAlias,
-      &format!("{prefix} Generating alias..."),
+      &format!("{prefix} Using email alias..."),
       cdk_idx,
       alias_idx,
       total_cdks,
       None,
     );
-    let alias_email = email_service
-      .generate_alias(base_email)
-      .map_err(|e| format!("Alias: {e}"))?;
-    self.log(&format!("{prefix} Alias: {alias_email}"));
+    self.log(&format!("{prefix} Alias: {}", identity.alias_email));
 
-    // Step 2: Generate user info
+    // Step 2: Use the account identity reserved for this logical slot.
     self.emit(
       app_handle,
       RegistrationStep::GeneratingUserInfo,
-      &format!("{prefix} Generating user info..."),
+      &format!("{prefix} Using reserved user info..."),
       cdk_idx,
       alias_idx,
       total_cdks,
       None,
     );
-    let password = random_password();
-    let (first_name, last_name) = random_name();
-    let birthdate = random_birthday();
-    self.log(&format!("{prefix} Name: {first_name} {last_name}"));
+    self.log(&format!(
+      "{prefix} Name: {} {}",
+      identity.first_name, identity.last_name
+    ));
 
     // Step 3: Launch (or relaunch) the reused worker profile for THIS account.
     // Lifecycle: ensure worker once → launch (new FP + ephemeral dir) → register → kill only.
@@ -2052,8 +2268,7 @@ impl RegistrationEngine {
       None,
     );
 
-    // Fresh device id per account so cookies/fingerprint are isolated.
-    self.device_id = Uuid::new_v4().to_string();
+    self.device_id.clone_from(&identity.device_id);
 
     let (profile, mut session) = self.launch_and_connect(app_handle).await?;
     self.log(&format!(
@@ -2072,11 +2287,11 @@ impl RegistrationEngine {
         &mut active_profile,
         cdk,
         base_email,
-        &alias_email,
-        &password,
-        &first_name,
-        &last_name,
-        &birthdate,
+        &identity.alias_email,
+        &identity.password,
+        &identity.first_name,
+        &identity.last_name,
+        &identity.birthdate,
         prefix.as_str(),
         cdk_idx,
         alias_idx,
@@ -2084,7 +2299,16 @@ impl RegistrationEngine {
       )
       .await;
 
-    self.kill_browser_only(app_handle, &active_profile).await;
+    // Kill the browser before we yield back to the alias loop. If the kill
+    // fails, the next alias would launch a second browser on top of the
+    // first — accumulating Camoufox processes and freezing the machine.
+    // Propagate the error so the outer loop can abort this CDK cleanly.
+    if let Err(e) = self.kill_browser_only(app_handle, &active_profile).await {
+      self.log(&format!(
+        "{prefix} Browser kill failed; aborting CDK to avoid overlapping browsers: {e}"
+      ));
+      return Err(format!("browser kill failed for alias {alias_idx}: {e}"));
+    }
     self.log(&format!(
       "{prefix} Browser closed (worker profile kept for reuse)"
     ));
@@ -2154,11 +2378,6 @@ impl RegistrationEngine {
       total_cdks,
       None,
     );
-    let csrf_json = session
-      .fetch_json("fetch('/api/auth/csrf', { headers: { accept: 'application/json', referer: 'https://chatgpt.com/' } })")
-      .await?;
-    let csrf_token = csrf_json["csrfToken"].as_str().ok_or("No csrfToken")?;
-
     // Step 6: Submit email
     self.emit(
       app_handle,
@@ -2169,14 +2388,6 @@ impl RegistrationEngine {
       total_cdks,
       None,
     );
-    let session_log_id = Uuid::new_v4().to_string();
-    let signin_js = format!(
-      "fetch('/api/auth/signin/openai?prompt=login&ext-oai-did={did}&auth_session_logging_id={sid}&screen_hint=login_or_signup&login_hint={email}', {{ method: 'POST', headers: {{ 'content-type': 'application/x-www-form-urlencoded', referer: 'https://chatgpt.com/' }}, body: new URLSearchParams({{ callbackUrl: '/', csrfToken: '{token}', json: 'true' }}) }})",
-      did = self.device_id, sid = session_log_id, email = alias_email, token = csrf_token,
-    );
-    let signin = session.fetch_json(&signin_js).await?;
-    let auth_url = signin["url"].as_str().ok_or("No authorize URL")?;
-
     // Step 7: Follow authorize
     self.emit(
       app_handle,
@@ -2188,7 +2399,7 @@ impl RegistrationEngine {
       None,
     );
     let mut cur_url = self
-      .authorize_with_retry(session, profile, auth_url, app_handle)
+      .authorize_with_retry(session, profile, alias_email, app_handle)
       .await?;
     self.log(&format!(
       "{prefix} Authorize → {cur_url} (profile={})",
@@ -2209,6 +2420,12 @@ impl RegistrationEngine {
 
     for _ in 0..12 {
       if self.is_cancelled() {
+        if account_created {
+          self.log(&format!(
+            "{prefix} Cancelled after account creation; preserving credentials"
+          ));
+          break;
+        }
         return Err("Cancelled".into());
       }
       let sig = format!("{:?}", detect_page_type(&cur_url));
@@ -2307,6 +2524,7 @@ impl RegistrationEngine {
           );
           let otp_send_resp = session.fetch_json(&otp_send).await?;
           self.log(&format!("{prefix} OTP send response: {otp_send_resp}"));
+
           // After password submit, settle on current URL (usually email-verification).
           sleep(std::time::Duration::from_secs(2)).await;
           cur_url = session
@@ -2736,7 +2954,11 @@ impl RegistrationEngine {
 
     for attempt in 1..=TWO_FA_ATTEMPTS {
       if self.is_cancelled() {
-        return Err("Cancelled".into());
+        two_fa_error = "cancelled after account creation".into();
+        self.log(&format!(
+          "{prefix} 2FA skipped after cancellation; preserving account"
+        ));
+        break;
       }
       match self.enable_2fa(session).await {
         Ok(secret) => {
@@ -2924,6 +3146,12 @@ impl RegistrationEngine {
         let _ = self.click_by_text(session, "Continue", "button").await;
       }
 
+      // After submitting email, OpenAI's log-in-or-create-account page often
+      // shows a method picker (e.g. "Continue with password", "Continue with
+      // email") rather than the password form directly. Click the password
+      // option so the password form appears; otherwise the page auto-advances
+      // to email-verification and the downstream register API fails with
+      // `invalid_auth_step`.
       for _ in 0..30 {
         sleep(std::time::Duration::from_millis(500)).await;
         url = session.current_url().await.unwrap_or_default();
@@ -2936,6 +3164,31 @@ impl RegistrationEngine {
         {
           self.log(&format!("Password field appeared at {url}"));
           return Ok(());
+        }
+        if self
+          .click_by_text(
+            session,
+            "password",
+            "button, a, [role='button'], div[role='button']",
+          )
+          .await
+          .is_ok()
+        {
+          self.log(&format!(
+            "Clicked 'password' method option at {url}; waiting for password form"
+          ));
+          sleep(std::time::Duration::from_millis(800)).await;
+          if self
+            .page_has_selector(
+              session,
+              r#"input[name="new-password"], input[type="password"]"#,
+            )
+            .await
+          {
+            let url_now = session.current_url().await.unwrap_or_default();
+            self.log(&format!("Password field appeared after click at {url_now}"));
+            return Ok(());
+          }
         }
         if url.contains("email-verification") || url.contains("about-you") {
           self.log(&format!("Auth advanced to {url} without password field"));
@@ -3558,11 +3811,36 @@ impl RegistrationEngine {
   // Authorize with retry + Cloudflare handling
   // -----------------------------------------------------------------------
 
+  async fn create_authorize_url(
+    &self,
+    session: &mut BrowserSession,
+    alias_email: &str,
+  ) -> Result<String, String> {
+    let csrf_json = session
+      .fetch_json("fetch('/api/auth/csrf', { headers: { accept: 'application/json', referer: 'https://chatgpt.com/' } })")
+      .await?;
+    let csrf_token = csrf_json["csrfToken"].as_str().ok_or("No csrfToken")?;
+    let session_log_id = Uuid::new_v4().to_string();
+    let login_hint = urlencoding::encode(alias_email);
+    let signin_js = format!(
+      "fetch('/api/auth/signin/openai?prompt=login&ext-oai-did={did}&auth_session_logging_id={sid}&screen_hint=login_or_signup&login_hint={email}', {{ method: 'POST', headers: {{ 'content-type': 'application/x-www-form-urlencoded', referer: 'https://chatgpt.com/' }}, body: new URLSearchParams({{ callbackUrl: '/', csrfToken: '{token}', json: 'true' }}) }})",
+      did = self.device_id,
+      sid = session_log_id,
+      email = login_hint,
+      token = csrf_token,
+    );
+    let signin = session.fetch_json(&signin_js).await?;
+    signin["url"]
+      .as_str()
+      .map(str::to_string)
+      .ok_or_else(|| "No authorize URL".to_string())
+  }
+
   async fn authorize_with_retry(
     &mut self,
     session: &mut BrowserSession,
     profile: &mut crate::profile::BrowserProfile,
-    auth_url: &str,
+    alias_email: &str,
     app_handle: &tauri::AppHandle,
   ) -> Result<String, String> {
     let max_attempts = 3;
@@ -3573,10 +3851,11 @@ impl RegistrationEngine {
           "Authorize retry {attempt}/{max_attempts}: relaunching same worker with new fingerprint..."
         ));
         // Kill only — keep the same worker profile metadata for relaunch.
-        self.kill_browser_only(app_handle, profile).await;
+        // Abort the retry chain on kill failure: relaunching would stack a
+        // second browser on the still-running one and freeze the machine.
+        self.kill_browser_only(app_handle, profile).await?;
 
-        // Fresh device + relaunch same worker (FP randomize + ephemeral dir wipe).
-        self.device_id = Uuid::new_v4().to_string();
+        // Relaunch the same worker with a new fingerprint and the same account identity.
         let (new_profile, new_session) = self.launch_and_connect(app_handle).await?;
         *session = new_session;
         *profile = new_profile;
@@ -3597,7 +3876,8 @@ impl RegistrationEngine {
         ));
       }
 
-      session.navigate(auth_url, 30).await?;
+      let auth_url = self.create_authorize_url(session, alias_email).await?;
+      session.navigate(&auth_url, 30).await?;
       let cur = session.current_url().await?;
 
       if is_cloudflare_block(&cur) {
@@ -3973,22 +4253,28 @@ impl RegistrationEngine {
     &mut self,
     app_handle: &tauri::AppHandle,
     profile: &crate::profile::BrowserProfile,
-  ) {
+  ) -> Result<(), String> {
     use crate::browser_runner::BrowserRunner;
 
-    if let Err(e) = BrowserRunner::instance()
+    match BrowserRunner::instance()
       .kill_browser_process(app_handle.clone(), profile)
       .await
     {
-      self.log(&format!(
-        "Warning: failed to kill browser for profile {}: {e}",
-        profile.id
-      ));
-    } else {
-      self.log(&format!(
-        "Browser killed for worker profile {} ({})",
-        profile.name, profile.id
-      ));
+      Ok(()) => {
+        self.log(&format!(
+          "Browser killed for worker profile {} ({})",
+          profile.name, profile.id
+        ));
+        Ok(())
+      }
+      Err(e) => {
+        let msg = format!(
+          "Failed to kill browser for profile {} ({}): {e}",
+          profile.name, profile.id
+        );
+        self.log(&msg);
+        Err(msg)
+      }
     }
   }
 
@@ -4005,10 +4291,12 @@ impl RegistrationEngine {
     }
     self.owns_worker_profile = false;
 
-    // Best-effort kill if still running.
+    // Best-effort kill if still running. Dispose proceeds regardless — the
+    // profile metadata is removed either way, and kill failure is logged
+    // by kill_browser_only itself.
     if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
       if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
-        self.kill_browser_only(app_handle, &found).await;
+        let _ = self.kill_browser_only(app_handle, &found).await;
       }
     }
 

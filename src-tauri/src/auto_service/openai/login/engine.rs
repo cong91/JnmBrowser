@@ -1098,6 +1098,12 @@ impl LoginEngine {
           Err(e) => {
             last_error = e.clone();
             self.log(&format!("Attempt {attempt} failed: {e}"));
+            // Browser-kill failure is unrecoverable: a retry would relaunch
+            // the worker on top of the still-running browser and freeze the
+            // machine. Abort this credential immediately.
+            if e.contains("browser kill failed") {
+              break;
+            }
             if crate::vpn::is_unsupported_region_error(&e) {
               if location_fallbacks >= crate::vpn::MAX_NORD_LOCATION_FALLBACKS {
                 self.log("Unsupported region persists after exhausting Nord fallback locations");
@@ -1273,7 +1279,14 @@ impl LoginEngine {
 
     callback_listener.shutdown().await;
     // Kill browser only — keep worker profile metadata for the rest of the batch.
-    self.kill_browser_only(app_handle, &profile).await;
+    // Propagate kill failure: a retry/relaunch on top of a still-running browser
+    // would stack processes and freeze the machine.
+    if let Err(e) = self.kill_browser_only(app_handle, &profile).await {
+      self.log(&format!(
+        "{prefix} Browser kill failed; aborting to avoid overlapping browsers: {e}"
+      ));
+      return Err(format!("browser kill failed for login {idx}: {e}"));
+    }
     self.log(&format!("{prefix} Browser closed (worker retained)"));
 
     result
@@ -4199,26 +4212,34 @@ impl LoginEngine {
 
   /// Kill the browser process only. Keep worker profile metadata for reuse.
   /// Ephemeral data dir is removed by BrowserRunner on kill.
+  /// Returns Err when kill failed — caller must NOT relaunch the worker on top
+  /// of a still-running browser (would freeze the machine).
   async fn kill_browser_only(
     &mut self,
     app_handle: &tauri::AppHandle,
     profile: &crate::profile::BrowserProfile,
-  ) {
+  ) -> Result<(), String> {
     use crate::browser_runner::BrowserRunner;
 
-    if let Err(e) = BrowserRunner::instance()
+    match BrowserRunner::instance()
       .kill_browser_process(app_handle.clone(), profile)
       .await
     {
-      self.log(&format!(
-        "Warning: failed to kill browser for profile {}: {e}",
-        profile.id
-      ));
-    } else {
-      self.log(&format!(
-        "Browser killed for worker profile {} ({})",
-        profile.name, profile.id
-      ));
+      Ok(()) => {
+        self.log(&format!(
+          "Browser killed for worker profile {} ({})",
+          profile.name, profile.id
+        ));
+        Ok(())
+      }
+      Err(e) => {
+        let msg = format!(
+          "Failed to kill browser for profile {} ({}): {e}",
+          profile.name, profile.id
+        );
+        self.log(&msg);
+        Err(msg)
+      }
     }
   }
 
@@ -4238,7 +4259,9 @@ impl LoginEngine {
 
     if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
       if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
-        self.kill_browser_only(app_handle, &found).await;
+        // Best-effort: dispose proceeds regardless so the profile metadata is
+        // removed. Kill failure is logged inside kill_browser_only.
+        let _ = self.kill_browser_only(app_handle, &found).await;
       }
     }
 
