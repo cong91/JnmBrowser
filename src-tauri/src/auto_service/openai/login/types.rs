@@ -50,6 +50,9 @@ pub enum LoginNetworkMode {
   #[default]
   None,
   Proxy,
+  /// Inventory WireGuard / Nord conf (per-profile vpn-worker). Preferred.
+  Vpn,
+  /// Legacy system-wide Nord CLI (not preferred for batch).
   Nord,
 }
 
@@ -122,9 +125,18 @@ pub struct LoginConfig {
   #[serde(default)]
   pub sms_country: Option<String>,
 
-  /// Optional proxy ID for browser
+  /// Optional proxy ID for browser (when network_mode is Proxy)
   #[serde(default)]
   pub proxy_id: Option<String>,
+
+  /// Inventory WireGuard / Nord conf id (when network_mode is Vpn)
+  #[serde(default)]
+  pub vpn_id: Option<String>,
+
+  /// Rotate WireGuard peer after every N successful logins (0 = never).
+  /// VPN mode defaults to 1 (new IP after each success).
+  #[serde(default)]
+  pub rotate_every_n: u32,
 
   /// Network mode for browser
   #[serde(default)]
@@ -141,11 +153,46 @@ fn default_concurrency() -> u32 {
   1
 }
 
+/// Whether success_count warrants a peer rotate (same rule as auto-reg).
+pub fn should_rotate(success_count: u32, every_n: u32) -> bool {
+  every_n > 0 && success_count > 0 && success_count.is_multiple_of(every_n)
+}
+
 impl LoginConfig {
+  fn non_empty(opt: &Option<String>) -> bool {
+    opt.as_ref().is_some_and(|s| !s.trim().is_empty())
+  }
+
   /// Parse credentials_text into credentials if credentials is empty.
   pub fn parse_credentials(&mut self) {
     if self.credentials.is_empty() && !self.credentials_text.is_empty() {
       self.credentials = LoginCredential::parse_batch(&self.credentials_text);
+    }
+  }
+
+  /// Normalize bare proxyId / vpnId into network_mode and default rotate.
+  pub fn normalize(&mut self) {
+    let has_vpn = Self::non_empty(&self.vpn_id);
+    let has_proxy = Self::non_empty(&self.proxy_id);
+    if self.network_mode == LoginNetworkMode::None && has_vpn {
+      self.network_mode = LoginNetworkMode::Vpn;
+    } else if self.network_mode == LoginNetworkMode::None && has_proxy {
+      self.network_mode = LoginNetworkMode::Proxy;
+    }
+    // VPN login: rotate peer after every success unless user set a custom cadence.
+    if self.network_mode == LoginNetworkMode::Vpn && self.rotate_every_n == 0 {
+      self.rotate_every_n = 1;
+    }
+  }
+
+  pub fn effective_vpn_id(&self) -> Option<String> {
+    match self.network_mode {
+      LoginNetworkMode::Vpn => self
+        .vpn_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()),
+      _ => None,
     }
   }
 
@@ -160,6 +207,40 @@ impl LoginConfig {
       }
       if self.sub2api_api_key.trim().is_empty() {
         return Err("Sub2API API key is required when push is enabled".into());
+      }
+    }
+    match self.network_mode {
+      LoginNetworkMode::None => {}
+      LoginNetworkMode::Proxy => {
+        if !Self::non_empty(&self.proxy_id) {
+          return Err("proxy mode requires proxyId".into());
+        }
+        if Self::non_empty(&self.vpn_id) {
+          return Err("proxy mode cannot be combined with vpnId".into());
+        }
+      }
+      LoginNetworkMode::Vpn => {
+        if !Self::non_empty(&self.vpn_id) {
+          return Err("vpn mode requires vpnId".into());
+        }
+        if Self::non_empty(&self.proxy_id) {
+          return Err("vpn mode cannot be combined with proxyId".into());
+        }
+        let vpn_id = self.vpn_id.as_ref().map(|s| s.trim()).unwrap_or_default();
+        let storage = crate::vpn::VPN_STORAGE
+          .lock()
+          .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+        storage
+          .load_config(vpn_id)
+          .map_err(|e| format!("vpnId not found or invalid: {e}"))?;
+      }
+      LoginNetworkMode::Nord => {
+        if Self::non_empty(&self.proxy_id) {
+          return Err("nord CLI mode cannot be combined with proxyId".into());
+        }
+        if Self::non_empty(&self.vpn_id) {
+          return Err("nord CLI mode cannot be combined with vpnId (use networkMode vpn)".into());
+        }
       }
     }
     Ok(())
@@ -240,6 +321,30 @@ pub struct LoginResult {
   /// When exported.
   #[serde(default)]
   pub exported_at: Option<DateTime<Utc>>,
+  /// Account password (kept so failed/expired rows can be re-logged without re-paste).
+  /// Not included in Sub2API export mapping.
+  #[serde(default)]
+  pub password: String,
+  /// Optional TOTP secret for re-login.
+  #[serde(default)]
+  pub totp_secret: String,
+}
+
+impl LoginResult {
+  /// `email|password|totp` line for restarting login.
+  pub fn credential_line(&self) -> Option<String> {
+    if self.email.is_empty() || self.password.is_empty() {
+      return None;
+    }
+    if self.totp_secret.is_empty() {
+      Some(format!("{}|{}", self.email, self.password))
+    } else {
+      Some(format!(
+        "{}|{}|{}",
+        self.email, self.password, self.totp_secret
+      ))
+    }
+  }
 }
 
 /// Status for login results.
@@ -351,6 +456,8 @@ mod tests {
       sms_network: None,
       sms_country: None,
       proxy_id: None,
+      vpn_id: None,
+      rotate_every_n: 0,
       network_mode: LoginNetworkMode::None,
     };
     assert!(config.validate().is_err());
@@ -380,6 +487,8 @@ mod tests {
       sms_network: None,
       sms_country: None,
       proxy_id: None,
+      vpn_id: None,
+      rotate_every_n: 0,
       network_mode: LoginNetworkMode::None,
     };
     assert!(config.validate().is_err());
@@ -409,8 +518,54 @@ mod tests {
       sms_network: None,
       sms_country: None,
       proxy_id: None,
+      vpn_id: None,
+      rotate_every_n: 0,
       network_mode: LoginNetworkMode::None,
     };
     assert!(config.validate().is_ok());
+  }
+
+  #[test]
+  fn vpn_normalize_defaults_rotate_every_n() {
+    let mut c = LoginConfig {
+      credentials_text: String::new(),
+      credentials: vec![LoginCredential {
+        email: "a@x.com".into(),
+        password: "p".into(),
+        totp_secret: String::new(),
+      }],
+      browser_type: "chromium".into(),
+      max_retries: 1,
+      headless: false,
+      concurrency: 1,
+      sub2api_url: String::new(),
+      sub2api_api_key: String::new(),
+      sub2api_proxy_id: None,
+      sub2api_group_ids: None,
+      push_to_sub2api: false,
+      sms_provider: None,
+      sms_token: None,
+      sms_service_id: None,
+      sms_network: None,
+      sms_country: None,
+      proxy_id: None,
+      vpn_id: Some("wg-1".into()),
+      rotate_every_n: 0,
+      network_mode: LoginNetworkMode::None,
+    };
+    c.normalize();
+    assert_eq!(c.network_mode, LoginNetworkMode::Vpn);
+    assert_eq!(c.rotate_every_n, 1);
+    assert_eq!(c.effective_vpn_id().as_deref(), Some("wg-1"));
+  }
+
+  #[test]
+  fn should_rotate_every_n_successes() {
+    assert!(!should_rotate(0, 1));
+    assert!(should_rotate(1, 1));
+    assert!(should_rotate(2, 1));
+    assert!(!should_rotate(1, 2));
+    assert!(should_rotate(2, 2));
+    assert!(!should_rotate(2, 0));
   }
 }

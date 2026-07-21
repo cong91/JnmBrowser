@@ -1819,7 +1819,12 @@
     "emailProviderGmail123452026": "gmail.123452026.xyz",
     "emailProviderSmsIosmq": "sms.iosmq.xyz",
     "emailProviderGmail123452026Hint": "Échangez des codes CDK via gmail.123452026.xyz et utilisez des +alias (jusqu’à 6 comptes par CDK).",
-    "emailProviderSmsIosmqHint": "Échangez une carte MAIL sur sms.iosmq.xyz (POST /api/v1/redeem), interrogez order/lookup pour la boîte et le dernier OTP, puis utilisez des +alias (jusqu’à 6 comptes par carte)."
+    "emailProviderSmsIosmqHint": "Échangez une carte MAIL sur sms.iosmq.xyz (POST /api/v1/redeem), interrogez order/lookup pour la boîte et le dernier OTP, puis utilisez des +alias (jusqu’à 6 comptes par carte).",
+    "smsTokenConfigured": "Le jeton VI-OTP est déjà configuré dans Paramètres/SMS.",
+    "smsTokenMissing": "Aucun jeton VI-OTP enregistré. Enregistrez-le dans les paramètres SMS, ou collez un jeton de remplacement ci-dessous.",
+    "smsTokenRequired": "Le SMS est activé mais aucun jeton VI-OTP n’est disponible. Enregistrez un jeton dans les paramètres SMS ou saisissez un remplacement.",
+    "settingsTab": "Paramètres",
+    "settingsHint": "Configurez VPN/proxy, Nord et SMS ici. L’onglet Register active seulement les options."
   },
   "sms": {
     "title": "Vérification SMS / OTP",
@@ -1860,7 +1865,11 @@
     "statusExpired": "Expiré",
     "historyEmpty": "Pas encore d'historique. Actualisez après avoir loué des numéros.",
     "copied": "Copié",
-    "copyFailed": "Échec de la copie"
+    "copyFailed": "Échec de la copie",
+    "autoSelectedOpenAI": "sélectionné automatiquement pour OpenAI/ChatGPT",
+    "servicesLoadFailed": "Échec du chargement des services : {{error}}",
+    "networksLoadFailed": "Échec du chargement des réseaux : {{error}}",
+    "networksFallbackHint": "Liste des réseaux indisponible (opérateurs courants utilisés). Laissez décoché pour n’importe quel réseau."
   },
   "autoLogin": {
     "title": "ChatGPT/Codex Connexion automatique",
@@ -1913,9 +1922,21 @@
     "statusUpdated": "{{count}} compte(s) mis à jour",
     "selectedCount": "{{count}} sélectionné(s)",
     "selectAll": "Tout sélectionner",
+    "selectReadyForExport": "Sélectionner les comptes prêts à exporter",
     "copied": "Copié",
     "copyFailed": "Échec de la copie",
     "showToken": "Afficher le jeton",
-    "hideToken": "Masquer le jeton"
+    "hideToken": "Masquer le jeton",
+    "retryLogin": "Se reconnecter ({{count}})",
+    "retrying": "Connexion...",
+    "retryStarted": "Nouvelle tentative de connexion pour {{count}} compte(s)",
+    "retryNoCredentials": "Les comptes sélectionnés n'ont pas de mot de passe enregistré. Collez les identifiants dans l'onglet Login, ou relancez après cette mise à jour pour stocker les mots de passe.",
+    "editAccount": "Modifier le compte",
+    "editSaved": "Compte mis à jour",
+    "editEmailRequired": "L'e-mail est requis",
+    "note": "Note",
+    "saving": "Enregistrement...",
+    "tabSettings": "Paramètres",
+    "settingsHint": "Configurez réseau, Sub2API et SMS ici. L’onglet Login active seulement les options."
   }
 }

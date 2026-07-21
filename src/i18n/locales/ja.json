@@ -1819,7 +1819,12 @@
     "emailProviderGmail123452026": "gmail.123452026.xyz",
     "emailProviderSmsIosmq": "sms.iosmq.xyz",
     "emailProviderGmail123452026Hint": "gmail.123452026.xyz で CDK を引き換え、+エイリアスを使用します（CDK あたり最大 6 アカウント）。",
-    "emailProviderSmsIosmqHint": "sms.iosmq.xyz で MAIL カードを redeem（POST /api/v1/redeem）し、order/lookup でメールボックスと最新 OTP を取得して、+エイリアスを使用します（カードあたり最大 6 アカウント）。"
+    "emailProviderSmsIosmqHint": "sms.iosmq.xyz で MAIL カードを redeem（POST /api/v1/redeem）し、order/lookup でメールボックスと最新 OTP を取得して、+エイリアスを使用します（カードあたり最大 6 アカウント）。",
+    "smsTokenConfigured": "VI-OTP トークンは設定/SMS に既に保存されています。",
+    "smsTokenMissing": "保存済みの VI-OTP トークンが見つかりません。SMS 設定に保存するか、下に上書きトークンを貼り付けてください。",
+    "smsTokenRequired": "SMS は有効ですが VI-OTP トークンがありません。SMS 設定に保存するか、上書きトークンを入力してください。",
+    "settingsTab": "設定",
+    "settingsHint": "VPN/プロキシ・Nord・SMS はここで設定。Register タブでは有効化のみ。"
   },
   "sms": {
     "title": "SMS / OTP 認証",
@@ -1860,7 +1865,11 @@
     "statusExpired": "期限切れ",
     "historyEmpty": "履歴はまだありません。番号を借りた後に更新してください。",
     "copied": "コピーしました",
-    "copyFailed": "コピーに失敗しました"
+    "copyFailed": "コピーに失敗しました",
+    "autoSelectedOpenAI": "OpenAI/ChatGPT 用に自動選択",
+    "servicesLoadFailed": "サービス読み込みに失敗: {{error}}",
+    "networksLoadFailed": "ネットワーク読み込みに失敗: {{error}}",
+    "networksFallbackHint": "ネットワーク一覧を取得できません（一般的なキャリアを表示）。未選択なら任意の回線を許可します。"
   },
   "autoLogin": {
     "title": "ChatGPT/Codex 自動ログイン",
@@ -1913,9 +1922,21 @@
     "statusUpdated": "{{count}} 件のアカウントを更新しました",
     "selectedCount": "{{count}} 件選択",
     "selectAll": "すべて選択",
+    "selectReadyForExport": "エクスポート可能なアカウントを選択",
     "copied": "コピーしました",
     "copyFailed": "コピーに失敗しました",
     "showToken": "トークンを表示",
-    "hideToken": "トークンを隠す"
+    "hideToken": "トークンを隠す",
+    "retryLogin": "再ログイン ({{count}})",
+    "retrying": "ログイン中...",
+    "retryStarted": "{{count}} 件のアカウントを再ログインします",
+    "retryNoCredentials": "選択したアカウントに保存されたパスワードがありません。Login タブに資格情報を貼り付けるか、この更新後に再実行してパスワードを保存してください。",
+    "editAccount": "アカウントを編集",
+    "editSaved": "アカウントを更新しました",
+    "editEmailRequired": "メールは必須です",
+    "note": "メモ",
+    "saving": "保存中...",
+    "tabSettings": "設定",
+    "settingsHint": "ネットワーク・Sub2API・SMS はここで設定。Login タブでは有効化のみ。"
   }
 }

@@ -2,23 +2,46 @@
 
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuCopy,
   LuDownload,
   LuEye,
   LuEyeOff,
+  LuLogIn,
   LuPackageOpen,
+  LuPencil,
   LuRefreshCw,
   LuTrash2,
   LuUpload,
 } from "react-icons/lu";
 import { toast } from "sonner";
+import {
+  accountKey,
+  isAccountReadyForExport,
+  toggleAccountSelection,
+} from "@/components/login-account-selection";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -27,6 +50,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import type { LoginResult, LoginResultStatus } from "@/hooks/use-login-events";
 import { cn } from "@/lib/utils";
 
@@ -48,15 +72,22 @@ interface Props {
     failed: number;
     errors: string[];
   }>;
+  /** Re-run auto-login for the given stored rows (needs password on each). */
+  onRetryLogin?: (accounts: LoginResult[]) => void | Promise<void>;
+  /** Edit credential fields for one stored row. */
+  onEditAccount?: (
+    accountId: string,
+    fields: {
+      email?: string;
+      password?: string;
+      totpSecret?: string;
+      note?: string;
+      phoneNumber?: string;
+      status?: LoginResultStatus;
+    },
+  ) => Promise<void> | void;
   pushEnabled?: boolean;
-}
-
-function accountKey(acc: LoginResult): string {
-  return acc.accountId || acc.email;
-}
-
-function isExportable(acc: LoginResult): boolean {
-  return Boolean(acc.success && acc.accessToken);
+  retrying?: boolean;
 }
 
 function statusVariant(
@@ -103,6 +134,10 @@ function maskValue(value: string, revealed: boolean): string {
   return `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
 
+function hasRetryCredential(acc: LoginResult): boolean {
+  return Boolean(acc.email?.trim() && acc.password?.trim());
+}
+
 export function LoginAccountsTable({
   accounts,
   onDelete,
@@ -110,15 +145,37 @@ export function LoginAccountsTable({
   onUpdateStatus,
   onExportJson,
   onPush,
+  onRetryLogin,
+  onEditAccount,
   pushEnabled = false,
+  retrying = false,
 }: Props) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [markOnExport, setMarkOnExport] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
+  const [editing, setEditing] = useState<LoginResult | null>(null);
+  const [editEmail, setEditEmail] = useState("");
+  const [editPassword, setEditPassword] = useState("");
+  const [editTotp, setEditTotp] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [editNote, setEditNote] = useState("");
+  const [editStatus, setEditStatus] = useState<LoginResultStatus>("available");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [showEditSecrets, setShowEditSecrets] = useState(false);
+
+  useEffect(() => {
+    if (!editing) return;
+    setEditEmail(editing.email ?? "");
+    setEditPassword(editing.password ?? "");
+    setEditTotp(editing.totpSecret ?? "");
+    setEditPhone(editing.phoneNumber ?? "");
+    setEditNote(editing.note ?? "");
+    setEditStatus(editing.status ?? "available");
+    setShowEditSecrets(false);
+  }, [editing]);
 
   const counts = useMemo(() => {
     const c = { available: 0, exported: 0, used: 0, invalid: 0 };
@@ -139,35 +196,48 @@ export function LoginAccountsTable({
     [filtered, selected],
   );
 
+  const selectableAccounts = useMemo(
+    () => filtered.filter(isAccountReadyForExport),
+    [filtered],
+  );
+
   const exportTargets = useMemo(() => {
     if (selectedAccounts.length > 0) {
-      return selectedAccounts.filter(isExportable);
+      return selectedAccounts.filter(
+        (account) => account.success && Boolean(account.accessToken),
+      );
     }
-    return filtered.filter(
-      (a) => isExportable(a) && (a.status ?? "available") === "available",
-    );
-  }, [selectedAccounts, filtered]);
+    return selectableAccounts;
+  }, [selectedAccounts, selectableAccounts]);
 
   const pushTargets = exportTargets;
 
-  const allFilteredSelected =
-    filtered.length > 0 && selectedAccounts.length === filtered.length;
+  const retryTargets = useMemo(() => {
+    if (selectedAccounts.length > 0) {
+      return selectedAccounts.filter(hasRetryCredential);
+    }
+    // No selection: offer all invalid/failed rows that still have credentials.
+    return filtered.filter(
+      (a) =>
+        hasRetryCredential(a) &&
+        (!a.success || (a.status ?? "available") === "invalid"),
+    );
+  }, [selectedAccounts, filtered]);
 
-  const toggleSelect = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const allSelectableSelected =
+    selectableAccounts.length > 0 &&
+    selectableAccounts.every((a) => selected.has(accountKey(a)));
+
+  const toggleSelect = (account: LoginResult) => {
+    setSelected((prev) => toggleAccountSelection(prev, account));
   };
 
   const toggleSelectAll = () => {
-    if (allFilteredSelected) {
+    if (allSelectableSelected) {
       setSelected(new Set());
       return;
     }
-    setSelected(new Set(filtered.map(accountKey)));
+    setSelected(new Set(selectableAccounts.map(accountKey)));
   };
 
   const toggleReveal = (id: string) => {
@@ -208,7 +278,8 @@ export function LoginAccountsTable({
       }
       await writeTextFile(filePath, json);
 
-      if (markOnExport && onUpdateStatus) {
+      // Successful file write always marks exported — no extra checkbox.
+      if (onUpdateStatus) {
         await onUpdateStatus(ids, "exported");
       }
 
@@ -240,6 +311,10 @@ export function LoginAccountsTable({
         );
       } else {
         toast.success(t("autoLogin.pushSuccess", { count: res.pushed }));
+        // Full success → mark exported so they cannot be pushed/exported again.
+        if (onUpdateStatus && res.pushed > 0) {
+          await onUpdateStatus(ids, "exported");
+        }
       }
       setSelected(new Set());
     } catch (error) {
@@ -263,6 +338,46 @@ export function LoginAccountsTable({
       await onDelete(accountKey(acc));
     }
     setSelected(new Set());
+  };
+
+  const handleRetryLogin = async () => {
+    if (!onRetryLogin) return;
+    if (retryTargets.length === 0) {
+      toast.error(t("autoLogin.retryNoCredentials"));
+      return;
+    }
+    await onRetryLogin(retryTargets);
+    setSelected(new Set());
+  };
+
+  const openEdit = (acc: LoginResult) => {
+    setEditing(acc);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!onEditAccount || !editing) return;
+    const email = editEmail.trim();
+    if (!email) {
+      toast.error(t("autoLogin.editEmailRequired"));
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      await onEditAccount(accountKey(editing), {
+        email,
+        password: editPassword,
+        totpSecret: editTotp.trim(),
+        phoneNumber: editPhone.trim(),
+        note: editNote,
+        status: editStatus,
+      });
+      toast.success(t("autoLogin.editSaved"));
+      setEditing(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingEdit(false);
+    }
   };
 
   if (accounts.length === 0) {
@@ -344,15 +459,6 @@ export function LoginAccountsTable({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Checkbox
-              checked={markOnExport}
-              onCheckedChange={(v) => setMarkOnExport(Boolean(v))}
-              aria-label={t("autoLogin.markExportedOnExport")}
-            />
-            <span>{t("autoLogin.markExportedOnExport")}</span>
-          </div>
-
           <Button
             size="sm"
             className="ml-auto h-8"
@@ -381,6 +487,21 @@ export function LoginAccountsTable({
                 : t("autoLogin.pushSelected", { count: pushTargets.length })}
             </Button>
           )}
+
+          {onRetryLogin && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8"
+              onClick={() => void handleRetryLogin()}
+              disabled={retrying || retryTargets.length === 0}
+            >
+              <LuLogIn className="mr-1.5 h-3.5 w-3.5" />
+              {retrying
+                ? t("autoLogin.retrying")
+                : t("autoLogin.retryLogin", { count: retryTargets.length })}
+            </Button>
+          )}
         </div>
 
         {selectedAccounts.length > 0 && (
@@ -391,6 +512,22 @@ export function LoginAccountsTable({
               })}
             </span>
             <div className="ml-auto flex flex-wrap gap-1.5">
+              {onRetryLogin && (
+                <Button
+                  size="sm"
+                  variant="default"
+                  className="h-7"
+                  onClick={() => void handleRetryLogin()}
+                  disabled={retrying || retryTargets.length === 0}
+                >
+                  <LuLogIn className="mr-1 h-3.5 w-3.5" />
+                  {retrying
+                    ? t("autoLogin.retrying")
+                    : t("autoLogin.retryLogin", {
+                        count: retryTargets.length,
+                      })}
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="ghost"
@@ -446,18 +583,22 @@ export function LoginAccountsTable({
               <TableRow className="hover:bg-transparent">
                 <TableHead className="w-10">
                   <Checkbox
-                    checked={allFilteredSelected}
+                    checked={allSelectableSelected}
                     onCheckedChange={toggleSelectAll}
-                    aria-label={t("autoLogin.selectAll")}
+                    aria-label={t("autoLogin.selectReadyForExport")}
+                    title={t("autoLogin.selectReadyForExport")}
+                    disabled={selectableAccounts.length === 0}
                   />
                 </TableHead>
                 <TableHead>{t("autoLogin.email")}</TableHead>
                 <TableHead>{t("autoLogin.status")}</TableHead>
+                <TableHead>{t("registration.password")}</TableHead>
+                <TableHead>{t("registration.totpSecret")}</TableHead>
                 <TableHead>{t("autoLogin.accountId")}</TableHead>
                 <TableHead>{t("autoLogin.accessToken")}</TableHead>
                 <TableHead>{t("autoLogin.phoneNumber")}</TableHead>
                 <TableHead>{t("autoLogin.createdAt")}</TableHead>
-                <TableHead className="w-12" />
+                <TableHead className="w-20" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -465,6 +606,8 @@ export function LoginAccountsTable({
                 const id = accountKey(acc);
                 const status = acc.status ?? "available";
                 const isRevealed = revealed.has(id);
+                const totpKey = `${id}:totp`;
+                const passKey = `${id}:pass`;
                 return (
                   <TableRow
                     key={id}
@@ -474,7 +617,7 @@ export function LoginAccountsTable({
                     <TableCell>
                       <Checkbox
                         checked={selected.has(id)}
-                        onCheckedChange={() => toggleSelect(id)}
+                        onCheckedChange={() => toggleSelect(acc)}
                         aria-label={acc.email}
                       />
                     </TableCell>
@@ -492,11 +635,91 @@ export function LoginAccountsTable({
                           {acc.errorMessage || t("autoLogin.statusFailed")}
                         </p>
                       )}
+                      {acc.note ? (
+                        <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                          {acc.note}
+                        </p>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       <Badge variant={statusVariant(status)}>
                         {t(statusLabelKey(status))}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1 font-mono text-xs">
+                        <span>
+                          {maskValue(acc.password ?? "", revealed.has(passKey))}
+                        </span>
+                        {acc.password ? (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6"
+                              onClick={() => toggleReveal(passKey)}
+                              aria-label={t("autoLogin.showToken")}
+                            >
+                              {revealed.has(passKey) ? (
+                                <LuEyeOff className="h-3 w-3" />
+                              ) : (
+                                <LuEye className="h-3 w-3" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6"
+                              onClick={() => void copyText(acc.password ?? "")}
+                              aria-label={t("common.buttons.copy")}
+                            >
+                              <LuCopy className="h-3 w-3" />
+                            </Button>
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1 font-mono text-xs">
+                        <span>
+                          {maskValue(
+                            acc.totpSecret ?? "",
+                            revealed.has(totpKey),
+                          )}
+                        </span>
+                        {acc.totpSecret ? (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6"
+                              onClick={() => toggleReveal(totpKey)}
+                              aria-label={t("autoLogin.showToken")}
+                            >
+                              {revealed.has(totpKey) ? (
+                                <LuEyeOff className="h-3 w-3" />
+                              ) : (
+                                <LuEye className="h-3 w-3" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6"
+                              onClick={() =>
+                                void copyText(acc.totpSecret ?? "")
+                              }
+                              aria-label={t("common.buttons.copy")}
+                            >
+                              <LuCopy className="h-3 w-3" />
+                            </Button>
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="max-w-[140px] font-mono text-xs text-muted-foreground">
                       <button
@@ -556,17 +779,30 @@ export function LoginAccountsTable({
                         : "—"}
                     </TableCell>
                     <TableCell>
-                      {onDelete && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-destructive hover:text-destructive"
-                          onClick={() => void onDelete(id)}
-                          aria-label={t("common.buttons.delete")}
-                        >
-                          <LuTrash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
+                      <div className="flex items-center gap-0.5">
+                        {onEditAccount && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => openEdit(acc)}
+                            aria-label={t("autoLogin.editAccount")}
+                          >
+                            <LuPencil className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                        {onDelete && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-destructive hover:text-destructive"
+                            onClick={() => void onDelete(id)}
+                            aria-label={t("common.buttons.delete")}
+                          >
+                            <LuTrash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -575,6 +811,126 @@ export function LoginAccountsTable({
           </Table>
         </ScrollArea>
       </div>
+
+      <Dialog
+        open={Boolean(editing)}
+        onOpenChange={(open) => {
+          if (!open) setEditing(null);
+        }}
+      >
+        <DialogContent aria-describedby={undefined} className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t("autoLogin.editAccount")}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="edit-email">{t("autoLogin.email")}</Label>
+              <Input
+                id="edit-email"
+                value={editEmail}
+                onChange={(e) => setEditEmail(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="edit-password">
+                  {t("registration.password")}
+                </Label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7"
+                  onClick={() => setShowEditSecrets((v) => !v)}
+                >
+                  {showEditSecrets
+                    ? t("autoLogin.hideToken")
+                    : t("autoLogin.showToken")}
+                </Button>
+              </div>
+              <Input
+                id="edit-password"
+                type={showEditSecrets ? "text" : "password"}
+                value={editPassword}
+                onChange={(e) => setEditPassword(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-totp">{t("registration.totpSecret")}</Label>
+              <Input
+                id="edit-totp"
+                type={showEditSecrets ? "text" : "password"}
+                value={editTotp}
+                onChange={(e) => setEditTotp(e.target.value)}
+                autoComplete="off"
+                className="font-mono"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-phone">{t("autoLogin.phoneNumber")}</Label>
+              <Input
+                id="edit-phone"
+                value={editPhone}
+                onChange={(e) => setEditPhone(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-status">{t("autoLogin.status")}</Label>
+              <Select
+                value={editStatus}
+                onValueChange={(v) => setEditStatus(v as LoginResultStatus)}
+              >
+                <SelectTrigger id="edit-status">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="available">
+                    {t("autoLogin.statusAvailable")}
+                  </SelectItem>
+                  <SelectItem value="exported">
+                    {t("autoLogin.statusExported")}
+                  </SelectItem>
+                  <SelectItem value="used">
+                    {t("autoLogin.statusUsed")}
+                  </SelectItem>
+                  <SelectItem value="invalid">
+                    {t("autoLogin.statusInvalid")}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-note">{t("autoLogin.note")}</Label>
+              <Textarea
+                id="edit-note"
+                value={editNote}
+                onChange={(e) => setEditNote(e.target.value)}
+                rows={3}
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setEditing(null)}
+              disabled={savingEdit}
+            >
+              {t("common.buttons.cancel")}
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleSaveEdit()}
+              disabled={savingEdit || !onEditAccount}
+            >
+              {savingEdit ? t("autoLogin.saving") : t("common.buttons.save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

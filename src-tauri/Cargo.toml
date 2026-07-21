@@ -181,7 +181,9 @@ name = "recorder_integration"
 path = "tests/recorder_integration.rs"
 
 [profile.dev]
-codegen-units = 256
+# Lower codegen-units (was 256) reduces peak RAM during link on RAM-limited
+# machines while staying fast enough for incremental dev rebuilds.
+codegen-units = 16
 incremental = true
 opt-level = 0
 # Split debuginfo on macOS for faster linking (ignored on other platforms)

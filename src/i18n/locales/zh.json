@@ -1819,7 +1819,12 @@
     "emailProviderGmail123452026": "gmail.123452026.xyz",
     "emailProviderSmsIosmq": "sms.iosmq.xyz",
     "emailProviderGmail123452026Hint": "通过 gmail.123452026.xyz 兑换 CDK，并使用 +别名（每个 CDK 最多 6 个账号）。",
-    "emailProviderSmsIosmqHint": "在 sms.iosmq.xyz 兑换 MAIL 卡密（POST /api/v1/redeem），通过 order/lookup 获取邮箱和最新 OTP，并使用 +别名（每张卡最多 6 个账号）。"
+    "emailProviderSmsIosmqHint": "在 sms.iosmq.xyz 兑换 MAIL 卡密（POST /api/v1/redeem），通过 order/lookup 获取邮箱和最新 OTP，并使用 +别名（每张卡最多 6 个账号）。",
+    "smsTokenConfigured": "VI-OTP 令牌已在 设置/SMS 中配置。",
+    "smsTokenMissing": "未找到已保存的 VI-OTP 令牌。请在 SMS 设置中保存，或在下方粘贴覆盖令牌。",
+    "smsTokenRequired": "已启用短信，但没有可用的 VI-OTP 令牌。请在 SMS 设置中保存令牌，或输入覆盖令牌。",
+    "settingsTab": "设置",
+    "settingsHint": "在此配置 VPN/代理、Nord 和短信。注册页仅开关选项。"
   },
   "sms": {
     "title": "短信 / OTP 验证",
@@ -1860,7 +1865,11 @@
     "statusExpired": "已过期",
     "historyEmpty": "暂无历史。租号后刷新。",
     "copied": "已复制",
-    "copyFailed": "复制失败"
+    "copyFailed": "复制失败",
+    "autoSelectedOpenAI": "已自动选择 OpenAI/ChatGPT",
+    "servicesLoadFailed": "加载服务失败：{{error}}",
+    "networksLoadFailed": "加载网络失败：{{error}}",
+    "networksFallbackHint": "无法获取网络列表（已使用常见运营商）。不勾选表示允许任意网络。"
   },
   "autoLogin": {
     "title": "ChatGPT/Codex 自动登录",
@@ -1913,9 +1922,21 @@
     "statusUpdated": "已更新 {{count}} 个账号",
     "selectedCount": "已选 {{count}} 项",
     "selectAll": "全选",
+    "selectReadyForExport": "选择可导出的账号",
     "copied": "已复制",
     "copyFailed": "复制失败",
     "showToken": "显示令牌",
-    "hideToken": "隐藏令牌"
+    "hideToken": "隐藏令牌",
+    "retryLogin": "重新登录 ({{count}})",
+    "retrying": "登录中...",
+    "retryStarted": "正在重新登录 {{count}} 个账号",
+    "retryNoCredentials": "所选账号没有保存的密码。请在登录页粘贴凭证，或在此更新后重新运行以保存密码。",
+    "editAccount": "编辑账号",
+    "editSaved": "账号已更新",
+    "editEmailRequired": "邮箱为必填项",
+    "note": "备注",
+    "saving": "保存中...",
+    "tabSettings": "设置",
+    "settingsHint": "在此配置网络、Sub2API 和短信。登录页仅开关选项。"
   }
 }

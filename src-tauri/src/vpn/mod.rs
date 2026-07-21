@@ -21,10 +21,12 @@ pub use nord::{
   build_nord_wireguard_conf, build_rotated_nord_wireguard_conf, default_nord_vpn_name,
   detect_nord_max_sessions, extract_wireguard_peer_endpoint_host,
   extract_wireguard_peer_public_key, extract_wireguard_private_key,
-  fetch_nord_wireguard_credentials, list_nord_countries, list_nord_wireguard_servers,
+  fetch_nord_wireguard_credentials, infer_country_code_from_vpn_name, is_unsupported_region_error,
+  list_nord_countries, list_nord_wireguard_servers, next_fallback_country_code,
   pick_distinct_nord_servers, pick_nord_server, pick_rotated_nord_server,
-  spawn_ephemeral_nord_peer_pool, validate_nord_wireguard_conf, NordCountry,
-  NordWireGuardCredentials, NordWireGuardServer,
+  resolve_country_id_by_code, retarget_nord_vpn_to_country, spawn_ephemeral_nord_peer_pool,
+  validate_nord_wireguard_conf, NordCountry, NordWireGuardCredentials, NordWireGuardServer,
+  MAX_NORD_LOCATION_FALLBACKS, NORD_FALLBACK_COUNTRY_CODES,
 };
 pub use storage::VpnStorage;
 pub use tunnel::{TunnelManager, VpnTunnel};

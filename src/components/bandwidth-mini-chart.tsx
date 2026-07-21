@@ -19,8 +19,12 @@ export function BandwidthMiniChart({
   onClick,
   className,
 }: BandwidthMiniChartProps) {
-  const { ref: chartRef, isReady: isChartReady } =
-    useElementSize<HTMLDivElement>();
+  const {
+    ref: chartRef,
+    width: chartWidth,
+    height: chartHeight,
+    isReady: isChartReady,
+  } = useElementSize<HTMLDivElement>();
 
   // Transform data for the chart - combine sent and received for total bandwidth
   const chartData = React.useMemo(() => {
@@ -71,13 +75,17 @@ export function BandwidthMiniChart({
         className,
       )}
     >
-      <div ref={chartRef} className="flex-1 h-3 pointer-events-none">
+      <div
+        ref={chartRef}
+        className="pointer-events-none h-3 min-h-[12px] min-w-[48px] flex-1"
+      >
         {isChartReady ? (
           <ResponsiveContainer
-            width="100%"
-            height="100%"
+            width={Math.max(chartWidth, 1)}
+            height={Math.max(chartHeight, 1)}
             minWidth={1}
             minHeight={1}
+            debounce={50}
           >
             <AreaChart
               data={chartData}

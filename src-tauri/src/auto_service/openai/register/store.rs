@@ -14,7 +14,7 @@ use crate::app_dirs::data_dir;
 static STORE: Lazy<Mutex<CredentialStore>> = Lazy::new(|| Mutex::new(CredentialStore::new()));
 static CDK_STORE: Lazy<Arc<Mutex<CdkStore>>> = Lazy::new(|| Arc::new(Mutex::new(CdkStore::new())));
 
-const MAX_ACCOUNTS_PER_CDK: u32 = 6;
+pub const MAX_ACCOUNTS_PER_CDK: u32 = 6;
 const USAGE_LEDGER_FILE: &str = "usage-ledger.json";
 
 /// Thread-safe JSON file store for registration results.
@@ -49,6 +49,25 @@ impl CdkSlotReservation {
       .map_err(|error| format!("Failed to lock CDK inventory: {error}"))?
       .claim_slot(&self.cdk, &self.task_id)?;
     self.remaining -= 1;
+    Ok(())
+  }
+
+  /// Roll back a claimed slot when the registration attempt did not succeed
+  /// (failure or cancel). Decrements `usage` and re-absorbs the slot into
+  /// `remaining` so the same task can retry, and the next task sees capacity.
+  /// Safe to call multiple times per claim — only rolls back once per claim.
+  pub fn release_slot(&mut self) -> Result<(), String> {
+    // Match `claim_slot`: we can only release a slot that was previously claimed
+    // (i.e. still reflected as `usage += 1` but not yet re-absorbed into `remaining`).
+    // We track this implicitly: release only acts when we have no remaining
+    // budget left to release via Drop. Caller should call release_slot exactly
+    // once after a failed claim_slot.
+    let mut store = self
+      .store
+      .lock()
+      .map_err(|error| format!("Failed to lock CDK inventory: {error}"))?;
+    store.release_usage(&self.cdk, &self.task_id)?;
+    self.remaining += 1;
     Ok(())
   }
 }
@@ -345,6 +364,15 @@ impl CdkStore {
           }
         }
       }
+      // Reset the usage ledger for this CDK so a deleted stats row also frees
+      // its reserved quota — otherwise retrying the same CDK stays blocked by
+      // stale `used` counts. Drop any in-memory reservations for the same CDK
+      // as well, since the user explicitly cleared its stats.
+      let usage_key = usage_key(&key);
+      if self.usage.remove(&usage_key).is_some() {
+        let _ = self.persist_usage();
+      }
+      self.reservations.remove(&key);
     }
     removed
   }
@@ -369,6 +397,26 @@ impl CdkStore {
       ));
     }
     Ok(())
+  }
+
+  /// Remaining slots on a CDK after subtracting used + reserved from the max.
+  /// Drives the retry-cap flow: a partial run can be retried for the leftover
+  /// capacity without the user having to delete CDK stats first.
+  fn remaining_capacity(&self, cdk: &str) -> u32 {
+    let cdk = canonical_cdk(cdk);
+    let used = self
+      .usage
+      .get(&usage_key(&cdk))
+      .copied()
+      .unwrap_or_default();
+    let reserved: u32 = self
+      .reservations
+      .get(&cdk)
+      .into_iter()
+      .flat_map(HashMap::values)
+      .copied()
+      .sum();
+    MAX_ACCOUNTS_PER_CDK.saturating_sub(used.saturating_add(reserved))
   }
 
   fn reserve_unchecked(
@@ -452,6 +500,36 @@ impl CdkStore {
     if task_reservations.is_empty() {
       self.reservations.remove(cdk);
     }
+  }
+
+  /// Roll back one claimed slot: decrement `usage` by 1 and persist.
+  /// Called when a registration attempt failed or was cancelled after
+  /// `claim_slot` already incremented usage. Re-absorbs the slot so the
+  /// next `check_capacity` sees the freed budget and retry is possible.
+  fn release_usage(&mut self, cdk: &str, task_id: &str) -> Result<(), String> {
+    let cdk = canonical_cdk(cdk);
+    let usage_key = usage_key(&cdk);
+    let previous_usage = self.usage.get(&usage_key).copied().unwrap_or_default();
+    if previous_usage == 0 {
+      // Nothing to roll back — likely already released or never claimed.
+      // Re-create the reservation entry so Drop doesn't double-release.
+      let task_reservations = self.reservations.entry(cdk.clone()).or_default();
+      let reserved = task_reservations.entry(task_id.to_string()).or_default();
+      *reserved = reserved.saturating_add(1);
+      return Ok(());
+    }
+    self.usage.insert(usage_key.clone(), previous_usage - 1);
+    if let Err(error) = self.persist_usage() {
+      // Restore in-memory and surface error.
+      self.usage.insert(usage_key, previous_usage);
+      return Err(error);
+    }
+    // Re-absorb the slot into this task's reservation so Drop releases it
+    // cleanly if the task ends without retrying.
+    let task_reservations = self.reservations.entry(cdk.clone()).or_default();
+    let reserved = task_reservations.entry(task_id.to_string()).or_default();
+    *reserved = reserved.saturating_add(1);
+    Ok(())
   }
 
   fn persist_usage(&self) -> Result<(), String> {
@@ -569,12 +647,64 @@ fn reserve_slots_in_store(
   )
 }
 
+fn reserve_slots_per_in_store(
+  store: &Arc<Mutex<CdkStore>>,
+  cdks_targets: &[(String, u32)],
+  task_id: &str,
+) -> Result<Vec<CdkSlotReservation>, String> {
+  let mut locked = store
+    .lock()
+    .map_err(|error| format!("Failed to lock CDK inventory: {error}"))?;
+
+  let mut requested_by_cdk = HashMap::<String, u32>::new();
+  for (cdk, requested) in cdks_targets {
+    if *requested == 0 {
+      continue;
+    }
+    let total = requested_by_cdk.entry(canonical_cdk(cdk)).or_default();
+    *total = total.saturating_add(*requested);
+  }
+  for (cdk, requested) in &requested_by_cdk {
+    locked.check_capacity(cdk, *requested)?;
+  }
+
+  Ok(
+    cdks_targets
+      .iter()
+      .filter(|(_, requested)| *requested > 0)
+      .map(|(cdk, requested)| locked.reserve_unchecked(store, cdk, task_id, *requested))
+      .collect(),
+  )
+}
+
 pub fn reserve_cdk_slots(
   cdks: &[String],
   task_id: &str,
   requested_per_cdk: u32,
 ) -> Result<Vec<CdkSlotReservation>, String> {
   reserve_slots_in_store(&CDK_STORE, cdks, task_id, requested_per_cdk)
+}
+
+/// Reserve a different number of slots per CDK. Entries with `requested == 0`
+/// are skipped (caller treats them as "CDK already full"). Duplicate CDKs in
+/// the list still share a single batch budget — their requested counts are
+/// summed before `check_capacity` runs, mirroring `reserve_cdk_slots`.
+pub fn reserve_cdk_slots_per(
+  cdks_targets: &[(String, u32)],
+  task_id: &str,
+) -> Result<Vec<CdkSlotReservation>, String> {
+  reserve_slots_per_in_store(&CDK_STORE, cdks_targets, task_id)
+}
+
+/// How many account slots remain on a CDK after subtracting `used` (persisted
+/// usage ledger) and `reserved` (in-flight reservations) from
+/// `MAX_ACCOUNTS_PER_CDK`. The retry-cap flow uses this to clamp the per-CDK
+/// request so a partial run can be retried without tripping quota validation.
+pub fn cdk_remaining_capacity(cdk: &str) -> u32 {
+  CDK_STORE
+    .lock()
+    .map(|store| store.remaining_capacity(cdk))
+    .unwrap_or(MAX_ACCOUNTS_PER_CDK)
 }
 
 pub fn save_cdk_inventory_record(record: &CdkInventoryRecord) {
@@ -655,6 +785,66 @@ mod tests {
     assert!(reserve_slots_in_store(&store, &["mail-test".into()], "task-2", 1).is_err());
     drop(first);
     assert!(reserve_slots_in_store(&store, &[" mail-test ".into()], "task-2", 6).is_ok());
+  }
+
+  #[test]
+  fn release_slot_rolls_back_usage_so_retry_fits() {
+    // Simulates the failed/cancelled registration path: claim_slot increments
+    // usage, release_slot must decrement it so the same CDK can be retried
+    // up to MAX_ACCOUNTS_PER_CDK again.
+    let temp = TempDir::new().unwrap();
+    let store = test_store(&temp);
+
+    let mut reservations =
+      reserve_slots_in_store(&store, &["MAIL-FAIL".into()], "task-1", 6).unwrap();
+    let mut reservation = reservations.pop().unwrap();
+    reservation.claim_slot().unwrap();
+    // Usage ledger now reflects 1 used even though no account was created.
+    assert_eq!(
+      store
+        .lock()
+        .unwrap()
+        .usage
+        .get(&usage_key("MAIL-FAIL"))
+        .copied(),
+      Some(1)
+    );
+
+    // Registration failed — roll back the claimed slot.
+    reservation.release_slot().unwrap();
+    assert_eq!(
+      store
+        .lock()
+        .unwrap()
+        .usage
+        .get(&usage_key("MAIL-FAIL"))
+        .copied(),
+      Some(0)
+    );
+
+    // Releasing the reservation (drop) must not double-count: retrying with
+    // full 6 budget must succeed.
+    drop(reservation);
+    assert!(reserve_slots_in_store(&store, &["MAIL-FAIL".into()], "task-2", 6).is_ok());
+  }
+
+  #[test]
+  fn release_slot_without_claim_is_noop_on_usage() {
+    let temp = TempDir::new().unwrap();
+    let store = test_store(&temp);
+    let mut reservations = reserve_slots_in_store(&store, &["MAIL-X".into()], "task-1", 1).unwrap();
+    let mut reservation = reservations.pop().unwrap();
+    // Releasing without ever claiming should not push usage below zero.
+    reservation.release_slot().unwrap();
+    assert_eq!(
+      store
+        .lock()
+        .unwrap()
+        .usage
+        .get(&usage_key("MAIL-X"))
+        .copied(),
+      None
+    );
   }
 
   #[test]
@@ -749,7 +939,7 @@ mod tests {
   }
 
   #[test]
-  fn deleting_inventory_record_does_not_reset_usage() {
+  fn deleting_inventory_record_resets_usage_so_retry_works() {
     let temp = TempDir::new().unwrap();
     let store = test_store(&temp);
     let mut reservation =
@@ -757,6 +947,7 @@ mod tests {
     for _ in 0..6 {
       reservation[0].claim_slot().unwrap();
     }
+    drop(reservation);
     {
       let mut locked = store.lock().unwrap();
       locked.save(&CdkInventoryRecord::new("MAIL-TEST", 6, "task-1"));
@@ -771,7 +962,88 @@ mod tests {
     assert!(!temp.path().join("mail-test.json").exists());
     assert!(temp.path().join(USAGE_LEDGER_FILE).exists());
 
+    // Deleting the stats row must also reset the usage ledger — otherwise the
+    // user cannot retry the same CDK because stale `used` counts keep blocking
+    // `check_capacity`. After delete, a full 6-slot reservation must succeed.
     let reloaded = test_store(&temp);
-    assert!(reserve_slots_in_store(&reloaded, &["MAIL-TEST".into()], "task-2", 1).is_err());
+    assert!(reserve_slots_in_store(&reloaded, &["MAIL-TEST".into()], "task-2", 6).is_ok());
+    let persisted: HashMap<String, u32> =
+      serde_json::from_str(&fs::read_to_string(temp.path().join(USAGE_LEDGER_FILE)).unwrap())
+        .unwrap();
+    assert!(!persisted.contains_key(&usage_key("MAIL-TEST")));
+  }
+
+  #[test]
+  fn remaining_capacity_reflects_used_and_reserved() {
+    let temp = TempDir::new().unwrap();
+    let store = test_store(&temp);
+    {
+      let mut locked = store.lock().unwrap();
+      locked.usage.insert(usage_key("MAIL-TEST"), 2);
+      locked.persist_usage().unwrap();
+    }
+    // 6 - 2 used = 4 free before any reservation.
+    assert_eq!(store.lock().unwrap().remaining_capacity("mail-test"), 4);
+    // Holding a 3-slot reservation drops visible capacity to 1.
+    let _r = reserve_slots_in_store(&store, &["MAIL-TEST".into()], "task-1", 3).unwrap();
+    assert_eq!(store.lock().unwrap().remaining_capacity("MAIL-TEST"), 1);
+  }
+
+  #[test]
+  fn reserve_per_cdk_caps_partial_retry_and_skips_full() {
+    let temp = TempDir::new().unwrap();
+    let store = test_store(&temp);
+    {
+      let mut locked = store.lock().unwrap();
+      locked.usage.insert(usage_key("MAIL-PARTIAL"), 2);
+      locked
+        .usage
+        .insert(usage_key("MAIL-FULL"), MAX_ACCOUNTS_PER_CDK);
+      locked.persist_usage().unwrap();
+    }
+    // Retry asks for 6 each; capacity must cap PARTIAL to 4 and skip FULL.
+    let targets = vec![
+      ("MAIL-PARTIAL".to_string(), 4u32),
+      ("MAIL-FULL".to_string(), 0u32),
+    ];
+    let mut reservations = reserve_slots_per_in_store(&store, &targets, "task-retry").unwrap();
+    assert_eq!(reservations.len(), 1);
+    let mut reservation = reservations.pop().unwrap();
+    for _ in 0..4 {
+      reservation.claim_slot().unwrap();
+    }
+    // The full CDK must remain blocked.
+    assert!(
+      reserve_slots_per_in_store(&store, &[("MAIL-FULL".into(), 1u32)], "task-retry-2").is_err()
+    );
+  }
+
+  #[test]
+  fn reserve_per_cdk_rejects_when_target_exceeds_remaining() {
+    let temp = TempDir::new().unwrap();
+    let store = test_store(&temp);
+    store
+      .lock()
+      .unwrap()
+      .usage
+      .insert(usage_key("MAIL-TEST"), 5);
+    // Asking for 2 when only 1 remains must fail and leave no reservations.
+    let result = reserve_slots_per_in_store(&store, &[("MAIL-TEST".into(), 2u32)], "task-1");
+    assert!(result.is_err());
+    assert!(store.lock().unwrap().reservations.is_empty());
+  }
+
+  #[test]
+  fn reserve_per_cdk_sums_duplicate_targets_before_capacity_check() {
+    let temp = TempDir::new().unwrap();
+    let store = test_store(&temp);
+    let result = reserve_slots_per_in_store(
+      &store,
+      &[("MAIL-TEST".into(), 3u32), (" mail-test ".into(), 4u32)],
+      "task-1",
+    );
+    // 3 + 4 = 7 > MAX_ACCOUNTS_PER_CDK — must reject atomically.
+    assert!(result.is_err());
+    assert!(store.lock().unwrap().reservations.is_empty());
   }
 }

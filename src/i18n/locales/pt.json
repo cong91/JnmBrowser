@@ -1819,7 +1819,12 @@
     "emailProviderGmail123452026": "gmail.123452026.xyz",
     "emailProviderSmsIosmq": "sms.iosmq.xyz",
     "emailProviderGmail123452026Hint": "Resgate códigos CDK em gmail.123452026.xyz e use +aliases (até 6 contas por CDK).",
-    "emailProviderSmsIosmqHint": "Resgate um cartão MAIL em sms.iosmq.xyz (POST /api/v1/redeem), consulte order/lookup para a caixa e o OTP mais recente e use +aliases (até 6 contas por cartão)."
+    "emailProviderSmsIosmqHint": "Resgate um cartão MAIL em sms.iosmq.xyz (POST /api/v1/redeem), consulte order/lookup para a caixa e o OTP mais recente e use +aliases (até 6 contas por cartão).",
+    "smsTokenConfigured": "O token VI-OTP já está configurado em Definições/SMS.",
+    "smsTokenMissing": "Nenhum token VI-OTP guardado encontrado. Guarde-o nas definições de SMS, ou cole um token de substituição abaixo.",
+    "smsTokenRequired": "O SMS está ativado, mas não há token VI-OTP disponível. Guarde um token nas definições de SMS ou introduza uma substituição.",
+    "settingsTab": "Configurações",
+    "settingsHint": "Configure VPN/proxy, Nord e SMS aqui. A aba Register só ativa opções."
   },
   "sms": {
     "title": "Verificação SMS / OTP",
@@ -1860,7 +1865,11 @@
     "statusExpired": "Expirado",
     "historyEmpty": "Ainda sem histórico. Atualize após alugar números.",
     "copied": "Copiado",
-    "copyFailed": "Falha ao copiar"
+    "copyFailed": "Falha ao copiar",
+    "autoSelectedOpenAI": "selecionado automaticamente para OpenAI/ChatGPT",
+    "servicesLoadFailed": "Falha ao carregar serviços: {{error}}",
+    "networksLoadFailed": "Falha ao carregar redes: {{error}}",
+    "networksFallbackHint": "Lista de redes indisponível (usando operadoras comuns). Deixe desmarcado para qualquer rede."
   },
   "autoLogin": {
     "title": "ChatGPT/Codex Login Automático",
@@ -1913,9 +1922,21 @@
     "statusUpdated": "{{count}} conta(s) atualizada(s)",
     "selectedCount": "{{count}} selecionado(s)",
     "selectAll": "Selecionar tudo",
+    "selectReadyForExport": "Selecionar contas prontas para exportar",
     "copied": "Copiado",
     "copyFailed": "Falha ao copiar",
     "showToken": "Mostrar token",
-    "hideToken": "Ocultar token"
+    "hideToken": "Ocultar token",
+    "retryLogin": "Entrar novamente ({{count}})",
+    "retrying": "Entrando...",
+    "retryStarted": "Tentando login novamente para {{count}} conta(s)",
+    "retryNoCredentials": "As contas selecionadas não têm senha salva. Cole as credenciais na aba Login, ou execute novamente após esta atualização para armazenar senhas.",
+    "editAccount": "Editar conta",
+    "editSaved": "Conta atualizada",
+    "editEmailRequired": "O e-mail é obrigatório",
+    "note": "Nota",
+    "saving": "Salvando...",
+    "tabSettings": "Configurações",
+    "settingsHint": "Configure rede, Sub2API e SMS aqui. A aba Login só ativa opções."
   }
 }

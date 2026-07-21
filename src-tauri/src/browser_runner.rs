@@ -251,11 +251,13 @@ impl BrowserRunner {
       // If proxy startup fails, DO NOT launch Camoufox - it requires local proxy
       let profile_id_str = profile.id.to_string();
       let blocklist_file = Self::resolve_blocklist_file(profile).await?;
+      // Unique temp PID per concurrent launch — shared 0 races under multi-CDK.
+      let temp_pid = PROXY_MANAGER.allocate_temp_browser_pid();
       let local_proxy = PROXY_MANAGER
         .start_proxy(
           app_handle.clone(),
           upstream_proxy.as_ref(),
-          0, // Use 0 as temporary PID, will be updated later
+          temp_pid,
           Some(&profile_id_str),
           profile.proxy_bypass_rules.clone(),
           blocklist_file,
@@ -391,10 +393,12 @@ impl BrowserRunner {
 
       // Update the proxy manager with the correct PID
       if let Some(process_id) = process_id {
-        if let Err(e) = PROXY_MANAGER.update_proxy_pid(0, process_id) {
+        if let Err(e) = PROXY_MANAGER.update_proxy_pid(temp_pid, process_id) {
           log::warn!("Warning: Failed to update proxy PID mapping: {e}");
         } else {
-          log::info!("Updated proxy PID mapping from temp (0) to actual PID: {process_id}");
+          log::info!(
+            "Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}"
+          );
         }
       }
 
@@ -513,11 +517,13 @@ impl BrowserRunner {
       // If proxy startup fails, DO NOT launch Chromium - it requires local proxy
       let profile_id_str = profile.id.to_string();
       let blocklist_file = Self::resolve_blocklist_file(profile).await?;
+      // Unique temp PID per concurrent launch — shared 0 races under multi-CDK.
+      let temp_pid = PROXY_MANAGER.allocate_temp_browser_pid();
       let local_proxy = PROXY_MANAGER
         .start_proxy(
           app_handle.clone(),
           upstream_proxy.as_ref(),
-          0, // Use 0 as temporary PID, will be updated later
+          temp_pid,
           Some(&profile_id_str),
           profile.proxy_bypass_rules.clone(),
           blocklist_file,
@@ -662,10 +668,12 @@ impl BrowserRunner {
       updated_profile.last_launch = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
 
       // Update the proxy manager with the correct PID
-      if let Err(e) = PROXY_MANAGER.update_proxy_pid(0, process_id) {
+      if let Err(e) = PROXY_MANAGER.update_proxy_pid(temp_pid, process_id) {
         log::warn!("Warning: Failed to update proxy PID mapping: {e}");
       } else {
-        log::info!("Updated proxy PID mapping from temp (0) to actual PID: {process_id}");
+        log::info!(
+          "Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}"
+        );
       }
 
       // Save the updated profile
@@ -844,8 +852,8 @@ impl BrowserRunner {
       .await
       .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
-    // Use a temporary PID (1) to start the proxy, we'll update it after browser launch
-    let temp_pid = 1u32;
+    // Unique temp PID so concurrent debugging launches do not share map key 1.
+    let temp_pid = PROXY_MANAGER.allocate_temp_browser_pid();
     let profile_id_str = profile.id.to_string();
 
     // Start local proxy - if this fails, DO NOT launch browser
@@ -2335,6 +2343,8 @@ pub async fn launch_browser_profile(
 
   // Store the internal proxy settings for passing to launch_browser
   let mut internal_proxy_settings: Option<ProxySettings> = None;
+  // Temp proxy map key for non-Chromium/Camoufox path (hoisted so post-launch remap works).
+  let mut pending_proxy_temp_pid: Option<u32> = None;
 
   // Resolve the most up-to-date profile from disk by ID to avoid using stale proxy_id/browser state
   let profile_for_launch = match browser_runner
@@ -2389,8 +2399,9 @@ pub async fn launch_browser_profile(
       }
     }
 
-    // Use a temporary PID (1) to start the proxy, we'll update it after browser launch
-    let temp_pid = 1u32;
+    // Unique temp PID so concurrent launches do not share map key 1.
+    let temp_pid = PROXY_MANAGER.allocate_temp_browser_pid();
+    pending_proxy_temp_pid = Some(temp_pid);
     let profile_id_str = profile.id.to_string();
 
     // Always start a local proxy, even if there's no upstream proxy
@@ -2495,10 +2506,11 @@ pub async fn launch_browser_profile(
     updated_profile.id
   );
 
-  // Now update the proxy with the correct PID if we have one
-  if let Some(actual_pid) = updated_profile.process_id {
-    // Update the proxy manager with the correct PID (we always started with temp pid 1 for non-Camoufox)
-    let _ = PROXY_MANAGER.update_proxy_pid(1u32, actual_pid);
+  // Remap the unique temp proxy key to the real browser PID after launch.
+  if let (Some(temp_pid), Some(actual_pid)) =
+    (pending_proxy_temp_pid, updated_profile.process_id)
+  {
+    let _ = PROXY_MANAGER.update_proxy_pid(temp_pid, actual_pid);
   }
 
   Ok(updated_profile)

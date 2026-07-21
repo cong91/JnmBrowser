@@ -1819,7 +1819,12 @@
     "emailProviderGmail123452026": "gmail.123452026.xyz",
     "emailProviderSmsIosmq": "sms.iosmq.xyz",
     "emailProviderGmail123452026Hint": "Redeem CDK codes via gmail.123452026.xyz and use +aliases (up to 6 accounts per CDK).",
-    "emailProviderSmsIosmqHint": "Redeem a MAIL card on sms.iosmq.xyz (POST /api/v1/redeem), then poll order/lookup for the mailbox and newest OTP. Generate +aliases (up to 6 accounts per card)."
+    "emailProviderSmsIosmqHint": "Redeem a MAIL card on sms.iosmq.xyz (POST /api/v1/redeem), then poll order/lookup for the mailbox and newest OTP. Generate +aliases (up to 6 accounts per card).",
+    "smsTokenConfigured": "VI-OTP token is already configured in Settings/SMS.",
+    "smsTokenMissing": "No saved VI-OTP token found. Save it in SMS settings, or paste a token override below.",
+    "smsTokenRequired": "SMS is enabled but no VI-OTP token is available. Save a token in SMS settings or enter an override.",
+    "settingsTab": "Settings",
+    "settingsHint": "Configure VPN/proxy, Nord, and SMS here. The Register tab only enables options."
   },
   "sms": {
     "title": "SMS / OTP Verification",
@@ -1860,7 +1865,11 @@
     "statusExpired": "Expired",
     "historyEmpty": "No history yet. Refresh after renting numbers.",
     "copied": "Copied",
-    "copyFailed": "Copy failed"
+    "copyFailed": "Copy failed",
+    "autoSelectedOpenAI": "auto-selected for OpenAI/ChatGPT",
+    "servicesLoadFailed": "Failed to load services: {{error}}",
+    "networksLoadFailed": "Failed to load networks: {{error}}",
+    "networksFallbackHint": "Network list unavailable (using common carriers). Leave unchecked for any network."
   },
   "autoLogin": {
     "title": "ChatGPT/Codex Auto Login",
@@ -1913,9 +1922,21 @@
     "statusUpdated": "Updated {{count}} account(s)",
     "selectedCount": "{{count}} selected",
     "selectAll": "Select all",
+    "selectReadyForExport": "Select accounts ready to export",
     "copied": "Copied",
     "copyFailed": "Copy failed",
     "showToken": "Show token",
-    "hideToken": "Hide token"
+    "hideToken": "Hide token",
+    "retryLogin": "Login again ({{count}})",
+    "retrying": "Logging in...",
+    "retryStarted": "Retrying login for {{count}} account(s)",
+    "retryNoCredentials": "Selected accounts have no saved password. Paste credentials on the Login tab, or re-run after this update so passwords are stored.",
+    "editAccount": "Edit account",
+    "editSaved": "Account updated",
+    "editEmailRequired": "Email is required",
+    "note": "Note",
+    "saving": "Saving...",
+    "tabSettings": "Settings",
+    "settingsHint": "Configure network, Sub2API, and SMS here. The Login tab only enables options."
   }
 }

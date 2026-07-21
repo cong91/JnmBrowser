@@ -15,7 +15,8 @@ use uuid::Uuid;
 use super::store::save_login_result;
 use super::sub2api::Sub2ApiClient;
 use super::types::{
-  LoginConfig, LoginCredential, LoginProgress, LoginResult, LoginResultStatus, LoginStep,
+  should_rotate, LoginConfig, LoginCredential, LoginNetworkMode, LoginProgress, LoginResult,
+  LoginResultStatus, LoginStep,
 };
 use super::{oauth, pkce};
 use crate::sms::{NumberRequest, SmsService};
@@ -25,6 +26,14 @@ type CdpWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const OAUTH_CALLBACK_HOST: &str = "127.0.0.1";
 const OAUTH_CALLBACK_PORT: u16 = 1455;
 const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+/// Max seconds to wait for one Viotp SMS before rotating to a new number.
+const SMS_OTP_TIMEOUT_SECS: u64 = 90;
+/// How many different Viotp numbers to try within a single login_once attempt.
+const MAX_SMS_NUMBER_ATTEMPTS: u32 = 3;
+/// Soft-wait budget for Cloudflare Turnstile / "Just a moment" challenges.
+const CLOUDFLARE_SOFT_WAIT_SECS: u64 = 20;
+/// Extra relaunches dedicated to Cloudflare recovery (on top of normal retries).
+const MAX_CLOUDFLARE_RECOVERIES: u32 = 2;
 
 /// Short-lived local HTTP listener for OpenAI OAuth redirect.
 ///
@@ -33,18 +42,41 @@ const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 struct OAuthCallbackListener {
   rx: oneshot::Receiver<Result<(String, String), String>>,
   shutdown: Option<oneshot::Sender<()>>,
+  task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl OAuthCallbackListener {
   async fn start() -> Result<Self, String> {
     let addr = format!("{OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}");
-    let listener = TcpListener::bind(&addr)
-      .await
-      .map_err(|e| format!("Failed to bind OAuth callback listener on {addr}: {e}"))?;
+    Self::start_on_addr(&addr).await
+  }
+
+  async fn start_on_addr(addr: &str) -> Result<Self, String> {
+    // Windows keeps sockets in TIME_WAIT after close. Retries of the same login
+    // attempt can hit os error 10048 unless we wait for the previous accept-loop
+    // task to drop its TcpListener.
+    let mut last_err = String::new();
+    let mut listener = None;
+    for attempt in 0..20 {
+      if attempt > 0 {
+        sleep(std::time::Duration::from_millis(150)).await;
+      }
+      match TcpListener::bind(&addr).await {
+        Ok(l) => {
+          listener = Some(l);
+          break;
+        }
+        Err(e) => {
+          last_err = e.to_string();
+        }
+      }
+    }
+    let listener = listener
+      .ok_or_else(|| format!("Failed to bind OAuth callback listener on {addr}: {last_err}"))?;
     let (tx, rx) = oneshot::channel::<Result<(String, String), String>>();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
       let mut tx = Some(tx);
       loop {
         tokio::select! {
@@ -65,6 +97,8 @@ impl OAuthCallbackListener {
           }
         }
       }
+      // Drop the listener before the task completes so shutdown guarantees re-bind safety.
+      drop(listener);
       if let Some(sender) = tx.take() {
         let _ = sender.send(Err(
           "OAuth callback listener shut down before receiving code".into(),
@@ -75,18 +109,34 @@ impl OAuthCallbackListener {
     Ok(Self {
       rx,
       shutdown: Some(shutdown_tx),
+      task: Some(task),
     })
   }
 
   async fn wait_for_code(
-    mut self,
+    &mut self,
     timeout: std::time::Duration,
   ) -> Result<(String, String), String> {
-    // Drop of Self shuts down the accept loop after we return.
     tokio::time::timeout(timeout, &mut self.rx)
       .await
       .map_err(|_| "Timeout waiting for OAuth callback on localhost:1455".to_string())?
       .map_err(|_| "OAuth callback listener closed unexpectedly".to_string())?
+  }
+
+  /// Signal shutdown and wait until the accept-loop task has released :1455.
+  async fn shutdown(&mut self) {
+    if let Some(tx) = self.shutdown.take() {
+      let _ = tx.send(());
+    }
+    if let Some(mut task) = self.task.take() {
+      if tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
+        .await
+        .is_err()
+      {
+        task.abort();
+        let _ = task.await;
+      }
+    }
   }
 }
 
@@ -94,6 +144,9 @@ impl Drop for OAuthCallbackListener {
   fn drop(&mut self) {
     if let Some(tx) = self.shutdown.take() {
       let _ = tx.send(());
+    }
+    if let Some(task) = self.task.take() {
+      task.abort();
     }
   }
 }
@@ -136,6 +189,48 @@ async fn handle_oauth_callback_connection(socket: &mut TcpStream) -> Option<(Str
   parsed
 }
 
+fn submit_control_probe_js(selectors: &str) -> String {
+  format!(
+    r#"(function(){{
+      const selectors = {sels};
+      function ready(el) {{
+        try {{
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          const reactReady = Object.keys(el).some((key) => key.startsWith('__reactProps$'));
+          const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+          return reactReady && enabled && r.width > 0 && r.height > 0
+            && s.visibility !== 'hidden' && s.display !== 'none';
+        }} catch (_) {{ return false; }}
+      }}
+      function point(el, how) {{
+        el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+        const r = el.getBoundingClientRect();
+        return {{
+          ok: true,
+          how,
+          x: r.left + r.width / 2,
+          y: r.top + r.height / 2,
+          text: (el.innerText || el.textContent || '').slice(0, 40)
+        }};
+      }}
+      const button = Array.from(document.querySelectorAll(selectors)).find(ready);
+      if (button) return point(button, 'selector');
+
+      const texts = ['continue', 'next', 'log in', 'sign in', 'submit', 'verify'];
+      const textButton = Array.from(document.querySelectorAll('button,[role="button"]'))
+        .filter(ready)
+        .find((el) => {{
+          const text = (el.innerText || el.textContent || '').toLowerCase().trim();
+          return texts.some((candidate) => text === candidate || text.includes(candidate));
+        }});
+      if (textButton) return point(textButton, 'text');
+      return {{ ok: false }};
+    }})()"#,
+    sels = serde_json::to_string(selectors).unwrap_or_else(|_| "\"\"".into()),
+  )
+}
+
 /// CDP WebSocket connection.
 struct CdpConnection {
   ws: CdpWs,
@@ -147,7 +242,54 @@ impl CdpConnection {
     let (ws, _) = connect_async(ws_url)
       .await
       .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
-    Ok(Self { ws, next_id: 1 })
+    let mut conn = Self { ws, next_id: 1 };
+    // Automation must keep working when the OS window is minimized/unfocused.
+    conn.prepare_for_background_automation().await?;
+    Ok(conn)
+  }
+
+  /// Enable focus emulation and restore a usable window even if minimized.
+  async fn prepare_for_background_automation(&mut self) -> Result<(), String> {
+    let _ = self.send_cmd("Page.enable", serde_json::json!({})).await;
+    let _ = self.send_cmd("Runtime.enable", serde_json::json!({})).await;
+    let _ = self
+      .send_cmd(
+        "Emulation.setFocusEmulationEnabled",
+        serde_json::json!({ "enabled": true }),
+      )
+      .await;
+    let _ = self
+      .send_cmd("Page.bringToFront", serde_json::json!({}))
+      .await;
+
+    // If the OS window is minimized, CDP input/layout can break. Normalize state.
+    if let Ok(win) = self
+      .send_cmd("Browser.getWindowForTarget", serde_json::json!({}))
+      .await
+    {
+      if let Some(window_id) = win.get("windowId").and_then(|v| v.as_i64()) {
+        let state = win
+          .pointer("/bounds/windowState")
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        if state == "minimized" || state.is_empty() {
+          let _ = self
+            .send_cmd(
+              "Browser.setWindowBounds",
+              serde_json::json!({
+                "windowId": window_id,
+                "bounds": {
+                  "windowState": "normal",
+                  "width": 1280,
+                  "height": 900,
+                }
+              }),
+            )
+            .await;
+        }
+      }
+    }
+    Ok(())
   }
 
   async fn send_cmd(
@@ -185,7 +327,7 @@ impl CdpConnection {
   }
 
   async fn navigate(&mut self, url: &str, timeout_secs: u64) -> Result<(), String> {
-    let _ = self.send_cmd("Page.enable", serde_json::json!({})).await;
+    let _ = self.prepare_for_background_automation().await;
     self
       .send_cmd("Page.navigate", serde_json::json!({ "url": url }))
       .await?;
@@ -384,14 +526,30 @@ impl BrowserSession {
       Self::Cdp(cdp) => cdp.navigate(url, timeout_secs).await,
       Self::Camoufox { page, .. } => {
         let _ = timeout_secs;
+        // Keep page usable when the OS window is minimized/unfocused.
+        let _ =
+          crate::camoufox_manager::CamoufoxManager::prepare_page_for_background_automation(page)
+            .await;
         match page.goto_builder(url).goto().await {
-          Ok(_) => Ok(()),
+          Ok(_) => {
+            let _ =
+              crate::camoufox_manager::CamoufoxManager::prepare_page_for_background_automation(
+                page,
+              )
+              .await;
+            Ok(())
+          }
           Err(e) => {
             let current = page.url().unwrap_or_default();
             if current.starts_with(url)
               || (url.contains("auth.openai.com") && current.contains("auth.openai.com"))
               || (url.contains("chatgpt.com") && current.contains("chatgpt.com"))
             {
+              let _ =
+                crate::camoufox_manager::CamoufoxManager::prepare_page_for_background_automation(
+                  page,
+                )
+                .await;
               Ok(())
             } else {
               Err(format!("Camoufox navigate failed: {e} (current={current})"))
@@ -519,7 +677,7 @@ impl BrowserSession {
 }
 
 /// Login page type detection.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginPageType {
   LoginEmail,
   LoginPassword,
@@ -535,62 +693,149 @@ enum LoginPageType {
   Unknown,
 }
 
-fn detect_login_page_type(url: &str) -> LoginPageType {
-  let u = url.to_lowercase();
-  // Callback first: after consent, Chrome may briefly show localhost or chrome-error with code=.
-  if u.contains("localhost")
-    || u.contains("127.0.0.1")
-    || (u.contains("callback") && u.contains("code="))
-    || (u.contains("code=") && u.contains("state="))
-    || u.contains("chrome-error://")
+fn is_oauth_callback_url(url: &str) -> bool {
+  if url.to_ascii_lowercase().starts_with("chrome-error://") {
+    return true;
+  }
+  let Some(parsed) = url::Url::parse(url).ok() else {
+    return false;
+  };
+  let host = parsed.host_str().unwrap_or_default();
+  if !matches!(host, "localhost" | "127.0.0.1") {
+    return false;
+  }
+  let path_is_callback = parsed.path().contains("/auth/callback");
+  let has_code = parsed.query_pairs().any(|(key, _)| key == "code");
+  let has_state = parsed.query_pairs().any(|(key, _)| key == "state");
+  path_is_callback || (has_code && has_state)
+}
+
+fn extract_unsupported_region_error(body: &str) -> Option<String> {
+  let body = body.trim();
+  if body.is_empty() || !crate::vpn::is_unsupported_region_error(body) {
+    return None;
+  }
+
+  let json = serde_json::from_str::<serde_json::Value>(body)
+    .ok()
+    .map(|_| body)
+    .or_else(|| {
+      let start = body.find('{')?;
+      let end = body.rfind('}')?;
+      let candidate = body.get(start..=end)?.trim();
+      serde_json::from_str::<serde_json::Value>(candidate)
+        .ok()
+        .map(|_| candidate)
+    })?;
+  Some(json.to_string())
+}
+
+/// Detect Cloudflare managed challenge / Turnstile interstitial from URL/title/body text.
+fn is_cloudflare_challenge_signal(text: &str) -> bool {
+  let lower = text.to_ascii_lowercase();
+  if lower.contains("verify you are human")
+    || lower.contains("performing security verification")
+    || lower.contains("just a moment")
+    || lower.contains("cf-turnstile")
+    || lower.contains("challenges.cloudflare.com")
   {
+    return true;
+  }
+  // Generic Cloudflare challenge wording; avoid bare "cloudflare" alone (privacy footer).
+  if lower.contains("cloudflare")
+    && (lower.contains("security verification")
+      || lower.contains("checking your browser")
+      || lower.contains("attention required")
+      || lower.contains("enable javascript and cookies"))
+  {
+    return true;
+  }
+  false
+}
+
+fn is_cloudflare_challenge_error(message: &str) -> bool {
+  let lower = message.to_ascii_lowercase();
+  lower.contains("cloudflare")
+    && (lower.contains("challenge")
+      || lower.contains("turnstile")
+      || lower.contains("verify you are human")
+      || lower.contains("security verification"))
+}
+
+fn cloudflare_challenge_error_message() -> String {
+  "Cloudflare Turnstile challenge (persistent after soft-wait)".into()
+}
+
+fn resolve_dom_page_override(current: LoginPageType, dom: LoginPageType) -> LoginPageType {
+  if matches!(dom, LoginPageType::Unknown) {
+    return current;
+  }
+  if matches!(dom, LoginPageType::Callback)
+    && !matches!(current, LoginPageType::Unknown | LoginPageType::Callback)
+  {
+    return current;
+  }
+  dom
+}
+
+fn detect_login_page_type(url: &str) -> LoginPageType {
+  let parsed = url::Url::parse(url).ok();
+  let host = parsed
+    .as_ref()
+    .and_then(url::Url::host_str)
+    .unwrap_or_default()
+    .to_lowercase();
+  let path = parsed
+    .as_ref()
+    .map(|url| url.path().to_lowercase())
+    .unwrap_or_else(|| url.to_lowercase());
+  // Callback first: after consent, Chrome may briefly show localhost or chrome-error.
+  if is_oauth_callback_url(url) {
     return LoginPageType::Callback;
   }
 
   // OpenAI uses both "login" and hyphenated "log-in" paths.
-  let is_password = u.contains("password")
-    || u.contains("log-in/password")
-    || u.contains("login/password")
-    || u.contains("create-account/password");
+  let is_password = path.contains("password")
+    || path.contains("log-in/password")
+    || path.contains("login/password")
+    || path.contains("create-account/password");
   // "authorize" alone is the OAuth start URL — only treat as email entry when it looks like login.
-  let is_email_entry = u.contains("identifier")
-    || u.contains("email-otp")
-    || u.contains("/log-in")
-    || u.contains("/login")
-    || u.contains("log-in-or-create")
-    || (u.contains("oauth/authorize") && !u.contains("consent"));
+  let is_email_entry = path.contains("identifier")
+    || path.contains("email-otp")
+    || path.contains("/log-in")
+    || path.contains("/login")
+    || path.contains("log-in-or-create")
+    || (path.contains("oauth/authorize") && !path.contains("consent"));
   if is_password {
     LoginPageType::LoginPassword
-  } else if u.contains("mfa")
-    || u.contains("totp")
-    || u.contains("2fa")
-    || u.contains("multi-factor")
-    || (u.contains("challenge") && !u.contains("authorize") && !u.contains("consent"))
+  } else if path.contains("mfa")
+    || path.contains("totp")
+    || path.contains("2fa")
+    || path.contains("multi-factor")
+    || (path.contains("challenge") && !path.contains("authorize") && !path.contains("consent"))
   {
     LoginPageType::TwoFactor
-  } else if u.contains("phone-verification")
-    || u.contains("verify-phone")
-    || u.contains("phone/verify")
-    || u.contains("add-phone/verify")
+  } else if path.contains("phone-verification")
+    || path.contains("verify-phone")
+    || path.contains("phone/verify")
+    || path.contains("add-phone/verify")
   {
     // After number submit OpenAI moves to /phone-verification (OTP only).
     // Must NOT re-enter AddPhone or we rent a second SMS number.
     LoginPageType::PhoneOtp
-  } else if u.contains("add-phone") || u.contains("phone/add") {
+  } else if path.contains("add-phone") || path.contains("phone/add") {
     LoginPageType::AddPhone
-  } else if u.contains("consent")
-    || u.contains("sign-in-with-chatgpt")
-    || u.contains("sign-in-with-openai")
-    || u.contains("oauth/consent")
-    || u.contains("workspace/select")
-    || u.contains("organization/select")
+  } else if path.contains("consent")
+    || path.contains("sign-in-with-chatgpt")
+    || path.contains("sign-in-with-openai")
+    || path.contains("oauth/consent")
+    || path.contains("workspace/select")
+    || path.contains("organization/select")
   {
     // OAuth consent / org-select / "Continue" gate after successful auth.
     // Accounts that already verified phone often land here directly after 2FA — skip SMS.
     LoginPageType::Consent
-  } else if u.contains("chatgpt.com")
-    && (u.ends_with("chatgpt.com/") || u.ends_with("chatgpt.com") || u.contains("chatgpt.com/?"))
-  {
+  } else if host == "chatgpt.com" && (path.is_empty() || path == "/") {
     LoginPageType::ChatgptHome
   } else if is_email_entry && !is_password {
     LoginPageType::LoginEmail
@@ -682,6 +927,8 @@ impl LoginEngine {
       status: LoginResultStatus::Available,
       note: String::new(),
       exported_at: None,
+      password: String::new(),
+      totp_secret: String::new(),
     }
   }
 
@@ -697,6 +944,14 @@ impl LoginEngine {
   ) -> Vec<LoginResult> {
     let total = self.config.credentials.len() as u32;
     let mut results = Vec::new();
+    let mut success_count: u32 = 0;
+    let rotate_every_n = self.config.rotate_every_n;
+
+    if let Some(vpn_id) = self.config.effective_vpn_id() {
+      self.log(&format!(
+        "VPN mode: inventory conf vpn_id={vpn_id}; rotate every {rotate_every_n} success(es)"
+      ));
+    }
 
     let sub2api = if self.config.push_to_sub2api {
       Some(Sub2ApiClient::new(
@@ -724,8 +979,12 @@ impl LoginEngine {
       let max_retries = self.config.max_retries.max(1);
       let mut succeeded = false;
       let mut last_error = String::new();
+      let mut location_fallbacks: u32 = 0;
+      let mut tried_locations: Vec<String> = Vec::new();
 
-      for attempt in 0..max_retries {
+      let mut attempt = 0;
+      let mut cloudflare_recoveries: u32 = 0;
+      while attempt < max_retries {
         if attempt > 0 {
           self.log(&format!("Retry {attempt}/{max_retries}..."));
           sleep(std::time::Duration::from_secs(2)).await;
@@ -743,11 +1002,55 @@ impl LoginEngine {
           .await
         {
           Ok(mut result) => {
+            let login_ok = result.success;
+            if !login_ok
+              && crate::vpn::is_unsupported_region_error(&result.error_message)
+              && location_fallbacks < crate::vpn::MAX_NORD_LOCATION_FALLBACKS
+            {
+              match self
+                .fallback_nord_location_on_region_block(
+                  &result.error_message,
+                  &mut location_fallbacks,
+                  &mut tried_locations,
+                )
+                .await
+              {
+                Ok(true) => {
+                  // Switched location — retry without persisting this blocked attempt as final.
+                  last_error = result.error_message.clone();
+                  continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                  self.log(&format!("WARN: Nord location fallback failed: {e}"));
+                }
+              }
+            }
+
+            if !login_ok
+              && is_cloudflare_challenge_error(&result.error_message)
+              && cloudflare_recoveries < MAX_CLOUDFLARE_RECOVERIES
+            {
+              cloudflare_recoveries += 1;
+              last_error = result.error_message.clone();
+              self.log(&format!(
+                "Cloudflare challenge recovery {cloudflare_recoveries}/{MAX_CLOUDFLARE_RECOVERIES}: relaunch same worker with new fingerprint..."
+              ));
+              if let Some(vpn_id) = self.config.effective_vpn_id() {
+                if let Err(e) = self.rotate_wireguard_peer(&vpn_id).await {
+                  self.log(&format!(
+                    "WARN: WireGuard peer rotate after Cloudflare failed: {e}"
+                  ));
+                }
+              }
+              continue;
+            }
+
             result.step_logs = self.account_logs(log_start);
             save_login_result(&result);
             self.emit(
               &app_handle,
-              if result.success {
+              if login_ok {
                 LoginStep::Completed
               } else {
                 LoginStep::Failed
@@ -756,7 +1059,7 @@ impl LoginEngine {
                 "[{}/{}] {}",
                 idx + 1,
                 total,
-                if result.success {
+                if login_ok {
                   "Login succeeded"
                 } else {
                   result.error_message.as_str()
@@ -768,11 +1071,82 @@ impl LoginEngine {
             );
             results.push(result);
             succeeded = true;
+            if login_ok {
+              success_count += 1;
+              // After each success (default rotate_every_n=1): hop WireGuard peer so
+              // the next account gets a fresh egress IP.
+              if should_rotate(success_count, rotate_every_n) {
+                if let Some(vpn_id) = self.config.effective_vpn_id() {
+                  self.log(&format!(
+                    "Rotating WireGuard peer after {success_count} success(es) (vpn_id={vpn_id})..."
+                  ));
+                  match self.rotate_wireguard_peer(&vpn_id).await {
+                    Ok((host, station)) => {
+                      self.log(&format!(
+                        "WireGuard peer rotated -> host={host} station={station}"
+                      ));
+                    }
+                    Err(e) => {
+                      self.log(&format!("WARN: WireGuard peer rotate failed: {e}"));
+                    }
+                  }
+                }
+              }
+            }
             break;
           }
           Err(e) => {
             last_error = e.clone();
             self.log(&format!("Attempt {attempt} failed: {e}"));
+            // Browser-kill failure is unrecoverable: a retry would relaunch
+            // the worker on top of the still-running browser and freeze the
+            // machine. Abort this credential immediately.
+            if e.contains("browser kill failed") {
+              break;
+            }
+            if crate::vpn::is_unsupported_region_error(&e) {
+              if location_fallbacks >= crate::vpn::MAX_NORD_LOCATION_FALLBACKS {
+                self.log("Unsupported region persists after exhausting Nord fallback locations");
+                break;
+              }
+              match self
+                .fallback_nord_location_on_region_block(
+                  &e,
+                  &mut location_fallbacks,
+                  &mut tried_locations,
+                )
+                .await
+              {
+                Ok(true) => continue,
+                Ok(false) => {
+                  self.log("Unsupported region detected; Nord location fallback unavailable");
+                  break;
+                }
+                Err(fe) => {
+                  self.log(&format!("WARN: Nord location fallback failed: {fe}"));
+                  break;
+                }
+              }
+            }
+            if is_cloudflare_challenge_error(&e)
+              && cloudflare_recoveries < MAX_CLOUDFLARE_RECOVERIES
+            {
+              cloudflare_recoveries += 1;
+              self.log(&format!(
+                "Cloudflare challenge recovery {cloudflare_recoveries}/{MAX_CLOUDFLARE_RECOVERIES}: relaunch same worker with new fingerprint..."
+              ));
+              if let Some(vpn_id) = self.config.effective_vpn_id() {
+                if let Err(re) = self.rotate_wireguard_peer(&vpn_id).await {
+                  self.log(&format!(
+                    "WARN: WireGuard peer rotate after Cloudflare failed: {re}"
+                  ));
+                }
+              }
+              // Recovery relaunch consumes a normal attempt slot (same as register retries).
+              attempt += 1;
+              continue;
+            }
+            attempt += 1;
           }
         }
       }
@@ -797,6 +1171,8 @@ impl LoginEngine {
           status: LoginResultStatus::Invalid,
           note: String::new(),
           exported_at: None,
+          password: credential.password.clone(),
+          totp_secret: credential.totp_secret.clone(),
         };
         save_login_result(&result);
         self.emit(
@@ -859,7 +1235,7 @@ impl LoginEngine {
 
     // Start local callback listener BEFORE browser navigates to auth.
     // OpenAI redirects to localhost:1455; without a listener Chromium shows chrome-error.
-    let callback_listener = OAuthCallbackListener::start().await?;
+    let mut callback_listener = OAuthCallbackListener::start().await?;
     self.log(&format!(
       "{prefix} OAuth callback listener bound on {OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}"
     ));
@@ -877,7 +1253,8 @@ impl LoginEngine {
     let (profile, mut cdp) = match self.launch_browser(app_handle).await {
       Ok(v) => v,
       Err(e) => {
-        drop(callback_listener);
+        // Await socket release so the next retry can re-bind :1455 on Windows.
+        callback_listener.shutdown().await;
         return Err(e);
       }
     };
@@ -896,12 +1273,20 @@ impl LoginEngine {
         prefix.as_str(),
         idx,
         total,
-        callback_listener,
+        &mut callback_listener,
       )
       .await;
 
+    callback_listener.shutdown().await;
     // Kill browser only — keep worker profile metadata for the rest of the batch.
-    self.kill_browser_only(app_handle, &profile).await;
+    // Propagate kill failure: a retry/relaunch on top of a still-running browser
+    // would stack processes and freeze the machine.
+    if let Err(e) = self.kill_browser_only(app_handle, &profile).await {
+      self.log(&format!(
+        "{prefix} Browser kill failed; aborting to avoid overlapping browsers: {e}"
+      ));
+      return Err(format!("browser kill failed for login {idx}: {e}"));
+    }
     self.log(&format!("{prefix} Browser closed (worker retained)"));
 
     result
@@ -922,7 +1307,7 @@ impl LoginEngine {
     prefix: &str,
     idx: u32,
     total: u32,
-    callback_listener: OAuthCallbackListener,
+    callback_listener: &mut OAuthCallbackListener,
   ) -> Result<LoginResult, String> {
     // Step 3: Navigate to auth URL
     self.emit(
@@ -938,17 +1323,40 @@ impl LoginEngine {
 
     let mut cur_url = cdp.current_url().await.unwrap_or_default();
     self.log(&format!("{prefix} Auth page URL: {cur_url}"));
+    if let Some(error) = self.detect_unsupported_region_error_from_dom(cdp).await {
+      return Err(error);
+    }
+    self
+      .wait_out_cloudflare_challenge_if_any(cdp, prefix)
+      .await?;
+    cur_url = cdp.current_url().await.unwrap_or_default();
 
     let mut phone_number_used = String::new();
     // Pending SMS rent for the AddPhone → PhoneOtp two-step flow.
     let mut pending_sms_request_id: Option<String> = None;
     let mut phone_otp_submitted = false;
+    // How many Viotp numbers we have tried for this login_once (OTP timeout → new number).
+    let mut sms_number_attempts: u32 = 0;
+    // Loops spent waiting for AddPhone → PhoneOtp after a submit (detect stuck form).
+    let mut add_phone_wait_loops: u32 = 0;
 
     // Step 4-8: Login flow state machine.
     // Returning accounts (phone already verified) skip AddPhone/PhoneOtp and land on Consent.
-    for step_i in 0..20 {
+    // Extra budget when SMS numbers need rotation after OTP timeout.
+    for step_i in 0..30 {
       if self.is_cancelled() {
         return Err("Cancelled".into());
+      }
+      if let Some(error) = self.detect_unsupported_region_error_from_dom(cdp).await {
+        return Err(error);
+      }
+      // Mid-flow Turnstile can appear on password/2FA transitions.
+      if self.detect_cloudflare_challenge_from_dom(cdp).await {
+        self
+          .wait_out_cloudflare_challenge_if_any(cdp, prefix)
+          .await?;
+        cur_url = cdp.current_url().await.unwrap_or_default();
+        continue;
       }
 
       let mut page = detect_login_page_type(&cur_url);
@@ -958,14 +1366,12 @@ impl LoginEngine {
         LoginPageType::Unknown | LoginPageType::LoginEmail | LoginPageType::AddPhone
       ) {
         if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
-          if dom_page != LoginPageType::Unknown {
-            // Prefer PhoneOtp over AddPhone when DOM shows OTP code field only.
-            if !(page == LoginPageType::PhoneOtp && dom_page == LoginPageType::AddPhone) {
-              self.log(&format!(
-                "{prefix} DOM page override: {page:?} -> {dom_page:?} (url={cur_url})"
-              ));
-              page = dom_page;
-            }
+          let resolved_page = resolve_dom_page_override(page, dom_page);
+          if resolved_page != page {
+            self.log(&format!(
+              "{prefix} DOM page override: {page:?} -> {resolved_page:?} (url={cur_url})"
+            ));
+            page = resolved_page;
           }
         }
       }
@@ -1042,13 +1448,25 @@ impl LoginEngine {
           // Only rent + enter number. OTP is handled on PhoneOtp page.
           // Returning accounts that already verified phone never hit this branch.
           if pending_sms_request_id.is_some() {
-            // Already rented for this attempt — wait for navigation to OTP page.
+            // Already rented for this attempt — wait briefly for OTP page.
+            // If OpenAI stays on add-phone (validation / silent reject), clear and re-rent.
+            add_phone_wait_loops += 1;
             self.log(&format!(
-              "{prefix} Phone number already submitted; waiting for phone-verification page..."
+              "{prefix} Phone number already submitted; waiting for phone-verification page... ({add_phone_wait_loops})"
             ));
-            sleep(std::time::Duration::from_secs(1)).await;
-            cur_url = cdp.current_url().await.unwrap_or_default();
-            continue;
+            if add_phone_wait_loops <= 6 {
+              sleep(std::time::Duration::from_secs(1)).await;
+              cur_url = cdp.current_url().await.unwrap_or_default();
+              continue;
+            }
+            self.log(&format!(
+              "{prefix} Still on AddPhone after submit; discarding number and renting a new one"
+            ));
+            if !phone_number_used.is_empty() {
+              self.used_phones.insert(phone_number_used.clone());
+            }
+            // Fall through: rent block below overwrites pending request + phone.
+            phone_number_used.clear();
           }
 
           let Some(sms) = sms_service else {
@@ -1057,6 +1475,12 @@ impl LoginEngine {
           let service_id = self.config.sms_service_id.ok_or_else(|| {
             "Phone verification required but smsServiceId not configured".to_string()
           })?;
+
+          if sms_number_attempts >= MAX_SMS_NUMBER_ATTEMPTS {
+            return Err(format!(
+              "Phone verification failed after {MAX_SMS_NUMBER_ATTEMPTS} SMS numbers without OTP"
+            ));
+          }
 
           self.emit(
             app_handle,
@@ -1075,26 +1499,42 @@ impl LoginEngine {
             number: None,
             country: self.config.sms_country.clone().or(Some("vn".into())),
           };
-          let number_info = sms
-            .request_number(&request)
-            .map_err(|e| format!("SMS rent number: {e}"))?;
-
-          if self.used_phones.contains(&number_info.phone_number) {
-            return Err(format!(
-              "Phone number {} already used for another account",
-              number_info.phone_number
-            ));
+          // Skip numbers already used this batch / this account (dead OTP).
+          let mut number_info = None;
+          for rent_try in 0..5 {
+            let candidate = sms
+              .request_number(&request)
+              .map_err(|e| format!("SMS rent number: {e}"))?;
+            if self.used_phones.contains(&candidate.phone_number) {
+              self.log(&format!(
+                "{prefix} Skipping already-used phone {} (rent try {})",
+                candidate.phone_number,
+                rent_try + 1
+              ));
+              continue;
+            }
+            number_info = Some(candidate);
+            break;
           }
+          let number_info = number_info.ok_or_else(|| {
+            "Could not rent a fresh SMS number (all candidates already used)".to_string()
+          })?;
+
           phone_number_used = number_info.phone_number.clone();
           pending_sms_request_id = Some(number_info.request_id.clone());
+          sms_number_attempts += 1;
+          add_phone_wait_loops = 0;
 
           self.log(&format!(
-            "{prefix} SMS number rented (request_id={})",
-            number_info.request_id
+            "{prefix} SMS number rented attempt={sms_number_attempts}/{MAX_SMS_NUMBER_ATTEMPTS} (request_id={}, phone={})",
+            number_info.request_id, number_info.phone_number
           ));
 
+          // First number: normal country select. After OTP timeout / re-rent: force
+          // reselect Vietnam + clear leftover digits (SPA often leaves +1 active).
+          let force_country = sms_number_attempts > 1;
           self
-            .fill_phone_and_submit(cdp, &number_info.phone_number)
+            .fill_phone_and_submit_inner(cdp, &number_info.phone_number, force_country)
             .await?;
           // Wait for OpenAI to move to /phone-verification.
           for _ in 0..10 {
@@ -1118,21 +1558,69 @@ impl LoginEngine {
           let Some(sms) = sms_service else {
             return Err("Phone OTP page shown but no SMS provider configured".into());
           };
-          let request_id = pending_sms_request_id.clone().ok_or_else(|| {
-            "Phone OTP page shown but no SMS request is pending (unexpected navigation)".to_string()
-          })?;
+          let Some(request_id) = pending_sms_request_id.clone() else {
+            // Landed on OTP without a live Viotp session (after timeout rotation failed
+            // to leave this page). Force back to AddPhone and rent again.
+            self.log(&format!(
+              "{prefix} PhoneOtp without pending SMS request — returning to AddPhone"
+            ));
+            let _ = self.return_to_add_phone(cdp, prefix).await;
+            cur_url = cdp.current_url().await.unwrap_or_default();
+            continue;
+          };
 
           self.emit(
             app_handle,
             LoginStep::PollingSmsOtp,
-            &format!("{prefix} Waiting for SMS OTP..."),
+            &format!(
+              "{prefix} Waiting for SMS OTP (number {sms_number_attempts}/{MAX_SMS_NUMBER_ATTEMPTS}, {SMS_OTP_TIMEOUT_SECS}s)..."
+            ),
             idx,
             total,
             None,
           );
-          let otp_info = sms
-            .get_otp(&request_id, 150)
-            .map_err(|e| format!("SMS OTP poll: {e}"))?;
+          // On timeout/no SMS: do NOT fail the whole login_once. Blacklist the number,
+          // return to AddPhone, and rent a different Viotp number within this attempt.
+          let otp_info = match sms.get_otp(&request_id, SMS_OTP_TIMEOUT_SECS) {
+            Ok(info) => info,
+            Err(e) => {
+              let err = e.to_string();
+              self.log(&format!(
+                "{prefix} SMS OTP poll failed for request {request_id}: {err}"
+              ));
+              if !phone_number_used.is_empty() {
+                self.used_phones.insert(phone_number_used.clone());
+              }
+              pending_sms_request_id = None;
+              phone_otp_submitted = false;
+              add_phone_wait_loops = 0;
+
+              if sms_number_attempts >= MAX_SMS_NUMBER_ATTEMPTS {
+                return Err(format!(
+                  "SMS OTP failed after {MAX_SMS_NUMBER_ATTEMPTS} numbers: {err}"
+                ));
+              }
+
+              self.emit(
+                app_handle,
+                LoginStep::RequestingSmsOtp,
+                &format!(
+                  "{prefix} No SMS received — switching to a new phone number ({sms_number_attempts}/{MAX_SMS_NUMBER_ATTEMPTS})..."
+                ),
+                idx,
+                total,
+                None,
+              );
+              if let Err(nav_err) = self.return_to_add_phone(cdp, prefix).await {
+                self.log(&format!(
+                  "{prefix} return_to_add_phone warning: {nav_err} (will reclassify page)"
+                ));
+              }
+              phone_number_used.clear();
+              cur_url = cdp.current_url().await.unwrap_or_default();
+              continue;
+            }
+          };
           let sms_code = otp_info
             .code
             .filter(|c| !c.is_empty())
@@ -1372,6 +1860,8 @@ impl LoginEngine {
       status: LoginResultStatus::Available,
       note: String::new(),
       exported_at: None,
+      password: credential.password.clone(),
+      totp_secret: credential.totp_secret.clone(),
     })
   }
 
@@ -1569,51 +2059,29 @@ impl LoginEngine {
     selectors: &str,
     field: &str,
   ) -> Result<(), String> {
-    // Never use form.submit() — OpenAI auth SPA expects a real button click /
-    // requestSubmit, otherwise the route can 400 with "Invalid content type".
-    let js = format!(
-      r#"(function(){{
-        const selectors = {sels};
-        function visible(el) {{
-          try {{
-            const r = el.getBoundingClientRect();
-            const s = getComputedStyle(el);
-            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-          }} catch (_) {{ return true; }}
-        }}
-        const buttons = Array.from(document.querySelectorAll(selectors)).filter(visible);
-        for (const btn of buttons) {{
-          btn.scrollIntoView({{ block: 'center' }});
-          btn.click();
-          return {{ ok: true, how: 'selector', text: (btn.innerText||'').slice(0,40) }};
-        }}
-        // Prefer Continue/Next text buttons.
-        const texts = ['continue', 'next', 'log in', 'sign in', 'submit', 'verify'];
-        const all = Array.from(document.querySelectorAll('button,[role="button"]')).filter(visible);
-        for (const btn of all) {{
-          const t = (btn.innerText || btn.textContent || '').toLowerCase().trim();
-          if (texts.some((x) => t === x || t.includes(x))) {{
-            btn.click();
-            return {{ ok: true, how: 'text', text: t.slice(0,40) }};
-          }}
-        }}
-        // requestSubmit only (not HTMLFormElement.submit which bypasses React handlers).
-        const forms = Array.from(document.querySelectorAll('form'));
-        for (const form of forms) {{
-          if (typeof form.requestSubmit === 'function') {{
-            try {{ form.requestSubmit(); return {{ ok: true, how: 'requestSubmit' }}; }} catch (_) {{}}
-          }}
-        }}
-        return {{ ok: false }};
-      }})()"#,
-      sels = serde_json::to_string(selectors).unwrap_or_else(|_| "\"\"".into()),
-    );
-    let result = cdp.evaluate(&js, false).await?;
-    let value = result.get("value").cloned().unwrap_or_default();
-    if value.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-      return Err(format!("submit {field}: no clickable control"));
+    let js = submit_control_probe_js(selectors);
+    for attempt in 0..20 {
+      if attempt > 0 {
+        sleep(std::time::Duration::from_millis(250)).await;
+      }
+      let result = cdp.evaluate(&js, false).await?;
+      let value = result.get("value").cloned().unwrap_or_default();
+      if value.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        continue;
+      }
+      let x = value
+        .get("x")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("submit {field}: control has no x coordinate"))?;
+      let y = value
+        .get("y")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("submit {field}: control has no y coordinate"))?;
+      return cdp.mouse_click(x, y).await;
     }
-    Ok(())
+    Err(format!(
+      "submit {field}: no hydrated clickable control after 5s"
+    ))
   }
 
   /// Detect OpenAI auth SPA hard error pages so we fail fast with a clear message.
@@ -1938,9 +2406,10 @@ impl LoginEngine {
   ///   e.g. text "United States (+1)"
   /// - Popup: `[role="listbox"]` virtualized (~233 options, only ~20 mounted)
   /// - Option: `[role="option"][data-key="VN"]` / text "Vietnam +(84)"
-  async fn select_vietnam_country_code(
+  async fn select_vietnam_country_code_inner(
     &mut self,
     cdp: &mut BrowserSession,
+    force: bool,
   ) -> Result<bool, String> {
     // Already Vietnam?
     let check = r#"(function(){
@@ -1952,7 +2421,7 @@ impl LoginEngine {
     })()"#;
     if let Ok(res) = cdp.evaluate(check, false).await {
       let v = res.get("value").cloned().unwrap_or_default();
-      if v.get("already").and_then(|b| b.as_bool()) == Some(true) {
+      if !force && v.get("already").and_then(|b| b.as_bool()) == Some(true) {
         self.log(&format!(
           "Phone country already Vietnam: {}",
           v.get("text").and_then(|t| t.as_str()).unwrap_or("+84")
@@ -1960,7 +2429,8 @@ impl LoginEngine {
         return Ok(true);
       }
       self.log(&format!(
-        "Phone country currently: {}",
+        "Phone country currently{}: {}",
+        if force { " (force reselect)" } else { "" },
         v.get("text")
           .and_then(|t| t.as_str())
           .unwrap_or("unknown (likely United States +1)")
@@ -2433,24 +2903,223 @@ impl LoginEngine {
     Ok(true)
   }
 
+  /// After SMS timeout on phone-verification, return to add-phone so a new
+  /// Viotp number can be entered. Prefer in-page "change / different number"
+  /// links, then browser history, then hard-navigate to add-phone.
+  async fn return_to_add_phone(
+    &mut self,
+    cdp: &mut BrowserSession,
+    prefix: &str,
+  ) -> Result<(), String> {
+    // 1) Click "change number" / "use a different number" if OpenAI shows it.
+    let click_change = r#"(function(){
+      function visible(el){
+        try {
+          const r = el.getBoundingClientRect();
+          const st = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+        } catch(_) { return false; }
+      }
+      const re = /(change|different|another|other|edit|update|use a different|try another).*(number|phone)|s[ốo]\s*kh[áa]c|đ[ổo]i\s*s[ốo]/i;
+      const nodes = Array.from(document.querySelectorAll('a,button,[role="button"],[role="link"]'));
+      for (const el of nodes) {
+        if (!visible(el)) continue;
+        const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g,' ').trim();
+        if (!t || t.length > 80) continue;
+        if (re.test(t)) {
+          try { el.click(); return { ok:true, how:'click', text:t.slice(0,60) }; } catch(e) {}
+        }
+      }
+      return { ok:false };
+    })()"#;
+    if let Ok(res) = cdp.evaluate(click_change, false).await {
+      if res
+        .pointer("/value/ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+      {
+        let text = res
+          .pointer("/value/text")
+          .and_then(|v| v.as_str())
+          .unwrap_or("?");
+        self.log(&format!("{prefix} Clicked change-number control: {text}"));
+        sleep(std::time::Duration::from_secs(2)).await;
+      }
+    }
+
+    // 2) history.back() once or twice (OTP → add-phone) if still not on add-phone.
+    for i in 0..2 {
+      let url = cdp.current_url().await.unwrap_or_default();
+      let on_add = matches!(detect_login_page_type(&url), LoginPageType::AddPhone)
+        || self
+          .probe_page_type_from_dom(cdp)
+          .await
+          .ok()
+          .is_some_and(|p| p == LoginPageType::AddPhone);
+      if on_add {
+        break;
+      }
+      let _ = cdp.evaluate("history.back(); 'ok'", false).await;
+      sleep(std::time::Duration::from_secs(1)).await;
+      let url = cdp.current_url().await.unwrap_or_default();
+      self.log(&format!("{prefix} history.back() #{i} -> {url}"));
+    }
+
+    // 3) Hard navigate to add-phone when still not there (most reliable after OTP).
+    let url = cdp.current_url().await.unwrap_or_default();
+    let on_add = matches!(detect_login_page_type(&url), LoginPageType::AddPhone)
+      || self
+        .probe_page_type_from_dom(cdp)
+        .await
+        .ok()
+        .is_some_and(|p| p == LoginPageType::AddPhone);
+    if !on_add {
+      self.log(&format!(
+        "{prefix} Navigating hard to add-phone after SMS timeout"
+      ));
+      cdp
+        .navigate("https://auth.openai.com/add-phone", 20)
+        .await?;
+      sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    // 4) Wait until country Select + tel input are mounted (fresh form).
+    self.wait_for_add_phone_form(cdp, prefix).await?;
+    Ok(())
+  }
+
+  /// Poll until add-phone country Select + tel input are present.
+  async fn wait_for_add_phone_form(
+    &mut self,
+    cdp: &mut BrowserSession,
+    prefix: &str,
+  ) -> Result<(), String> {
+    for attempt in 0..20 {
+      let ready = cdp
+        .evaluate(
+          r#"(function(){
+            const trigger = document.querySelector('button[aria-haspopup="listbox"]');
+            const tel = document.querySelector('input[type="tel"], input[autocomplete="tel"], input[inputmode="tel"], input[name="phone"], input[name="phoneNumber"]');
+            const country = (trigger && (trigger.innerText || trigger.textContent) || '').replace(/\s+/g,' ').trim().slice(0,80);
+            return {
+              ok: !!(trigger && tel),
+              country,
+              hasTel: !!tel,
+              hasCountry: !!trigger,
+              href: (location.href || '').slice(0,120)
+            };
+          })()"#,
+          false,
+        )
+        .await
+        .ok()
+        .and_then(|r| r.get("value").cloned())
+        .unwrap_or_default();
+      if ready.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+        self.log(&format!(
+          "{prefix} Add-phone form ready (country='{}' href={})",
+          ready.get("country").and_then(|c| c.as_str()).unwrap_or("?"),
+          ready.get("href").and_then(|h| h.as_str()).unwrap_or("?")
+        ));
+        return Ok(());
+      }
+      if attempt == 0 || attempt % 5 == 4 {
+        self.log(&format!(
+          "{prefix} Waiting add-phone form… hasCountry={} hasTel={} href={}",
+          ready
+            .get("hasCountry")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
+          ready
+            .get("hasTel")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
+          ready.get("href").and_then(|h| h.as_str()).unwrap_or("?")
+        ));
+      }
+      sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Err("Add-phone form (country select + tel) not ready after navigation".into())
+  }
+
+  /// Clear residual digits from a previous phone attempt.
+  async fn clear_phone_input(&mut self, cdp: &mut BrowserSession) -> Result<(), String> {
+    let js = r#"(function(){
+      const sels = [
+        'input[type="tel"]',
+        'input[name="phone"]',
+        'input[name="phoneNumber"]',
+        'input[autocomplete="tel"]',
+        'input[inputmode="tel"]',
+        'input[inputmode="numeric"]'
+      ];
+      let el = null;
+      for (const s of sels) {
+        const c = document.querySelector(s);
+        if (c && c.offsetParent !== null) { el = c; break; }
+      }
+      if (!el) return { ok:false, reason:'no_tel' };
+      try { el.focus(); } catch(_) {}
+      const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+      const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(el, '');
+      else el.value = '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok:true, beforeLen: (el.defaultValue||'').length, after: (el.value||'').length };
+    })()"#;
+    match cdp.evaluate(js, false).await {
+      Ok(res) => {
+        self.log(&format!(
+          "Cleared phone input: {}",
+          res.get("value").map(|v| v.to_string()).unwrap_or_default()
+        ));
+        Ok(())
+      }
+      Err(e) => {
+        self.log(&format!("Clear phone input warning: {e}"));
+        Ok(())
+      }
+    }
+  }
+
   /// Fill phone number and submit.
-  async fn fill_phone_and_submit(
+  ///
+  /// `force_country_reselect`: after SMS timeout we always re-pick Vietnam even
+  /// if the Select already shows +84 (stale SPA state after change-number).
+  async fn fill_phone_and_submit_inner(
     &mut self,
     cdp: &mut BrowserSession,
     phone: &str,
+    force_country_reselect: bool,
   ) -> Result<(), String> {
+    // Wait for form controls — critical after return_to_add_phone.
+    if let Err(e) = self.wait_for_add_phone_form(cdp, "phone").await {
+      self.log(&format!("Add-phone form wait: {e}"));
+    }
+
+    // Clear leftover number from previous Viotp attempt before re-typing.
+    if force_country_reselect {
+      self.clear_phone_input(cdp).await?;
+      sleep(std::time::Duration::from_millis(200)).await;
+    }
+
     // REQUIRED: select Vietnam (+84) on React Aria Select first.
     // Default UI is "United States (+1)" — typing VN digits without this fails validation.
-    self.select_vietnam_country_code(cdp).await?;
+    // After OTP timeout re-entry, always force reselect so we never type into +1 by accident.
+    self
+      .select_vietnam_country_code_inner(cdp, force_country_reselect)
+      .await?;
 
     let national = Self::normalize_phone_for_openai(phone, self.config.sms_country.as_deref());
     if national.is_empty() {
       return Err("Phone number empty after normalize".into());
     }
     self.log(&format!(
-      "Filling phone national digits len={} (raw_len={})",
+      "Filling phone national digits len={} (raw_len={}) force_country={}",
       national.len(),
-      phone.len()
+      phone.len(),
+      force_country_reselect
     ));
 
     let sels = r#"input[type="tel"], input[name="phone"], input[name="phoneNumber"], input[autocomplete="tel"], input[inputmode="tel"], input[inputmode="numeric"]"#;
@@ -2464,7 +3133,7 @@ impl LoginEngine {
     }
     sleep(std::time::Duration::from_millis(500)).await;
 
-    // Guard: reject if country still shows +1 / United States.
+    // Guard: reject if country still shows +1 / United States. Retry force-select once.
     let guard = r#"(function(){
       const trigger = document.querySelector('button[aria-haspopup="listbox"] .react-aria-SelectValue')
         || document.querySelector('button[aria-haspopup="listbox"]');
@@ -2476,16 +3145,40 @@ impl LoginEngine {
     if let Ok(res) = cdp.evaluate(guard, false).await {
       let v = res.get("value").cloned().unwrap_or_default();
       if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
-        return Err(format!(
-          "Refusing to submit phone: country still not VN (+84). Shows: {}",
+        self.log(&format!(
+          "Phone country guard failed (shows {}); force reselect + retype",
           v.get("country").and_then(|c| c.as_str()).unwrap_or("?")
         ));
+        self.clear_phone_input(cdp).await?;
+        self.select_vietnam_country_code_inner(cdp, true).await?;
+        match self.type_into_focused(cdp, sels, &national, "phone").await {
+          Ok(()) => {}
+          Err(e) if e.contains("value mismatch") => {
+            self.log(&format!("phone fill soft-accept after country retry: {e}"));
+          }
+          Err(e) => return Err(e),
+        }
+        sleep(std::time::Duration::from_millis(400)).await;
+        let res2 = cdp.evaluate(guard, false).await?;
+        let v2 = res2.get("value").cloned().unwrap_or_default();
+        if v2.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+          return Err(format!(
+            "Refusing to submit phone: country still not VN (+84). Shows: {}",
+            v2.get("country").and_then(|c| c.as_str()).unwrap_or("?")
+          ));
+        }
+        self.log(&format!(
+          "Pre-submit phone guard ok after retry: country={} phone={}",
+          v2.get("country").and_then(|c| c.as_str()).unwrap_or("?"),
+          v2.get("phone").and_then(|c| c.as_str()).unwrap_or("?")
+        ));
+      } else {
+        self.log(&format!(
+          "Pre-submit phone guard ok: country={} phone={}",
+          v.get("country").and_then(|c| c.as_str()).unwrap_or("?"),
+          v.get("phone").and_then(|c| c.as_str()).unwrap_or("?")
+        ));
       }
-      self.log(&format!(
-        "Pre-submit phone guard ok: country={} phone={}",
-        v.get("country").and_then(|c| c.as_str()).unwrap_or("?"),
-        v.get("phone").and_then(|c| c.as_str()).unwrap_or("?")
-      ));
     }
 
     self
@@ -2517,16 +3210,100 @@ impl LoginEngine {
       .await
   }
 
+  async fn detect_unsupported_region_error_from_dom(
+    &mut self,
+    cdp: &mut BrowserSession,
+  ) -> Option<String> {
+    let result = cdp
+      .evaluate(
+        r#"(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 4000)"#,
+        false,
+      )
+      .await
+      .ok()?;
+    let body = result.get("value").and_then(|v| v.as_str())?;
+    extract_unsupported_region_error(body)
+  }
+
+  async fn detect_cloudflare_challenge_from_dom(&mut self, cdp: &mut BrowserSession) -> bool {
+    let result = cdp
+      .evaluate(
+        r#"(function(){
+          const title = document.title || '';
+          const body = (document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 4000);
+          const hasTurnstile = !!document.querySelector(
+            'iframe[src*="challenges.cloudflare.com"], .cf-turnstile, #cf-turnstile, input[name="cf-turnstile-response"]'
+          );
+          return {
+            title,
+            body,
+            hasTurnstile,
+            href: location.href || ''
+          };
+        })()"#,
+        false,
+      )
+      .await;
+    let Ok(res) = result else {
+      return false;
+    };
+    let value = res.get("value").cloned().unwrap_or_default();
+    let title = value.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let body = value.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let href = value.get("href").and_then(|v| v.as_str()).unwrap_or("");
+    let has_turnstile = value
+      .get("hasTurnstile")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false);
+    has_turnstile
+      || is_cloudflare_challenge_signal(title)
+      || is_cloudflare_challenge_signal(body)
+      || is_cloudflare_challenge_signal(href)
+  }
+
+  /// Soft-wait for Cloudflare managed challenge / Turnstile to auto-clear.
+  /// Returns Ok when challenge disappears; Err when still present after budget.
+  async fn wait_out_cloudflare_challenge_if_any(
+    &mut self,
+    cdp: &mut BrowserSession,
+    prefix: &str,
+  ) -> Result<(), String> {
+    if !self.detect_cloudflare_challenge_from_dom(cdp).await {
+      return Ok(());
+    }
+    self.log(&format!(
+      "{prefix} Cloudflare challenge detected; soft-waiting up to {CLOUDFLARE_SOFT_WAIT_SECS}s..."
+    ));
+    let deadline =
+      tokio::time::Instant::now() + std::time::Duration::from_secs(CLOUDFLARE_SOFT_WAIT_SECS);
+    while tokio::time::Instant::now() < deadline {
+      if self.is_cancelled() {
+        return Err("Cancelled during Cloudflare challenge wait".into());
+      }
+      sleep(std::time::Duration::from_secs(2)).await;
+      if !self.detect_cloudflare_challenge_from_dom(cdp).await {
+        self.log(&format!(
+          "{prefix} Cloudflare challenge cleared after soft-wait"
+        ));
+        return Ok(());
+      }
+    }
+    Err(cloudflare_challenge_error_message())
+  }
+
   /// Probe DOM when URL classification is ambiguous (SPA / post-OTP consent jump).
   async fn probe_page_type_from_dom(
     &mut self,
     cdp: &mut BrowserSession,
   ) -> Result<LoginPageType, String> {
     let js = r#"(function(){
-      const href = (location.href || '').toLowerCase();
-      if (href.includes('localhost') || href.includes('127.0.0.1') || (href.includes('code=') && href.includes('state='))) {
+      const url = new URL(location.href);
+      const localHost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+      const hasCallbackParams = url.searchParams.has('code') && url.searchParams.has('state');
+      if (localHost && (url.pathname.includes('/auth/callback') || hasCallbackParams)) {
         return 'callback';
       }
+      const href = url.href.toLowerCase();
       const body = (document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 4000).toLowerCase();
       const hasTel = !!document.querySelector('input[type="tel"], input[autocomplete="tel"]');
       const hasCountry = !!document.querySelector('button[aria-haspopup="listbox"]');
@@ -2787,80 +3564,82 @@ impl LoginEngine {
     &mut self,
     cdp: &mut BrowserSession,
     initial_url: &str,
-    callback_listener: OAuthCallbackListener,
+    callback_listener: &mut OAuthCallbackListener,
   ) -> Result<(String, String), String> {
-    // Already at a callback URL in the browser (rare; chrome-error loses query).
-    if let Some((code, state)) = Sub2ApiClient::parse_callback_url(initial_url) {
-      drop(callback_listener);
-      return Ok((code, state));
-    }
-
-    self.log("Waiting for OAuth callback on localhost:1455 (listener primary)...");
-
-    let timeout = std::time::Duration::from_secs(90);
-    let listener_wait = callback_listener.wait_for_code(timeout);
-    tokio::pin!(listener_wait);
-
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-      if self.is_cancelled() {
-        return Err("Cancelled during callback wait".into());
-      }
-
-      tokio::select! {
-        biased;
-        result = &mut listener_wait => {
-          match result {
-            Ok((code, state)) => {
-              self.log("OAuth callback received via local HTTP listener");
-              return Ok((code, state));
-            }
-            Err(e) => {
-              self.log(&format!(
-                "OAuth listener ended ({e}); continuing with CDP URL poll if any time remains"
-              ));
-              break;
-            }
-          }
-        }
-        _ = sleep(std::time::Duration::from_millis(500)) => {
-          let url = cdp.current_url().await.unwrap_or_default();
-          if let Some((code, state)) = Sub2ApiClient::parse_callback_url(&url) {
-            self.log("OAuth callback parsed from browser URL (CDP fallback)");
-            return Ok((code, state));
-          }
-          if url.contains("chatgpt.com") && !url.contains("auth.openai.com") {
-            return Err(
-              "Login completed without OAuth callback - tokens not extractable via this flow"
-                .into(),
-            );
-          }
-          if tokio::time::Instant::now() >= deadline {
-            return Err("Timeout waiting for OAuth callback on localhost:1455".into());
-          }
-        }
-      }
-    }
-
-    // Listener failed early — pure CDP poll for remaining time.
-    while tokio::time::Instant::now() < deadline {
-      if self.is_cancelled() {
-        return Err("Cancelled during callback wait".into());
-      }
-      sleep(std::time::Duration::from_secs(1)).await;
-      let url = cdp.current_url().await.unwrap_or_default();
-      if let Some((code, state)) = Sub2ApiClient::parse_callback_url(&url) {
-        self.log("OAuth callback parsed from browser URL (CDP fallback)");
+    async {
+      // Already at a callback URL in the browser (rare; chrome-error loses query).
+      if let Some((code, state)) = Sub2ApiClient::parse_callback_url(initial_url) {
         return Ok((code, state));
       }
-      if url.contains("chatgpt.com") && !url.contains("auth.openai.com") {
-        return Err(
-          "Login completed without OAuth callback - tokens not extractable via this flow".into(),
-        );
-      }
-    }
 
-    Err("Timeout waiting for OAuth callback on localhost:1455".into())
+      self.log("Waiting for OAuth callback on localhost:1455 (listener primary)...");
+
+      let timeout = std::time::Duration::from_secs(90);
+      let listener_wait = callback_listener.wait_for_code(timeout);
+      tokio::pin!(listener_wait);
+
+      let deadline = tokio::time::Instant::now() + timeout;
+      loop {
+        if self.is_cancelled() {
+          return Err("Cancelled during callback wait".into());
+        }
+
+        tokio::select! {
+          biased;
+          result = &mut listener_wait => {
+            match result {
+              Ok((code, state)) => {
+                self.log("OAuth callback received via local HTTP listener");
+                return Ok((code, state));
+              }
+              Err(e) => {
+                self.log(&format!(
+                  "OAuth listener ended ({e}); continuing with CDP URL poll if any time remains"
+                ));
+                break;
+              }
+            }
+          }
+          _ = sleep(std::time::Duration::from_millis(500)) => {
+            let url = cdp.current_url().await.unwrap_or_default();
+            if let Some((code, state)) = Sub2ApiClient::parse_callback_url(&url) {
+              self.log("OAuth callback parsed from browser URL (CDP fallback)");
+              return Ok((code, state));
+            }
+            if url.contains("chatgpt.com") && !url.contains("auth.openai.com") {
+              return Err(
+                "Login completed without OAuth callback - tokens not extractable via this flow"
+                  .into(),
+              );
+            }
+            if tokio::time::Instant::now() >= deadline {
+              return Err("Timeout waiting for OAuth callback on localhost:1455".into());
+            }
+          }
+        }
+      }
+
+      // Listener failed early — pure CDP poll for remaining time.
+      while tokio::time::Instant::now() < deadline {
+        if self.is_cancelled() {
+          return Err("Cancelled during callback wait".into());
+        }
+        sleep(std::time::Duration::from_secs(1)).await;
+        let url = cdp.current_url().await.unwrap_or_default();
+        if let Some((code, state)) = Sub2ApiClient::parse_callback_url(&url) {
+          self.log("OAuth callback parsed from browser URL (CDP fallback)");
+          return Ok((code, state));
+        }
+        if url.contains("chatgpt.com") && !url.contains("auth.openai.com") {
+          return Err(
+            "Login completed without OAuth callback - tokens not extractable via this flow".into(),
+          );
+        }
+      }
+
+      Err("Timeout waiting for OAuth callback on localhost:1455".into())
+    }
+    .await
   }
 
   /// Extract account_id from JWT access_token.
@@ -2918,6 +3697,203 @@ impl LoginEngine {
       }
       Err(_) => (String::new(), String::new()),
     }
+  }
+
+  /// Attach proxy or inventory VPN to the worker profile (mutually exclusive).
+  async fn apply_network_to_worker(
+    &mut self,
+    app_handle: &tauri::AppHandle,
+    mut found: crate::profile::BrowserProfile,
+  ) -> Result<crate::profile::BrowserProfile, String> {
+    match self.config.network_mode {
+      LoginNetworkMode::Proxy => {
+        if let Some(proxy_id) = self.config.proxy_id.as_ref() {
+          if found.proxy_id.as_deref() != Some(proxy_id.as_str()) || found.vpn_id.is_some() {
+            match crate::profile::ProfileManager::instance()
+              .update_profile_proxy(
+                app_handle.clone(),
+                &found.id.to_string(),
+                Some(proxy_id.clone()),
+              )
+              .await
+            {
+              Ok(updated) => {
+                found = updated;
+                self.log(&format!("Worker profile proxy set to {proxy_id}"));
+              }
+              Err(e) => {
+                self.log(&format!(
+                  "Warning: failed to set worker proxy_id={proxy_id}: {e}"
+                ));
+              }
+            }
+          }
+        }
+      }
+      LoginNetworkMode::Vpn => {
+        if let Some(vpn_id) = self.config.effective_vpn_id() {
+          if found.vpn_id.as_deref() != Some(vpn_id.as_str()) || found.proxy_id.is_some() {
+            match crate::profile::ProfileManager::instance()
+              .update_profile_vpn(
+                app_handle.clone(),
+                &found.id.to_string(),
+                Some(vpn_id.clone()),
+              )
+              .await
+            {
+              Ok(updated) => {
+                found = updated;
+                self.log(&format!("Worker profile VPN set to {vpn_id}"));
+              }
+              Err(e) => {
+                self.log(&format!(
+                  "Warning: failed to set worker vpn_id={vpn_id}: {e}"
+                ));
+              }
+            }
+          }
+        }
+      }
+      LoginNetworkMode::None | LoginNetworkMode::Nord => {
+        // Clear residual network bindings so direct/Nord-CLI runs don't inherit old VPN/proxy.
+        if found.proxy_id.is_some() {
+          if let Ok(updated) = crate::profile::ProfileManager::instance()
+            .update_profile_proxy(app_handle.clone(), &found.id.to_string(), None)
+            .await
+          {
+            found = updated;
+          }
+        }
+        if found.vpn_id.is_some() {
+          if let Ok(updated) = crate::profile::ProfileManager::instance()
+            .update_profile_vpn(app_handle.clone(), &found.id.to_string(), None)
+            .await
+          {
+            found = updated;
+          }
+        }
+      }
+    }
+    Ok(found)
+  }
+
+  /// Mid-batch WireGuard peer hop (same approach as auto-reg): keep PrivateKey,
+  /// pick a new Nord peer, rewrite inventory conf, restart vpn-worker.
+  async fn rotate_wireguard_peer(&mut self, vpn_id: &str) -> Result<(String, String), String> {
+    let (conf, name) = {
+      let storage = crate::vpn::VPN_STORAGE
+        .lock()
+        .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+      let cfg = storage
+        .load_config(vpn_id)
+        .map_err(|e| format!("Load VPN config for rotate: {e}"))?;
+      (cfg.config_data, cfg.name)
+    };
+
+    let private_key = crate::vpn::extract_wireguard_private_key(&conf)?;
+    let avoid_station = crate::vpn::extract_wireguard_peer_endpoint_host(&conf);
+    let avoid_pk = crate::vpn::extract_wireguard_peer_public_key(&conf);
+    // Prefer staying in the current inferred country after a successful login hop.
+    let preferred_code = crate::vpn::infer_country_code_from_vpn_name(&name);
+    let country_id = if let Some(code) = preferred_code.as_deref() {
+      match crate::vpn::list_nord_countries().await {
+        Ok(countries) => crate::vpn::resolve_country_id_by_code(&countries, code),
+        Err(_) => None,
+      }
+    } else {
+      None
+    };
+
+    let (server, new_conf) = crate::vpn::build_rotated_nord_wireguard_conf(
+      &private_key,
+      avoid_station.as_deref(),
+      avoid_pk.as_deref(),
+      country_id,
+    )
+    .await?;
+
+    {
+      let storage = crate::vpn::VPN_STORAGE
+        .lock()
+        .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+      storage
+        .update_config_data(
+          vpn_id,
+          &new_conf,
+          Some(&crate::vpn::default_nord_vpn_name(&server)),
+        )
+        .map_err(|e| format!("Save rotated VPN config: {e}"))?;
+    }
+
+    let _ = crate::vpn_worker_runner::stop_vpn_worker_by_vpn_id(vpn_id).await;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    match crate::vpn_worker_runner::start_vpn_worker(vpn_id).await {
+      Ok(worker) => {
+        self.log(&format!(
+          "WireGuard worker restarted on {} (port {:?})",
+          server.hostname, worker.local_port
+        ));
+      }
+      Err(e) => {
+        self.log(&format!(
+          "WARN: vpn-worker restart after peer rotate failed (will retry on launch): {e}"
+        ));
+      }
+    }
+
+    Ok((server.hostname, server.station.clone()))
+  }
+
+  /// Switch Nord inventory conf to an allowlisted country after OpenAI region blocks.
+  /// Returns Ok(true) when a location switch was applied.
+  async fn fallback_nord_location_on_region_block(
+    &mut self,
+    error_message: &str,
+    location_fallbacks: &mut u32,
+    tried_locations: &mut Vec<String>,
+  ) -> Result<bool, String> {
+    if !crate::vpn::is_unsupported_region_error(error_message) {
+      return Ok(false);
+    }
+    if *location_fallbacks >= crate::vpn::MAX_NORD_LOCATION_FALLBACKS {
+      return Ok(false);
+    }
+    let Some(vpn_id) = self.config.effective_vpn_id() else {
+      return Ok(false);
+    };
+
+    let current_name = {
+      let storage = crate::vpn::VPN_STORAGE
+        .lock()
+        .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+      storage
+        .load_config(&vpn_id)
+        .map(|c| c.name)
+        .unwrap_or_default()
+    };
+    let current_code = crate::vpn::infer_country_code_from_vpn_name(&current_name);
+    let Some(next_code) =
+      crate::vpn::next_fallback_country_code(current_code.as_deref(), tried_locations)
+    else {
+      self.log("Unsupported region detected; no remaining Nord fallback locations");
+      return Ok(false);
+    };
+
+    self.log(&format!(
+      "Unsupported region detected; switching Nord location {} → {next_code}",
+      current_code.as_deref().unwrap_or("?")
+    ));
+    let server = crate::vpn::retarget_nord_vpn_to_country(&vpn_id, next_code).await?;
+    tried_locations.push(next_code.to_string());
+    *location_fallbacks += 1;
+    self.log(&format!(
+      "Nord location fallback #{location_fallbacks}: {} ({}) station={}",
+      server.hostname,
+      server.country_code.as_deref().unwrap_or(next_code),
+      server.station
+    ));
+    Ok(true)
   }
 
   /// Ensure one reusable worker profile for the whole batch.
@@ -2987,28 +3963,8 @@ impl LoginEngine {
           }
         }
 
-        if let Some(proxy_id) = self.config.proxy_id.as_ref() {
-          if found.proxy_id.as_deref() != Some(proxy_id.as_str()) {
-            match crate::profile::ProfileManager::instance()
-              .update_profile_proxy(
-                app_handle.clone(),
-                &found.id.to_string(),
-                Some(proxy_id.clone()),
-              )
-              .await
-            {
-              Ok(updated) => {
-                found = updated;
-                self.log(&format!("Worker profile proxy set to {proxy_id}"));
-              }
-              Err(e) => {
-                self.log(&format!(
-                  "Warning: failed to set worker proxy_id={proxy_id}: {e}"
-                ));
-              }
-            }
-          }
-        }
+        // Attach proxy or VPN to the reused worker (mutually exclusive).
+        found = self.apply_network_to_worker(app_handle, found).await?;
 
         self.log(&format!(
           "Reusing existing auto-login worker: {} ({}) browser={} version={}",
@@ -3093,14 +4049,20 @@ impl LoginEngine {
       None
     };
 
+    let (create_proxy_id, create_vpn_id) = match self.config.network_mode {
+      LoginNetworkMode::Proxy => (self.config.proxy_id.clone(), None),
+      LoginNetworkMode::Vpn => (None, self.config.effective_vpn_id()),
+      _ => (None, None),
+    };
+
     let mut created = create_browser_profile_with_group(
       app_handle.clone(),
       profile_name,
       browser.as_str().to_string(),
       version,
       release_type,
-      self.config.proxy_id.clone(),
-      None,
+      create_proxy_id,
+      create_vpn_id,
       camoufox_config,
       chromium_config,
       None,
@@ -3206,8 +4168,9 @@ impl LoginEngine {
     }
 
     // Chromium: wait for CDP port then open debugger websocket.
+    // Prefer PID lookup: ephemeral path can race with status checks.
     let cdp_port = self
-      .wait_for_cdp_port(&launched.browser, &profile_path_str)
+      .wait_for_cdp_port(&launched.browser, &profile_path_str, launched.process_id)
       .await?;
     self.log(&format!("CDP port ready: {cdp_port}"));
     let ws_url = get_page_ws_url(cdp_port).await?;
@@ -3215,45 +4178,68 @@ impl LoginEngine {
     Ok((launched, BrowserSession::Cdp(cdp)))
   }
 
-  async fn wait_for_cdp_port(&self, browser: &str, profile_path: &str) -> Result<u16, String> {
-    for attempt in 0..15 {
+  async fn wait_for_cdp_port(
+    &self,
+    browser: &str,
+    profile_path: &str,
+    process_id: Option<u32>,
+  ) -> Result<u16, String> {
+    let mgr = crate::chromium_manager::ChromiumManager::instance();
+    for attempt in 0..20 {
       if attempt > 0 {
         sleep(std::time::Duration::from_millis(500)).await;
       }
-      let port = crate::chromium_manager::ChromiumManager::instance()
-        .get_cdp_port(profile_path)
-        .await;
-      if let Some(p) = port {
+      if let Some(pid) = process_id {
+        if let Some(p) = mgr.get_cdp_port_by_pid(pid).await {
+          return Ok(p);
+        }
+      }
+      if let Some(p) = mgr.get_cdp_port(profile_path).await {
+        return Ok(p);
+      }
+      // Last resort for single-worker auto-login: only one Chromium instance.
+      if let Some(p) = mgr.get_single_cdp_port().await {
+        log::info!(
+          "CDP port resolved via single-instance fallback: {p} (path lookup missed {profile_path})"
+        );
         return Ok(p);
       }
     }
     Err(format!(
-      "Failed to get CDP port for browser={browser} path={profile_path}"
+      "Failed to get CDP port for browser={browser} path={profile_path} pid={process_id:?}"
     ))
   }
 
   /// Kill the browser process only. Keep worker profile metadata for reuse.
   /// Ephemeral data dir is removed by BrowserRunner on kill.
+  /// Returns Err when kill failed — caller must NOT relaunch the worker on top
+  /// of a still-running browser (would freeze the machine).
   async fn kill_browser_only(
     &mut self,
     app_handle: &tauri::AppHandle,
     profile: &crate::profile::BrowserProfile,
-  ) {
+  ) -> Result<(), String> {
     use crate::browser_runner::BrowserRunner;
 
-    if let Err(e) = BrowserRunner::instance()
+    match BrowserRunner::instance()
       .kill_browser_process(app_handle.clone(), profile)
       .await
     {
-      self.log(&format!(
-        "Warning: failed to kill browser for profile {}: {e}",
-        profile.id
-      ));
-    } else {
-      self.log(&format!(
-        "Browser killed for worker profile {} ({})",
-        profile.name, profile.id
-      ));
+      Ok(()) => {
+        self.log(&format!(
+          "Browser killed for worker profile {} ({})",
+          profile.name, profile.id
+        ));
+        Ok(())
+      }
+      Err(e) => {
+        let msg = format!(
+          "Failed to kill browser for profile {} ({}): {e}",
+          profile.name, profile.id
+        );
+        self.log(&msg);
+        Err(msg)
+      }
     }
   }
 
@@ -3273,7 +4259,9 @@ impl LoginEngine {
 
     if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
       if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
-        self.kill_browser_only(app_handle, &found).await;
+        // Best-effort: dispose proceeds regardless so the profile metadata is
+        // removed. Kill failure is logged inside kill_browser_only.
+        let _ = self.kill_browser_only(app_handle, &found).await;
       }
     }
 
@@ -3311,4 +4299,170 @@ async fn get_page_ws_url(port: u16) -> Result<String, String> {
     }
   }
   Err("No page target with webSocketDebuggerUrl found".into())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn submit_probe_never_submits_from_javascript() {
+    let js = submit_control_probe_js(r#"button[type="submit"]"#);
+
+    assert!(!js.contains(".click()"));
+    assert!(!js.contains("requestSubmit"));
+    assert!(!js.contains(".submit()"));
+    assert!(js.contains("__reactProps$"));
+    assert!(js.contains("aria-disabled"));
+  }
+
+  #[test]
+  fn oauth_authorize_url_with_localhost_redirect_is_login_email() {
+    let url = concat!(
+      "https://auth.openai.com/oauth/authorize?client_id=codex",
+      "&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
+      "&response_type=code&state=test-state"
+    );
+
+    assert_eq!(detect_login_page_type(url), LoginPageType::LoginEmail);
+  }
+
+  #[test]
+  fn oauth_authorize_url_with_localhost_redirect_is_not_a_callback() {
+    let url = concat!(
+      "https://auth.openai.com/oauth/authorize?response_type=code",
+      "&client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+      "&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
+      "&scope=openid%20profile%20email%20offline_access",
+      "&state=test-state&code_challenge=test&code_challenge_method=S256"
+    );
+
+    assert!(!is_oauth_callback_url(url));
+    assert_eq!(detect_login_page_type(url), LoginPageType::LoginEmail);
+  }
+
+  #[test]
+  fn html_json_region_error_is_preserved_for_vpn_fallback() {
+    let json = r#"{"error":{"code":"unsupported_country_region_territory","message":"Country, region, or territory not supported","param":null,"type":"request_forbidden"}}"#;
+    let body = format!("Pretty-print\n{json}");
+
+    let error = extract_unsupported_region_error(&body).expect("region error should be detected");
+    assert_eq!(error, json);
+  }
+
+  #[test]
+  fn detects_cloudflare_turnstile_challenge_signals() {
+    assert!(is_cloudflare_challenge_signal(
+      "auth.openai.com\nPerforming security verification\nVerify you are human\nCLOUDFLARE"
+    ));
+    assert!(is_cloudflare_challenge_signal("Just a moment..."));
+    assert!(is_cloudflare_challenge_signal(
+      r#"iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform""#
+    ));
+    assert!(!is_cloudflare_challenge_signal(
+      "Privacy Policy powered by Cloudflare CDN footer only"
+    ));
+    assert!(is_cloudflare_challenge_error(
+      &cloudflare_challenge_error_message()
+    ));
+  }
+
+  #[test]
+  fn login_page_detection_uses_url_host_and_path() {
+    let cases = [
+      (
+        "http://localhost:1455/auth/callback?code=test&state=test",
+        LoginPageType::Callback,
+      ),
+      (
+        "https://auth.openai.com/log-in/password?state=test",
+        LoginPageType::LoginPassword,
+      ),
+      (
+        "https://auth.openai.com/mfa/totp?state=test",
+        LoginPageType::TwoFactor,
+      ),
+      (
+        "https://auth.openai.com/oauth/consent?state=test",
+        LoginPageType::Consent,
+      ),
+      (
+        "https://chatgpt.com/?model=auto",
+        LoginPageType::ChatgptHome,
+      ),
+    ];
+
+    for (url, expected) in cases {
+      assert_eq!(detect_login_page_type(url), expected, "url={url}");
+    }
+  }
+
+  #[test]
+  fn oauth_authorize_dom_callback_hint_does_not_override_login_email() {
+    assert_eq!(
+      resolve_dom_page_override(LoginPageType::LoginEmail, LoginPageType::Callback),
+      LoginPageType::LoginEmail
+    );
+    assert_eq!(
+      resolve_dom_page_override(LoginPageType::Unknown, LoginPageType::Callback),
+      LoginPageType::Callback
+    );
+  }
+
+  fn free_callback_test_addr() -> String {
+    let listener = std::net::TcpListener::bind((OAUTH_CALLBACK_HOST, 0))
+      .expect("test callback port should bind");
+    let addr = listener
+      .local_addr()
+      .expect("test callback address should resolve");
+    drop(listener);
+    addr.to_string()
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  #[serial_test::serial]
+  async fn callback_shutdown_releases_port_before_retry() {
+    let addr = free_callback_test_addr();
+    let mut listener = OAuthCallbackListener::start_on_addr(&addr)
+      .await
+      .expect("first callback listener should bind");
+
+    let error = listener
+      .wait_for_code(std::time::Duration::from_millis(1))
+      .await
+      .expect_err("callback wait should time out");
+    assert_eq!(
+      error,
+      "Timeout waiting for OAuth callback on localhost:1455"
+    );
+    listener.shutdown().await;
+
+    let rebound = TcpListener::bind(&addr)
+      .await
+      .expect("callback listener must release the port before retry");
+    drop(rebound);
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  #[serial_test::serial]
+  async fn callback_shutdown_aborts_stalled_connection_before_retry() {
+    let addr = free_callback_test_addr();
+    let mut listener = OAuthCallbackListener::start_on_addr(&addr)
+      .await
+      .expect("callback listener should bind");
+    let stalled_client = TcpStream::connect(&addr)
+      .await
+      .expect("stalled client should connect");
+    sleep(std::time::Duration::from_millis(10)).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), listener.shutdown())
+      .await
+      .expect("callback shutdown should not wait for the stalled request");
+
+    let rebound = TcpListener::bind(&addr)
+      .await
+      .expect("callback listener must release the port before retry");
+    drop(rebound);
+    drop(stalled_client);
+  }
 }
