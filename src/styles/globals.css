@@ -175,3 +175,14 @@
 [data-sonner-toast] select {
   pointer-events: auto;
 }
+
+/* Prefer a plain utility over long Tailwind arbitrary variants for scrollbar
+   hiding — complex [-ms-...] / [&::-webkit-...] classes have corrupted the
+   Turbopack/PostCSS transform when workspace root was mis-detected. */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}

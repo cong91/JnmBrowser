@@ -27,12 +27,15 @@ export interface LoginResult {
   note: string;
   exportedAt?: string;
   pushError?: string;
+  /** Present after this change — needed to re-login failed rows without re-paste. */
+  password?: string;
+  totpSecret?: string;
 }
 
 export type LoginResultStatus = "available" | "exported" | "used" | "invalid";
 
 /** Matches Rust `LoginNetworkMode` (camelCase unit enum). */
-export type LoginNetworkMode = "none" | "proxy" | "nord";
+export type LoginNetworkMode = "none" | "proxy" | "vpn" | "nord";
 
 export interface LoginConfig {
   credentialsText: string;
@@ -52,6 +55,10 @@ export interface LoginConfig {
   smsNetwork?: string;
   smsCountry?: string;
   proxyId?: string;
+  /** Inventory WireGuard / Nord conf id when networkMode is "vpn". */
+  vpnId?: string;
+  /** Rotate WG peer after every N successful logins (0 = never; VPN default 1). */
+  rotateEveryN?: number;
   networkMode: LoginNetworkMode;
 }
 
@@ -145,6 +152,37 @@ export function useLoginEvents() {
     [refreshAccounts],
   );
 
+  /** Edit credential/profile fields on a stored login result. */
+  const updateAccountFields = useCallback(
+    async (
+      accountId: string,
+      fields: {
+        email?: string;
+        password?: string;
+        totpSecret?: string;
+        note?: string;
+        phoneNumber?: string;
+        status?: LoginResultStatus;
+      },
+    ): Promise<LoginResult> => {
+      const updated = await invoke<LoginResult>(
+        "update_login_result_fields_cmd",
+        {
+          accountId,
+          email: fields.email,
+          password: fields.password,
+          totpSecret: fields.totpSecret,
+          note: fields.note,
+          phoneNumber: fields.phoneNumber,
+          status: fields.status,
+        },
+      );
+      await refreshAccounts();
+      return updated;
+    },
+    [refreshAccounts],
+  );
+
   /**
    * Export login results as Sub2API JSON.
    * Defaults: includeFailed=false, markExported=false (caller marks after successful file write).
@@ -207,6 +245,7 @@ export function useLoginEvents() {
     deleteAccount,
     updateAccountStatus,
     updateAccountNote,
+    updateAccountFields,
     exportAccountsJson,
     pushAccountsToSub2api,
   };

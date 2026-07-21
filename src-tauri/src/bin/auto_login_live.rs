@@ -156,6 +156,8 @@ fn main() {
               sms_network: args.sms_network.clone(),
               sms_country: Some(args.sms_country.clone()),
               proxy_id: args.proxy_id.clone(),
+              vpn_id: None,
+              rotate_every_n: 0,
               network_mode: if args.proxy_id.is_some() {
                 LoginNetworkMode::Proxy
               } else {

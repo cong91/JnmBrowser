@@ -3,7 +3,7 @@
 **JnmBrowser** (a.k.a. DonutBrowser) — an open-source anti-detect browser built with Tauri v2 + Next.js.
 - Tauri binary: `JnmBrowser`, Rust lib: `donutbrowser_lib`
 - Product identifier: `com.jnmbrowser`
-- Current version: 0.22.9
+- Current version: 0.22.10
 - License: AGPL-3.0
 - Package manager: **pnpm** (Node 23 via `.nvmrc` / `.node-version`)
 
@@ -36,7 +36,7 @@ JnmBrowser/
 │   │   ├── sync/                     # Cloud sync (engine, encryption, manifest, scheduler)
 │   │   ├── vpn/                      # WireGuard tunnels
 │   │   ├── recorder/                 # Action recorder (capture, player, recipes)
-│   │   ├── auto_register/            # ChatGPT auto-registration engine
+│   │   ├── auto_service/             # Multi-service registration/login automation
 │   │   ├── email/                    # Gmail CDK / OTP helpers
 │   │   ├── events/                   # Backend event helpers
 │   │   ├── app_dirs.rs               # App data dir (JNMBROWSER_DATA_DIR / DONUTBROWSER_*)
@@ -66,7 +66,7 @@ JnmBrowser/
 - **donut-sync**: separate NestJS app with its own `package.json` / Biome / tsc. Lint/typecheck scripts cover both trees.
 - **Sensitive areas — read first**:
   - Action recorder: `src-tauri/src/recorder/`, frontend hooks like `use-recorder-session.ts`
-  - Auto-register: `src-tauri/src/auto_register/`, `docs/auto-registration.md`
+  - Account automation: `src-tauri/src/auto_service/`, `docs/auto-registration.md`, `docs/research/codex-login-flow-research.md`
   - Sync: `src-tauri/src/sync/`, `docs/self-hosting-donut-sync.md`
   - MCP: `src-tauri/src/mcp_server.rs` (+ root MCP plan docs when working from a plan)
 

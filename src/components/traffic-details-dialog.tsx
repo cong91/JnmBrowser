@@ -156,8 +156,12 @@ export function TrafficDetailsDialog({
   profileName,
 }: TrafficDetailsDialogProps) {
   const { t } = useTranslation();
-  const { ref: chartRef, isReady: isChartReady } =
-    useElementSize<HTMLDivElement>();
+  const {
+    ref: chartRef,
+    width: chartWidth,
+    height: chartHeight,
+    isReady: isChartReady,
+  } = useElementSize<HTMLDivElement>();
   const [stats, setStats] = React.useState<FilteredTrafficStats | null>(null);
   const [timePeriod, setTimePeriod] = React.useState<TimePeriod>("5m");
 
@@ -309,13 +313,17 @@ export function TrafficDetailsDialog({
                 </Select>
               </div>
 
-              <div ref={chartRef} className="h-[200px] w-full">
+              <div
+                ref={chartRef}
+                className="h-[200px] w-full min-h-[200px] min-w-[1px]"
+              >
                 {isChartReady ? (
                   <ResponsiveContainer
-                    width="100%"
-                    height="100%"
+                    width={Math.max(chartWidth, 1)}
+                    height={Math.max(chartHeight, 1)}
                     minWidth={1}
                     minHeight={1}
+                    debounce={50}
                   >
                     <AreaChart
                       data={chartData}
