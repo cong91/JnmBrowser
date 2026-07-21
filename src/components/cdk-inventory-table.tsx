@@ -2,7 +2,7 @@
 
 import { Fragment, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { LuRefreshCw, LuTrash2 } from "react-icons/lu";
+import { LuPlus, LuRefreshCw, LuTrash2 } from "react-icons/lu";
 import { Button } from "@/components/ui/button";
 import type { CdkInventoryRecord } from "@/hooks/use-registration-events";
 
@@ -10,9 +10,17 @@ interface Props {
   records: CdkInventoryRecord[];
   onRefresh: () => Promise<void> | void;
   onDelete: (cdk: string) => Promise<void> | void;
+  onTopUp?: (cdk: string, remaining: number) => void;
 }
 
-export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
+const MAX_SLOTS = 6;
+
+export function CdkInventoryTable({
+  records,
+  onRefresh,
+  onDelete,
+  onTopUp,
+}: Props) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -25,9 +33,10 @@ export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
         acc.yes += r.freeTrialYes || 0;
         acc.no += r.freeTrialNo || 0;
         acc.failed += r.failed || 0;
+        acc.remaining += r.remaining ?? 0;
         return acc;
       },
-      { target: 0, attempted: 0, yes: 0, no: 0, failed: 0 },
+      { target: 0, attempted: 0, yes: 0, no: 0, failed: 0, remaining: 0 },
     );
   }, [records]);
 
@@ -109,6 +118,9 @@ export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
                 {t("registration.cdkTarget")}
               </th>
               <th className="px-2 py-2 font-medium tabular-nums">
+                {t("registration.cdkRemainingOfMax", { max: MAX_SLOTS })}
+              </th>
+              <th className="px-2 py-2 font-medium tabular-nums">
                 {t("registration.cdkFreeTrialYes")}
               </th>
               <th className="px-2 py-2 font-medium tabular-nums">
@@ -126,6 +138,9 @@ export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
           <tbody>
             {records.map((row) => {
               const isOpen = expanded === row.cdk;
+              const remaining = row.remaining ?? 0;
+              const isRunning = row.status === "running";
+              const canTopUp = remaining > 0 && !isRunning && Boolean(onTopUp);
               return (
                 <Fragment key={row.cdk}>
                   <tr
@@ -143,6 +158,13 @@ export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
                     <td className="px-2 py-2 tabular-nums">
                       {row.attempted}/{row.targetAccounts}
                     </td>
+                    <td
+                      className={`px-2 py-2 tabular-nums ${
+                        remaining > 0 ? "text-success" : "text-muted-foreground"
+                      }`}
+                    >
+                      {remaining}
+                    </td>
                     <td className="px-2 py-2 tabular-nums text-success">
                       {row.freeTrialYes}
                     </td>
@@ -154,24 +176,54 @@ export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
                     </td>
                     <td className="px-2 py-2 capitalize">{row.status}</td>
                     <td className="px-2 py-2 text-right">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 p-0"
-                        disabled={busy}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleDelete(row.cdk);
-                        }}
-                      >
-                        <LuTrash2 className="h-3.5 w-3.5 text-destructive" />
-                      </Button>
+                      <div className="flex items-center justify-end gap-0.5">
+                        {onTopUp ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 gap-1 px-1.5"
+                            disabled={busy || !canTopUp}
+                            title={
+                              isRunning
+                                ? t("registration.cdkTopUpDisabledRunning")
+                                : remaining <= 0
+                                  ? t("registration.cdkTopUpDisabledFull")
+                                  : t("registration.cdkTopUpTitle")
+                            }
+                            aria-label={t("registration.cdkTopUpTitle")}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!canTopUp) return;
+                              onTopUp(row.cdk, remaining);
+                            }}
+                          >
+                            <LuPlus className="h-3.5 w-3.5" />
+                            <span className="hidden sm:inline">
+                              {t("registration.cdkTopUp")}
+                            </span>
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0"
+                          disabled={busy}
+                          aria-label={t("common.buttons.delete")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDelete(row.cdk);
+                          }}
+                        >
+                          <LuTrash2 className="h-3.5 w-3.5 text-destructive" />
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                   {isOpen && (
                     <tr className="border-b bg-muted/20">
-                      <td colSpan={8} className="px-3 py-2">
+                      <td colSpan={9} className="px-3 py-2">
                         {row.lastError ? (
                           <p className="mb-2 text-[11px] text-destructive">
                             {row.lastError}

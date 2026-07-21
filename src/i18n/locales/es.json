@@ -1824,7 +1824,17 @@
     "smsTokenMissing": "No se encontró un token de VI-OTP guardado. Guárdalo en la configuración de SMS o pega un token de anulación abajo.",
     "smsTokenRequired": "SMS está activado pero no hay un token de VI-OTP disponible. Guarda un token en la configuración de SMS o introduce una anulación.",
     "settingsTab": "Ajustes",
-    "settingsHint": "Configure VPN/proxy, Nord y SMS aquí. La pestaña Register solo activa opciones."
+    "settingsHint": "Configure VPN/proxy, Nord y SMS aquí. La pestaña Register solo activa opciones.",
+    "cdkRemaining": "Restantes",
+    "cdkRemainingOfMax": "Restantes (de {{max}})",
+    "cdkTopUp": "Completar",
+    "cdkTopUpTitle": "Continuar este CDK",
+    "cdkTopUpHint": "Solicita más cuentas hasta los cupos libres. Se conserva el historial.",
+    "cdkTopUpDisabledFull": "Sin cupos libres (máx. 6). Elimina las estadísticas para reiniciar la cuota.",
+    "cdkTopUpDisabledRunning": "El registro de este CDK sigue en curso.",
+    "cdkPickFromInventory": "Usar CDK de estadísticas",
+    "cdkPickPlaceholder": "Selecciona un CDK con cupos libres…",
+    "cdkRawEntryHint": "O pega nuevos códigos CDK/tarjeta abajo"
   },
   "sms": {
     "title": "Verificación SMS / OTP",

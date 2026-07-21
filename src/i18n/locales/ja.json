@@ -1824,7 +1824,17 @@
     "smsTokenMissing": "保存済みの VI-OTP トークンが見つかりません。SMS 設定に保存するか、下に上書きトークンを貼り付けてください。",
     "smsTokenRequired": "SMS は有効ですが VI-OTP トークンがありません。SMS 設定に保存するか、上書きトークンを入力してください。",
     "settingsTab": "設定",
-    "settingsHint": "VPN/プロキシ・Nord・SMS はここで設定。Register タブでは有効化のみ。"
+    "settingsHint": "VPN/プロキシ・Nord・SMS はここで設定。Register タブでは有効化のみ。",
+    "cdkRemaining": "残り枠",
+    "cdkRemainingOfMax": "残り（{{max}} 中）",
+    "cdkTopUp": "追加作成",
+    "cdkTopUpTitle": "この CDK を続行",
+    "cdkTopUpHint": "残り枠までアカウントを追加作成します。履歴は保持されます。",
+    "cdkTopUpDisabledFull": "空き枠がありません（最大 6）。統計を削除すると枠が完全にリセットされます。",
+    "cdkTopUpDisabledRunning": "この CDK の登録はまだ実行中です。",
+    "cdkPickFromInventory": "統計から CDK を選択",
+    "cdkPickPlaceholder": "空き枠のある CDK を選択…",
+    "cdkRawEntryHint": "または下に新しい CDK/カードを貼り付け"
   },
   "sms": {
     "title": "SMS / OTP 認証",

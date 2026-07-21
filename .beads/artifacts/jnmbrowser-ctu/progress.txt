@@ -1,0 +1,29 @@
+# Progress Log
+
+Bead: jnmbrowser-ctu
+Started: 2026-07-21
+
+## Codebase Patterns
+
+- Quota truth: `cdk_remaining_capacity` = MAX(6) − used(usage ledger) − reserved; not `targetAccounts − attempted`.
+- Engine already clamps at batch start (`RegistrationEngine::run` retry-cap) + `reserve_cdk_slots_per`.
+- Delete is destructive: stats row + usage ledger (`store::delete`).
+- UI today: raw `cdkText` + Delete-only CDK table; Option C = picker + top-up mode.
+- i18n: all user strings in 7 locales under `registration.*`; no `t(key, fallback)`.
+- Audit: `.zcode/artifacts/audit-recorder/audit-cdk-quota.md`
+
+---
+
+<!-- Task logs below - APPEND ONLY -->
+
+## 2026-07-21 plan
+- plan.md written: Level 0, 3 waves, 5 tasks, TDD remaining enrichment, UX gates for top-up/table.
+- Next: /ship jnmbrowser-ctu
+
+## 2026-07-21 ship
+- backend-1: remaining on list_all + store test list_all_enriches_remaining_from_usage_and_reservations; store tests 15 passed.
+- backend-2: engine full-cap messages no longer imply delete for partial continue.
+- i18n-1: top-up/remaining keys in 7 locales + docs continue/top-up section.
+- frontend-1: cdk-inventory-table remaining column + Top-up action.
+- frontend-2: dialog picker + topUpRemaining clamp on start; wire onTopUp.
+- Verify: tsc clean; biome clean on touched UI; cargo store tests 15 passed.

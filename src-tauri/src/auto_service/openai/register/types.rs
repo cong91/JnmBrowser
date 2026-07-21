@@ -597,6 +597,9 @@ pub struct CdkInventoryRecord {
   pub updated_at: DateTime<Utc>,
   #[serde(default)]
   pub task_id: String,
+  /// Ledger-backed free slots (0..=MAX). Derived on list; not the quota source of truth.
+  #[serde(default)]
+  pub remaining: u32,
 }
 
 fn default_cdk_status() -> String {
@@ -620,6 +623,7 @@ impl CdkInventoryRecord {
       created_at: now,
       updated_at: now,
       task_id: task_id.to_string(),
+      remaining: 0,
     }
   }
 

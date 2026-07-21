@@ -1397,7 +1397,7 @@ impl RegistrationEngine {
       let remaining = cdk_remaining_capacity(cdk);
       if remaining == 0 {
         self.log(&format!(
-          "CDK {cdk} is at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK}); skipping — delete its CDK stats row to reset"
+          "CDK {cdk} is at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK} used+reserved); skipping — free slots only after Delete (full stats+quota reset) or when failed claims release usage"
         ));
         per_cdk_target.push(0);
         continue;
@@ -1413,7 +1413,7 @@ impl RegistrationEngine {
     }
     if per_cdk_target.iter().all(|&t| t == 0) {
       let msg = format!(
-        "All CDKs are at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK}); nothing to retry — delete a CDK stats row to reset its usage"
+        "All CDKs are at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK} used+reserved); nothing left to schedule — use Top-up only when remaining > 0, or Delete a CDK stats row for a full quota reset"
       );
       self.log(&msg);
       self.emit(

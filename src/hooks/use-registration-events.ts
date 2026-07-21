@@ -103,6 +103,8 @@ export interface CdkInventoryRecord {
   createdAt: string;
   updatedAt: string;
   taskId: string;
+  /** Ledger-backed free slots (0–6). Derived on list. */
+  remaining?: number;
 }
 
 export function useRegistrationEvents() {
