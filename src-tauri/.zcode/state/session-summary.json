@@ -9,7 +9,12 @@
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/engine.rs": "        let mut succeeded = false;\n\n        for attempt in 0..max_retries {",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/store.rs": "    let base_dir = data_dir().join(\"registered_accounts\");",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/mod.rs": "pub mod commands;\npub mod engine;\npub mod sentinel;\npub mod store;\npub mod task;",
-      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/commands.rs": "/// Start a new auto-registration task. Returns the task_id.\n#[tauri::command]\np"
+      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/commands.rs": "/// Start a new auto-registration task. Returns the task_id.\n#[tauri::command]\np",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\src\\auto_service\\openai\\login\\engine.rs": "    Ok(Self {\n      rx,\n      shutdown: Some(shutdown_tx),\n      task: Some(task",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\src\\auto_service\\openai\\register\\engine.rs": "          Err(e) => {\n            last_error = Some(e.clone());\n            self",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\build.rs": "fn generate_tray_icons() {\n  use resvg::tiny_skia::{Pixmap, Transform};\n  use re",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\src\\vpn\\nord.rs": "/// Fetch a new Nord peer and build conf, avoiding the current endpoint when pos",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\src\\vpn\\mod.rs": "pub use nord::{\n  build_nord_wireguard_conf, build_rotated_nord_wireguard_conf, "
     },
     "created": [
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/types.rs",
@@ -33,7 +38,20 @@
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/browser.rs": "",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/mcp_server.rs": "",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/create-profile-dialog.tsx": "",
-      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/i18n/locales/en.json": ""
+      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/i18n/locales/en.json": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_6644d73b-9488-4b5f-9d0b-061d8cafe1cc\\call-bc89f350-f55f-4ace-acd0-c5937b67f06a-69-stdout.log": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_6644d73b-9488-4b5f-9d0b-061d8cafe1cc\\call-bc89f350-f55f-4ace-acd0-c5937b67f06a-69-stderr.log": "",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\src\\auto_service\\openai\\login\\engine.rs": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_6644d73b-9488-4b5f-9d0b-061d8cafe1cc\\call-07458fe5-cc80-4724-9bf5-de5f483edf70-267-stdout.log": "",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\src\\vpn\\mod.rs": "",
+      "C:\\Users\\PC\\Documents\\Project\\JnmHub\\JnmBrowser\\src-tauri\\src\\auto_service\\openai\\register\\engine.rs": "",
+      "C:\\Users\\PC\\.zcode\\tmp\\paste-attachments\\2026-07-20\\pasted-text-20260720-222231-7ef3fca0.txt": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_a6c5b614-ec3f-4f0f-b9c5-668a94b26324\\call_cRW5Ghes2bLRC85MO0sMAbpq-stderr.log": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_a6c5b614-ec3f-4f0f-b9c5-668a94b26324\\call_cRW5Ghes2bLRC85MO0sMAbpq-stdout.log": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_a6c5b614-ec3f-4f0f-b9c5-668a94b26324\\call_hiiYTU87Ni1cx3RGoGUUfPPw-stdout.log": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_a6c5b614-ec3f-4f0f-b9c5-668a94b26324\\call_0MZlCjJ4luWanmT1tMecJ96J-stdout.log": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_a6c5b614-ec3f-4f0f-b9c5-668a94b26324\\call_0MZlCjJ4luWanmT1tMecJ96J-stderr.log": "",
+      "C:\\Users\\PC\\.zcode\\cli\\exec\\sess_a6c5b614-ec3f-4f0f-b9c5-668a94b26324\\call_hiiYTU87Ni1cx3RGoGUUfPPw-stderr.log": ""
     }
   },
   "decisions": [],

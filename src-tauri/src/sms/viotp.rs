@@ -69,6 +69,13 @@ impl ViotpService {
     }
   }
 
+  fn redact_token(message: &str, token: &str) -> String {
+    if token.is_empty() {
+      return message.to_string();
+    }
+    message.replace(token, "[redacted]")
+  }
+
   fn get_json(
     &self,
     path: &str,
@@ -87,6 +94,7 @@ impl ViotpService {
       .collect::<Vec<_>>()
       .join("&");
     let url = format!("{API_BASE}{path}?{qs}");
+    let safe_url = Self::redact_token(&url, &self.api_token);
     let client = Self::client();
     let response = Self::block_on(async move {
       client
@@ -95,22 +103,40 @@ impl ViotpService {
         .send()
         .await
     })
-    .map_err(|e| SmsServiceError::Network(format!("request failed: {e}")))?;
+    .map_err(|e| {
+      let detail = Self::redact_token(&e.to_string(), &self.api_token);
+      SmsServiceError::Network(format!(
+        "request failed for {safe_url}: {detail}. Check DNS/network access to api.viotp.com"
+      ))
+    })?;
 
     let status = response.status();
-    let text = Self::block_on(async move { response.text().await })
-      .map_err(|e| SmsServiceError::Network(format!("failed to read response: {e}")))?;
+    let text = Self::block_on(async move { response.text().await }).map_err(|e| {
+      SmsServiceError::Network(format!(
+        "failed to read response from {safe_url}: {}",
+        Self::redact_token(&e.to_string(), &self.api_token)
+      ))
+    })?;
 
     if !status.is_success() && status.as_u16() != 200 {
       // VI-OTP often returns HTTP 200 with status_code in body; still handle hard HTTP errors.
       if status.as_u16() == 401 {
-        return Err(SmsServiceError::Auth(text));
+        return Err(SmsServiceError::Auth(Self::redact_token(
+          &text,
+          &self.api_token,
+        )));
       }
-      return Err(SmsServiceError::Network(format!("HTTP {status}: {text}")));
+      return Err(SmsServiceError::Network(format!(
+        "HTTP {status} from {safe_url}: {}",
+        Self::redact_token(&text, &self.api_token)
+      )));
     }
 
     let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-      SmsServiceError::Internal(format!("failed to parse JSON: {e} — body: {text}"))
+      SmsServiceError::Internal(format!(
+        "failed to parse JSON from {safe_url}: {e} — body: {}",
+        Self::redact_token(&text, &self.api_token)
+      ))
     })?;
 
     let status_code = data

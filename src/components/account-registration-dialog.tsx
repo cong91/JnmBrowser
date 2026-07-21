@@ -1,5 +1,6 @@
 "use client";
 
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuFolderOpen, LuRocket } from "react-icons/lu";
@@ -7,6 +8,7 @@ import { toast } from "sonner";
 import { CdkInventoryTable } from "@/components/cdk-inventory-table";
 import { RegisteredAccountsTable } from "@/components/registered-accounts-table";
 import { RegistrationProgressCard } from "@/components/registration-progress-card";
+import { SmsProviderFields } from "@/components/sms-provider-fields";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -78,6 +80,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   const [smsNetwork, setSmsNetwork] = useState("");
   const [smsCountry, setSmsCountry] = useState("vn");
   const [smsTokenOverride, setSmsTokenOverride] = useState("");
+  const [hasSavedSmsToken, setHasSavedSmsToken] = useState(false);
   const [emailProvider, setEmailProvider] = useState<EmailProvider>(
     "gmail.123452026.xyz",
   );
@@ -117,6 +120,118 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     }
   }, [open, vpnConfigs, networkMode, vpnId]);
 
+  useEffect(() => {
+    if (!open) return;
+    invoke<string | null>("get_sms_api_token")
+      .then((token) => {
+        setHasSavedSmsToken(Boolean(token?.trim()));
+      })
+      .catch(() => {
+        setHasSavedSmsToken(false);
+      });
+
+    try {
+      const raw = localStorage.getItem("jnmbrowser.autoReg.settings");
+      if (!raw) return;
+      const prefs = JSON.parse(raw) as {
+        networkMode?: NetworkMode;
+        proxyId?: string;
+        vpnId?: string;
+        rotateEveryN?: number;
+        nordGroup?: string;
+        nordServerName?: string;
+        browserType?: string;
+        maxRetries?: number;
+        concurrency?: number;
+        headless?: boolean;
+        smsEnabled?: boolean;
+        smsServiceId?: string;
+        smsNetwork?: string;
+        smsCountry?: string;
+      };
+      if (
+        prefs.networkMode === "none" ||
+        prefs.networkMode === "proxy" ||
+        prefs.networkMode === "vpn" ||
+        prefs.networkMode === "nord"
+      ) {
+        setNetworkMode(prefs.networkMode);
+      }
+      if (typeof prefs.proxyId === "string") setProxyId(prefs.proxyId);
+      if (typeof prefs.vpnId === "string") setVpnId(prefs.vpnId);
+      if (typeof prefs.rotateEveryN === "number") {
+        setRotateEveryN(prefs.rotateEveryN);
+      }
+      if (typeof prefs.nordGroup === "string") setNordGroup(prefs.nordGroup);
+      if (typeof prefs.nordServerName === "string") {
+        setNordServerName(prefs.nordServerName);
+      }
+      if (
+        prefs.browserType === "chromium" ||
+        prefs.browserType === "camoufox"
+      ) {
+        setBrowserType(prefs.browserType);
+      }
+      if (typeof prefs.maxRetries === "number") setMaxRetries(prefs.maxRetries);
+      if (typeof prefs.concurrency === "number") {
+        setConcurrency(prefs.concurrency);
+      }
+      if (typeof prefs.headless === "boolean") setHeadless(prefs.headless);
+      if (typeof prefs.smsEnabled === "boolean")
+        setSmsEnabled(prefs.smsEnabled);
+      if (typeof prefs.smsServiceId === "string") {
+        setSmsServiceId(prefs.smsServiceId);
+      }
+      if (typeof prefs.smsNetwork === "string") setSmsNetwork(prefs.smsNetwork);
+      if (typeof prefs.smsCountry === "string") setSmsCountry(prefs.smsCountry);
+    } catch {
+      // Ignore invalid prefs
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    try {
+      localStorage.setItem(
+        "jnmbrowser.autoReg.settings",
+        JSON.stringify({
+          networkMode,
+          proxyId,
+          vpnId,
+          rotateEveryN,
+          nordGroup,
+          nordServerName,
+          browserType,
+          maxRetries,
+          concurrency,
+          headless,
+          smsEnabled,
+          smsServiceId,
+          smsNetwork,
+          smsCountry,
+        }),
+      );
+    } catch {
+      // Ignore storage failures
+    }
+  }, [
+    open,
+    networkMode,
+    proxyId,
+    vpnId,
+    rotateEveryN,
+    nordGroup,
+    nordServerName,
+    browserType,
+    maxRetries,
+    concurrency,
+    headless,
+    smsEnabled,
+    smsServiceId,
+    smsNetwork,
+    smsCountry,
+  ]);
+
   const parseCdks = (text: string): string[] =>
     text
       .split(/[\n,;]+/)
@@ -143,9 +258,15 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       return;
     }
 
-    if (smsEnabled && !smsServiceId.trim()) {
-      toast.error(t("registration.smsServiceIdRequired"));
-      return;
+    if (smsEnabled) {
+      if (!hasSavedSmsToken && !smsTokenOverride.trim()) {
+        toast.error(t("registration.smsTokenRequired"));
+        return;
+      }
+      if (!smsServiceId.trim()) {
+        toast.error(t("sms.serviceRequired"));
+        return;
+      }
     }
 
     await startRegistration({
@@ -203,13 +324,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className={
-          activeTab === "stored" || activeTab === "cdks"
-            ? "flex max-h-[90vh] max-w-6xl flex-col overflow-hidden"
-            : "flex max-h-[85vh] max-w-2xl flex-col overflow-hidden"
-        }
-      >
+      <DialogContent className="flex h-[min(92vh,860px)] w-[min(96vw,1100px)] max-w-none flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <LuRocket className="h-5 w-5 text-primary" />
@@ -222,7 +337,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
           onValueChange={setActiveTab}
           className="flex min-h-0 flex-1 flex-col"
         >
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="register">
               {t("registration.newRegistration")}
             </TabsTrigger>
@@ -249,6 +364,9 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   {cdkInventory.length}
                 </span>
               )}
+            </TabsTrigger>
+            <TabsTrigger value="settings">
+              {t("registration.settingsTab")}
             </TabsTrigger>
           </TabsList>
 
@@ -369,175 +487,11 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               </div>
             </div>
 
-            {networkMode === "proxy" && (
-              <div className="space-y-2">
-                <Label htmlFor="proxy">{t("registration.proxy")}</Label>
-                <Input
-                  id="proxy"
-                  placeholder={t("registration.proxyPlaceholder")}
-                  value={proxyId}
-                  onChange={(e) => setProxyId(e.target.value)}
-                />
-              </div>
-            )}
+            <p className="text-xs text-muted-foreground">
+              {t("registration.settingsHint")}
+            </p>
 
-            {networkMode === "vpn" && (
-              <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
-                <div className="space-y-2">
-                  <Label htmlFor="vpnId">{t("registration.vpn")}</Label>
-                  <Select
-                    value={vpnId || undefined}
-                    onValueChange={setVpnId}
-                    disabled={isLoadingVpns || vpnConfigs.length === 0}
-                  >
-                    <SelectTrigger id="vpnId">
-                      <SelectValue
-                        placeholder={
-                          isLoadingVpns
-                            ? t("registration.vpnLoading")
-                            : vpnConfigs.length === 0
-                              ? t("registration.vpnEmpty")
-                              : t("registration.vpnPlaceholder")
-                        }
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {vpnConfigs.map((vpn) => (
-                        <SelectItem key={vpn.id} value={vpn.id}>
-                          {vpn.name} ({vpn.vpn_type})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {t("registration.vpnPerProfileHint")}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="vpnRotateEveryN">
-                    {t("registration.rotateEveryN")}
-                  </Label>
-                  <Input
-                    id="vpnRotateEveryN"
-                    type="number"
-                    min={0}
-                    max={50}
-                    value={rotateEveryN}
-                    onChange={(e) =>
-                      setRotateEveryN(Number(e.target.value) || 0)
-                    }
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t("registration.vpnRotateHint")}
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {networkMode === "nord" && (
-              <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
-                <p className="text-xs text-muted-foreground">
-                  {t("registration.nordSystemWideWarning")}
-                </p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-2">
-                    <Label htmlFor="nordLocation">
-                      {t("registration.nordLocation")}
-                    </Label>
-                    <Select
-                      value={
-                        nordLocations.some((l) => l.value === nordGroup)
-                          ? nordGroup
-                          : "custom"
-                      }
-                      onValueChange={(v) => {
-                        if (v === "custom") {
-                          if (
-                            nordLocations.some((l) => l.value === nordGroup)
-                          ) {
-                            setNordGroup("");
-                          }
-                          return;
-                        }
-                        setNordGroup(v);
-                      }}
-                    >
-                      <SelectTrigger id="nordLocation">
-                        <SelectValue
-                          placeholder={t(
-                            "registration.nordLocationPlaceholder",
-                          )}
-                        />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {nordLocations.map((loc) => (
-                          <SelectItem key={loc.value} value={loc.value}>
-                            {t(loc.labelKey)}
-                          </SelectItem>
-                        ))}
-                        <SelectItem value="custom">
-                          {t("registration.nordLocCustom")}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="rotateEveryN">
-                      {t("registration.rotateEveryN")}
-                    </Label>
-                    <Input
-                      id="rotateEveryN"
-                      type="number"
-                      min={0}
-                      max={50}
-                      value={rotateEveryN}
-                      onChange={(e) =>
-                        setRotateEveryN(Number(e.target.value) || 0)
-                      }
-                    />
-                  </div>
-                </div>
-                {(!nordLocations.some((l) => l.value === nordGroup) ||
-                  nordGroup === "") && (
-                  <div className="space-y-2">
-                    <Label htmlFor="nordGroupCustom">
-                      {t("registration.nordGroupCustom")}
-                    </Label>
-                    <Input
-                      id="nordGroupCustom"
-                      placeholder={t("registration.nordGroupPlaceholder")}
-                      value={nordGroup}
-                      onChange={(e) => setNordGroup(e.target.value)}
-                    />
-                  </div>
-                )}
-                <div className="space-y-2">
-                  <Label htmlFor="nordServer">
-                    {t("registration.nordServerName")}
-                  </Label>
-                  <Input
-                    id="nordServer"
-                    placeholder={t("registration.nordServerPlaceholder")}
-                    value={nordServerName}
-                    onChange={(e) => setNordServerName(e.target.value)}
-                  />
-                </div>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <div className="space-y-2">
-                <Label htmlFor="retries">{t("registration.maxRetries")}</Label>
-                <Input
-                  id="retries"
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={maxRetries}
-                  onChange={(e) => setMaxRetries(Number(e.target.value))}
-                />
-              </div>
-
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               <div className="space-y-2">
                 <Label htmlFor="perCdk">
                   {aliasCapable
@@ -606,8 +560,8 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                 </p>
               </div>
 
-              <div className="flex items-end pb-2">
-                <div className="flex h-9 items-center gap-2 text-sm">
+              <div className="flex flex-col justify-end gap-2 pb-1 text-sm">
+                <div className="flex h-9 items-center gap-2">
                   <input
                     id="headless"
                     type="checkbox"
@@ -622,81 +576,22 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                     {t("registration.headless")}
                   </Label>
                 </div>
-              </div>
-            </div>
-
-            <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
-              <div className="flex h-9 items-center gap-2 text-sm">
-                <input
-                  id="smsEnabled"
-                  type="checkbox"
-                  checked={smsEnabled}
-                  onChange={(e) => setSmsEnabled(e.target.checked)}
-                  className="h-4 w-4 rounded border-border"
-                />
-                <Label
-                  htmlFor="smsEnabled"
-                  className="cursor-pointer font-normal"
-                >
-                  {t("registration.smsEnable")}
-                </Label>
-              </div>
-              {smsEnabled && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-2">
-                    <Label htmlFor="smsServiceId">
-                      {t("registration.smsServiceId")}
-                    </Label>
-                    <Input
-                      id="smsServiceId"
-                      type="number"
-                      min={1}
-                      placeholder={t("registration.smsServiceIdPlaceholder")}
-                      value={smsServiceId}
-                      onChange={(e) => setSmsServiceId(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="smsCountry">
-                      {t("registration.smsCountry")}
-                    </Label>
-                    <Select value={smsCountry} onValueChange={setSmsCountry}>
-                      <SelectTrigger id="smsCountry">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="vn">{t("sms.countryVn")}</SelectItem>
-                        <SelectItem value="la">{t("sms.countryLa")}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2 col-span-2">
-                    <Label htmlFor="smsNetwork">
-                      {t("registration.smsNetwork")}
-                    </Label>
-                    <Input
-                      id="smsNetwork"
-                      placeholder={t("registration.smsNetworkPlaceholder")}
-                      value={smsNetwork}
-                      onChange={(e) => setSmsNetwork(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2 col-span-2">
-                    <Label htmlFor="smsTokenOverride">
-                      {t("registration.smsTokenOverride")}
-                    </Label>
-                    <Input
-                      id="smsTokenOverride"
-                      type="password"
-                      placeholder={t(
-                        "registration.smsTokenOverridePlaceholder",
-                      )}
-                      value={smsTokenOverride}
-                      onChange={(e) => setSmsTokenOverride(e.target.value)}
-                    />
-                  </div>
+                <div className="flex h-9 items-center gap-2">
+                  <input
+                    id="smsEnabled"
+                    type="checkbox"
+                    checked={smsEnabled}
+                    onChange={(e) => setSmsEnabled(e.target.checked)}
+                    className="h-4 w-4 rounded border-border"
+                  />
+                  <Label
+                    htmlFor="smsEnabled"
+                    className="cursor-pointer font-normal"
+                  >
+                    {t("registration.smsEnable")}
+                  </Label>
                 </div>
-              )}
+              </div>
             </div>
 
             <Button
@@ -712,6 +607,254 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                     })
                   : t("registration.startRegistration")}
             </Button>
+          </TabsContent>
+
+          <TabsContent
+            value="settings"
+            className="mt-4 min-h-0 flex-1 space-y-4 overflow-auto pr-1"
+          >
+            <p className="text-sm text-muted-foreground">
+              {t("registration.settingsHint")}
+            </p>
+
+            <div className="space-y-3 rounded-lg border border-border p-3">
+              <h4 className="text-sm font-semibold">
+                {t("registration.networkMode")}
+              </h4>
+              <div className="space-y-2">
+                <Label htmlFor="networkModeSettings">
+                  {t("registration.networkMode")}
+                </Label>
+                <Select
+                  value={networkMode}
+                  onValueChange={(v) => setNetworkMode(v as NetworkMode)}
+                >
+                  <SelectTrigger id="networkModeSettings">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">
+                      {t("registration.networkModeNone")}
+                    </SelectItem>
+                    <SelectItem value="proxy">
+                      {t("registration.networkModeProxy")}
+                    </SelectItem>
+                    <SelectItem value="vpn">
+                      {t("registration.networkModeVpn")}
+                    </SelectItem>
+                    <SelectItem value="nord">
+                      {t("registration.networkModeNord")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {networkMode === "proxy" && (
+                <div className="space-y-2">
+                  <Label htmlFor="proxySettings">
+                    {t("registration.proxy")}
+                  </Label>
+                  <Input
+                    id="proxySettings"
+                    placeholder={t("registration.proxyPlaceholder")}
+                    value={proxyId}
+                    onChange={(e) => setProxyId(e.target.value)}
+                  />
+                </div>
+              )}
+
+              {networkMode === "vpn" && (
+                <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="vpnIdSettings">
+                      {t("registration.vpn")}
+                    </Label>
+                    <Select
+                      value={vpnId || undefined}
+                      onValueChange={setVpnId}
+                      disabled={isLoadingVpns || vpnConfigs.length === 0}
+                    >
+                      <SelectTrigger id="vpnIdSettings">
+                        <SelectValue
+                          placeholder={
+                            isLoadingVpns
+                              ? t("registration.vpnLoading")
+                              : vpnConfigs.length === 0
+                                ? t("registration.vpnEmpty")
+                                : t("registration.vpnPlaceholder")
+                          }
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {vpnConfigs.map((vpn) => (
+                          <SelectItem key={vpn.id} value={vpn.id}>
+                            {vpn.name} ({vpn.vpn_type})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {t("registration.vpnPerProfileHint")}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="vpnRotateEveryNSettings">
+                      {t("registration.rotateEveryN")}
+                    </Label>
+                    <Input
+                      id="vpnRotateEveryNSettings"
+                      type="number"
+                      min={0}
+                      max={50}
+                      value={rotateEveryN}
+                      onChange={(e) =>
+                        setRotateEveryN(Number(e.target.value) || 0)
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("registration.vpnRotateHint")}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {networkMode === "nord" && (
+                <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+                  <p className="text-xs text-muted-foreground">
+                    {t("registration.nordSystemWideWarning")}
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="nordLocation">
+                        {t("registration.nordLocation")}
+                      </Label>
+                      <Select
+                        value={
+                          nordLocations.some((l) => l.value === nordGroup)
+                            ? nordGroup
+                            : "custom"
+                        }
+                        onValueChange={(v) => {
+                          if (v === "custom") {
+                            if (
+                              nordLocations.some((l) => l.value === nordGroup)
+                            ) {
+                              setNordGroup("");
+                            }
+                            return;
+                          }
+                          setNordGroup(v);
+                        }}
+                      >
+                        <SelectTrigger id="nordLocation">
+                          <SelectValue
+                            placeholder={t(
+                              "registration.nordLocationPlaceholder",
+                            )}
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {nordLocations.map((loc) => (
+                            <SelectItem key={loc.value} value={loc.value}>
+                              {t(loc.labelKey)}
+                            </SelectItem>
+                          ))}
+                          <SelectItem value="custom">
+                            {t("registration.nordLocCustom")}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="rotateEveryN">
+                        {t("registration.rotateEveryN")}
+                      </Label>
+                      <Input
+                        id="rotateEveryN"
+                        type="number"
+                        min={0}
+                        max={50}
+                        value={rotateEveryN}
+                        onChange={(e) =>
+                          setRotateEveryN(Number(e.target.value) || 0)
+                        }
+                      />
+                    </div>
+                  </div>
+                  {(!nordLocations.some((l) => l.value === nordGroup) ||
+                    nordGroup === "") && (
+                    <div className="space-y-2">
+                      <Label htmlFor="nordGroupCustom">
+                        {t("registration.nordGroupCustom")}
+                      </Label>
+                      <Input
+                        id="nordGroupCustom"
+                        placeholder={t("registration.nordGroupPlaceholder")}
+                        value={nordGroup}
+                        onChange={(e) => setNordGroup(e.target.value)}
+                      />
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <Label htmlFor="nordServer">
+                      {t("registration.nordServerName")}
+                    </Label>
+                    <Input
+                      id="nordServer"
+                      placeholder={t("registration.nordServerPlaceholder")}
+                      value={nordServerName}
+                      onChange={(e) => setNordServerName(e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3 rounded-lg border border-border p-3">
+              <div className="space-y-2">
+                <Label htmlFor="retriesSettings">
+                  {t("registration.maxRetries")}
+                </Label>
+                <Input
+                  id="retriesSettings"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={maxRetries}
+                  onChange={(e) => setMaxRetries(Number(e.target.value))}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
+              <div className="flex h-9 items-center gap-2 text-sm">
+                <input
+                  id="smsEnabledSettings"
+                  type="checkbox"
+                  checked={smsEnabled}
+                  onChange={(e) => setSmsEnabled(e.target.checked)}
+                  className="h-4 w-4 rounded border-border"
+                />
+                <Label
+                  htmlFor="smsEnabledSettings"
+                  className="cursor-pointer font-normal"
+                >
+                  {t("registration.smsEnable")}
+                </Label>
+              </div>
+              <SmsProviderFields
+                enabled={smsEnabled}
+                country={smsCountry}
+                onCountryChange={setSmsCountry}
+                serviceId={smsServiceId}
+                onServiceIdChange={setSmsServiceId}
+                network={smsNetwork}
+                onNetworkChange={setSmsNetwork}
+                tokenOverride={smsTokenOverride}
+                onTokenOverrideChange={setSmsTokenOverride}
+                hasSavedToken={hasSavedSmsToken}
+              />
+            </div>
           </TabsContent>
 
           <TabsContent

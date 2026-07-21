@@ -157,7 +157,7 @@ export function GroupBadges({
         ref={scrollContainerRef}
         role="region"
         aria-label={t("groups.profileGroupsAriaLabel")}
-        className={`flex gap-2 overflow-x-auto pb-2 -mb-2 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+        className={`flex gap-2 overflow-x-auto pb-2 -mb-2 scrollbar-none ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
         onScroll={checkScrollPosition}
         onMouseDown={handleMouseDown}
       >

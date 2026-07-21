@@ -154,7 +154,8 @@ fn generate_tray_icons() {
   use resvg::tiny_skia::{Pixmap, Transform};
   use resvg::usvg::{Options, Tree};
   use std::fs;
-  use std::path::PathBuf;
+  use std::path::{Path, PathBuf};
+  use std::time::SystemTime;
 
   let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
   let icons_dir = PathBuf::from(&manifest_dir).join("icons");
@@ -168,12 +169,49 @@ fn generate_tray_icons() {
     return;
   }
 
+  // Generated into `icons/` which `pnpm tauri dev` watches. Rewriting these PNGs
+  // every compile updates mtime → Tauri restarts cargo → multi-minute rebuild loop.
+  // Only regenerate when an output is missing or older than the SVG source.
+  let output_names = [
+    "tray-icon-22.png",
+    "tray-icon-44.png",
+    "tray-icon-win-44.png",
+  ];
+  let svg_mtime = fs::metadata(&svg_path)
+    .and_then(|m| m.modified())
+    .unwrap_or(SystemTime::UNIX_EPOCH);
+  let needs_regen = output_names.iter().any(|name| {
+    let path = icons_dir.join(name);
+    match fs::metadata(&path).and_then(|m| m.modified()) {
+      Ok(mtime) => mtime < svg_mtime,
+      Err(_) => true,
+    }
+  });
+  if !needs_regen {
+    return;
+  }
+
   let svg_data = fs::read(&svg_path).expect("Failed to read tray-icon.svg");
   let options = Options {
     resources_dir: Some(icons_dir.clone()),
     ..Options::default()
   };
   let tree = Tree::from_data(&svg_data, &options).expect("Failed to parse SVG");
+
+  // Extra safety: even when regenerating, avoid mtime bumps if bytes match.
+  let write_png_if_changed = |path: &Path, png_bytes: &[u8]| {
+    if path
+      .exists()
+      .then(|| fs::read(path).ok())
+      .flatten()
+      .is_some_and(|existing| existing == png_bytes)
+    {
+      return;
+    }
+    fs::write(path, png_bytes).unwrap_or_else(|e| {
+      panic!("Failed to write {}: {e}", path.display());
+    });
+  };
 
   // Generate template icons at different sizes for macOS menu bar
   // 22x22 is standard, 44x44 is retina (@2x)
@@ -209,9 +247,8 @@ fn generate_tray_icons() {
     }
 
     let output_path = icons_dir.join(filename);
-    pixmap
-      .save_png(&output_path)
-      .expect("Failed to save tray icon PNG");
+    let png_bytes = pixmap.encode_png().expect("Failed to encode tray icon PNG");
+    write_png_if_changed(&output_path, &png_bytes);
   }
 
   // Generate a full-color icon for Windows tray (no template conversion)
@@ -226,8 +263,9 @@ fn generate_tray_icons() {
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
     let output_path = icons_dir.join("tray-icon-win-44.png");
-    pixmap
-      .save_png(&output_path)
-      .expect("Failed to save Windows tray icon PNG");
+    let png_bytes = pixmap
+      .encode_png()
+      .expect("Failed to encode Windows tray icon PNG");
+    write_png_if_changed(&output_path, &png_bytes);
   }
 }

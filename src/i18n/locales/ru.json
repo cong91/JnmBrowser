@@ -1826,7 +1826,12 @@
     "emailProviderSmsIosmq": "sms.iosmq.xyz",
     "emailProviderGmail123452026Hint": "Активируйте CDK на gmail.123452026.xyz и используйте +алиасы (до 6 аккаунтов на CDK).",
     "emailProviderSmsIosmqHint": "Активируйте карту MAIL на sms.iosmq.xyz (POST /api/v1/redeem), затем опрашивайте order/lookup для OTP. Один ящик на карту — без алиасов.",
-    "accountsPerCardSmsIosmqHint": "sms.iosmq.xyz выдаёт один ящик на карту MAIL (без +алиасов)."
+    "accountsPerCardSmsIosmqHint": "sms.iosmq.xyz выдаёт один ящик на карту MAIL (без +алиасов).",
+    "smsTokenConfigured": "Токен VI-OTP уже настроен в Настройки/SMS.",
+    "smsTokenMissing": "Сохранённый токен VI-OTP не найден. Сохраните его в настройках SMS или вставьте токен переопределения ниже.",
+    "smsTokenRequired": "SMS включён, но токен VI-OTP недоступен. Сохраните токен в настройках SMS или введите переопределение.",
+    "settingsTab": "Настройки",
+    "settingsHint": "VPN/proxy, Nord и SMS настраиваются здесь. На вкладке Register только включение."
   },
   "sms": {
     "title": "SMS / OTP проверка",
@@ -1867,7 +1872,11 @@
     "statusExpired": "Истёк",
     "historyEmpty": "Истории пока нет. Обновите после аренды номеров.",
     "copied": "Скопировано",
-    "copyFailed": "Не удалось скопировать"
+    "copyFailed": "Не удалось скопировать",
+    "autoSelectedOpenAI": "автоматически выбрано для OpenAI/ChatGPT",
+    "servicesLoadFailed": "Не удалось загрузить сервисы: {{error}}",
+    "networksLoadFailed": "Не удалось загрузить сети: {{error}}",
+    "networksFallbackHint": "Список сетей недоступен (показаны распространённые операторы). Оставьте пустым для любой сети."
   },
   "autoLogin": {
     "title": "ChatGPT/Codex Автоматический вход",
@@ -1920,9 +1929,21 @@
     "statusUpdated": "Обновлено аккаунтов: {{count}}",
     "selectedCount": "Выбрано: {{count}}",
     "selectAll": "Выбрать все",
+    "selectReadyForExport": "Выбрать готовые к экспорту аккаунты",
     "copied": "Скопировано",
     "copyFailed": "Не удалось скопировать",
     "showToken": "Показать токен",
-    "hideToken": "Скрыть токен"
+    "hideToken": "Скрыть токен",
+    "retryLogin": "Войти снова ({{count}})",
+    "retrying": "Вход...",
+    "retryStarted": "Повторный вход для {{count}} аккаунт(ов)",
+    "retryNoCredentials": "У выбранных аккаунтов нет сохранённого пароля. Вставьте учётные данные на вкладке Login или повторите после этого обновления, чтобы пароли сохранялись.",
+    "editAccount": "Редактировать аккаунт",
+    "editSaved": "Аккаунт обновлён",
+    "editEmailRequired": "Email обязателен",
+    "note": "Заметка",
+    "saving": "Сохранение...",
+    "tabSettings": "Настройки",
+    "settingsHint": "Сеть, Sub2API и SMS настраиваются здесь. На вкладке Login только включение."
   }
 }

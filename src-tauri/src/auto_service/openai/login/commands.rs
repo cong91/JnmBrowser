@@ -4,8 +4,8 @@ use std::sync::Arc;
 use super::engine::LoginEngine;
 use super::store::{
   delete_login_result, export_login_results_json, get_login_result, list_login_results,
-  list_successful_login_results, save_login_result, update_login_result_note,
-  update_login_result_status,
+  list_successful_login_results, save_login_result, update_login_result_fields,
+  update_login_result_note, update_login_result_status,
 };
 use super::sub2api::Sub2ApiClient;
 use super::task;
@@ -22,6 +22,7 @@ pub async fn start_auto_login(
 ) -> Result<String, String> {
   let mut config = config;
   config.parse_credentials();
+  config.normalize();
 
   // Resolve SMS token first: config override → encrypted settings store.
   let mut sms_token = config
@@ -125,6 +126,32 @@ pub fn update_login_result_note_cmd(account_id: String, note: String) -> Result<
   } else {
     Err(format!("Account {account_id} not found"))
   }
+}
+
+/// Edit stored login account fields (email/password/totp/note/phone/status).
+#[tauri::command]
+pub fn update_login_result_fields_cmd(
+  account_id: String,
+  email: Option<String>,
+  password: Option<String>,
+  totp_secret: Option<String>,
+  note: Option<String>,
+  phone_number: Option<String>,
+  status: Option<String>,
+) -> Result<LoginResult, String> {
+  let status = match status {
+    Some(s) if !s.trim().is_empty() => Some(parse_status(&s)?),
+    _ => None,
+  };
+  update_login_result_fields(
+    &account_id,
+    email,
+    password,
+    totp_secret,
+    note,
+    phone_number,
+    status,
+  )
 }
 
 /// Export stored login results as pretty JSON (1 or many accounts).

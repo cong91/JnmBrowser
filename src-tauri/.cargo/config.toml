@@ -1,4 +1,7 @@
 [build]
-# Omit jobs setting to use all cores
+# Limit parallel rustc jobs to avoid OOM/swap on machines with many cores but
+# limited RAM. Each rustc can use 1-3GB; 4 jobs keeps peak RAM ~8-12GB instead
+# of 20+ jobs exhausting 32GB and forcing Windows to swap (causes UI lag).
+jobs = 4
 
 incremental = true

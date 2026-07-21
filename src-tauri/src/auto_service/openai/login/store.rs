@@ -22,35 +22,108 @@ impl LoginResultStore {
     let _ = fs::create_dir_all(&base_dir);
 
     let mut accounts = HashMap::new();
+    let mut all_json_paths: Vec<PathBuf> = Vec::new();
+
     if let Ok(entries) = fs::read_dir(&base_dir) {
       for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-          if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(result) = serde_json::from_str::<LoginResult>(&content) {
-              let key = Self::result_key(&result);
-              accounts.insert(key, result);
-            }
-          }
+        if path.extension().is_none_or(|ext| ext != "json") {
+          continue;
+        }
+        all_json_paths.push(path.clone());
+        let Ok(content) = fs::read_to_string(&path) else {
+          continue;
+        };
+        let Ok(result) = serde_json::from_str::<LoginResult>(&content) else {
+          continue;
+        };
+        let key = Self::result_key(&result);
+        // Prefer newer / successful row when multiple files map to same email.
+        let replace = match accounts.get(&key) {
+          None => true,
+          Some(existing) => Self::is_preferable(&result, existing),
+        };
+        if replace {
+          accounts.insert(key, result);
         }
       }
     }
 
-    Self { accounts, base_dir }
+    let mut store = Self { accounts, base_dir };
+
+    // Rewrite under canonical email keys and drop legacy accountId-named files.
+    let snapshot: Vec<LoginResult> = store.accounts.values().cloned().collect();
+    for result in snapshot {
+      store.save(&result);
+    }
+    for path in all_json_paths {
+      let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+      if !store.accounts.contains_key(stem) {
+        let _ = fs::remove_file(path);
+      }
+    }
+
+    store
   }
 
+  /// Stable inventory key: always email (lowercased). Failures have empty account_id;
+  /// successes used to key by account_id and left a second file for the same email.
   fn result_key(result: &LoginResult) -> String {
-    if !result.account_id.is_empty() {
+    let email = result.email.trim().to_lowercase();
+    if !email.is_empty() {
+      email
+    } else if !result.account_id.is_empty() {
       result.account_id.clone()
-    } else if !result.email.is_empty() {
-      result.email.clone()
     } else {
       format!("unknown-{}", Utc::now().timestamp_millis())
     }
   }
 
+  /// Prefer success with tokens, else newer created_at.
+  fn is_preferable(candidate: &LoginResult, existing: &LoginResult) -> bool {
+    let cand_ok = candidate.success && !candidate.access_token.is_empty();
+    let exist_ok = existing.success && !existing.access_token.is_empty();
+    match (cand_ok, exist_ok) {
+      (true, false) => true,
+      (false, true) => false,
+      _ => candidate.created_at >= existing.created_at,
+    }
+  }
+
   fn save(&mut self, result: &LoginResult) {
     let key = Self::result_key(result);
+
+    // Drop any previous in-memory entries for the same email under a different key
+    // (legacy account_id keys) before inserting the canonical one.
+    let email = result.email.trim().to_lowercase();
+    if !email.is_empty() {
+      let stale_keys: Vec<String> = self
+        .accounts
+        .iter()
+        .filter(|(k, v)| {
+          *k != &key
+            && (v.email.trim().eq_ignore_ascii_case(&email)
+              || (!result.account_id.is_empty() && v.account_id == result.account_id)
+              || *k == &result.account_id)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+      for stale in stale_keys {
+        self.accounts.remove(&stale);
+        let stale_path = self.base_dir.join(format!("{stale}.json"));
+        let _ = fs::remove_file(stale_path);
+      }
+    }
+
+    // Also remove legacy file named by account_id if different from email key.
+    if !result.account_id.is_empty() && result.account_id != key {
+      let legacy = self.base_dir.join(format!("{}.json", result.account_id));
+      let _ = fs::remove_file(legacy);
+    }
+
     self.accounts.insert(key.clone(), result.clone());
 
     let file_path = self.base_dir.join(format!("{key}.json"));
@@ -66,21 +139,36 @@ impl LoginResultStore {
   }
 
   fn delete(&mut self, account_id: &str) -> bool {
+    let needle = account_id.trim().to_lowercase();
     let key = if self.accounts.contains_key(account_id) {
       account_id.to_string()
+    } else if self.accounts.contains_key(&needle) {
+      needle.clone()
     } else {
       self
         .accounts
         .iter()
-        .find(|(_, v)| v.account_id == account_id || v.email == account_id)
+        .find(|(_, v)| {
+          v.account_id == account_id
+            || v.email.eq_ignore_ascii_case(account_id)
+            || v.email.trim().to_lowercase() == needle
+        })
         .map(|(k, _)| k.clone())
         .unwrap_or_else(|| account_id.to_string())
     };
 
-    let removed = self.accounts.remove(&key).is_some();
+    let removed_val = self.accounts.remove(&key);
+    let removed = removed_val.is_some();
     if removed {
       let file_path = self.base_dir.join(format!("{key}.json"));
       let _ = fs::remove_file(file_path);
+      // Clean legacy accountId-named file if present.
+      if let Some(r) = removed_val {
+        if !r.account_id.is_empty() && r.account_id != key {
+          let legacy = self.base_dir.join(format!("{}.json", r.account_id));
+          let _ = fs::remove_file(legacy);
+        }
+      }
     }
     removed
   }
@@ -119,14 +207,94 @@ impl LoginResultStore {
     true
   }
 
+  /// Patch editable fields for a stored account.
+  /// When email changes, the row is re-keyed and the old email file is removed.
+  #[allow(clippy::too_many_arguments)]
+  fn update_fields(
+    &mut self,
+    account_id: &str,
+    email: Option<String>,
+    password: Option<String>,
+    totp_secret: Option<String>,
+    note: Option<String>,
+    phone_number: Option<String>,
+    status: Option<LoginResultStatus>,
+  ) -> Result<LoginResult, String> {
+    let Some(mut account) = self.get(account_id) else {
+      return Err(format!("Account {account_id} not found"));
+    };
+    let old_key = Self::result_key(&account);
+
+    if let Some(e) = email {
+      let e = e.trim().to_string();
+      if e.is_empty() {
+        return Err("Email cannot be empty".into());
+      }
+      // Collision: another row already owns this email key.
+      let new_key = e.to_lowercase();
+      if new_key != old_key {
+        if let Some(other) = self.accounts.get(&new_key) {
+          if other.account_id != account.account_id
+            || (!other.account_id.is_empty() && other.email != account.email)
+          {
+            // Same email key already used by a different stored row.
+            if other.email.eq_ignore_ascii_case(&account.email) {
+              // no-op
+            } else {
+              return Err(format!("Another stored account already uses email {e}"));
+            }
+          }
+        }
+      }
+      account.email = e;
+    }
+    if let Some(p) = password {
+      account.password = p;
+    }
+    if let Some(t) = totp_secret {
+      account.totp_secret = t.trim().replace(' ', "").to_uppercase();
+    }
+    if let Some(n) = note {
+      account.note = n;
+    }
+    if let Some(phone) = phone_number {
+      account.phone_number = phone.trim().to_string();
+    }
+    if let Some(s) = status {
+      account.status = s;
+      if account.status == LoginResultStatus::Exported {
+        account.exported_at = Some(Utc::now());
+      }
+    }
+
+    // If email changed, drop old key/file before saving under the new key.
+    let new_key = Self::result_key(&account);
+    if new_key != old_key {
+      self.accounts.remove(&old_key);
+      let old_path = self.base_dir.join(format!("{old_key}.json"));
+      let _ = fs::remove_file(old_path);
+    }
+
+    self.save(&account);
+    Ok(account)
+  }
+
   fn get(&self, account_id: &str) -> Option<LoginResult> {
     if let Some(v) = self.accounts.get(account_id) {
+      return Some(v.clone());
+    }
+    let needle = account_id.trim().to_lowercase();
+    if let Some(v) = self.accounts.get(&needle) {
       return Some(v.clone());
     }
     self
       .accounts
       .values()
-      .find(|v| v.account_id == account_id || v.email == account_id)
+      .find(|v| {
+        v.account_id == account_id
+          || v.email.eq_ignore_ascii_case(account_id)
+          || v.email.trim().to_lowercase() == needle
+      })
       .cloned()
   }
 }
@@ -160,6 +328,27 @@ pub fn update_login_result_status(
 
 pub fn update_login_result_note(account_id: &str, note: String) -> bool {
   STORE.lock().unwrap().update_note(account_id, note)
+}
+
+/// Update editable credential/profile fields for a stored login result.
+pub fn update_login_result_fields(
+  account_id: &str,
+  email: Option<String>,
+  password: Option<String>,
+  totp_secret: Option<String>,
+  note: Option<String>,
+  phone_number: Option<String>,
+  status: Option<LoginResultStatus>,
+) -> Result<LoginResult, String> {
+  STORE.lock().unwrap().update_fields(
+    account_id,
+    email,
+    password,
+    totp_secret,
+    note,
+    phone_number,
+    status,
+  )
 }
 
 /// Codex CLI official OAuth client id (matches login engine / Sub2API).
@@ -394,6 +583,8 @@ mod tests {
       status: LoginResultStatus::Available,
       note: String::new(),
       exported_at: None,
+      password: "secret".into(),
+      totp_secret: String::new(),
     };
 
     let account = login_result_to_sub2api_account(&result);
@@ -429,6 +620,8 @@ mod tests {
       status: LoginResultStatus::Available,
       note: String::new(),
       exported_at: None,
+      password: "secret".into(),
+      totp_secret: String::new(),
     };
     let payload = serde_json::json!({
       "type": "sub2api-data",
@@ -450,6 +643,22 @@ mod tests {
     assert!(payload["accounts"][0].get("accessToken").is_none());
   }
 
+  #[test]
+  fn result_key_prefers_email_over_account_id() {
+    let mut r = sample_result(LoginResultStatus::Available, true, "tok");
+    r.email = "User@X.com".into();
+    r.account_id = "acc-uuid".into();
+    assert_eq!(LoginResultStore::result_key(&r), "user@x.com");
+  }
+
+  #[test]
+  fn is_preferable_prefers_success_token() {
+    let ok = sample_result(LoginResultStatus::Available, true, "tok");
+    let bad = sample_result(LoginResultStatus::Invalid, false, "");
+    assert!(LoginResultStore::is_preferable(&ok, &bad));
+    assert!(!LoginResultStore::is_preferable(&bad, &ok));
+  }
+
   fn sample_result(status: LoginResultStatus, success: bool, token: &str) -> LoginResult {
     LoginResult {
       success,
@@ -466,6 +675,8 @@ mod tests {
       status,
       note: String::new(),
       exported_at: None,
+      password: "secret".into(),
+      totp_secret: String::new(),
     }
   }
 
