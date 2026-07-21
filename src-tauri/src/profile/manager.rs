@@ -1121,6 +1121,47 @@ impl ProfileManager {
     Ok(())
   }
 
+  fn update_profile_proxy_config(
+    &self,
+    profile: &BrowserProfile,
+    proxy_id: Option<&str>,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Ephemeral profiles create their runtime directory only when launched, so
+    // their saved proxy_id is resolved by BrowserRunner on the next launch.
+    if profile.ephemeral {
+      return Ok(());
+    }
+
+    let profiles_dir = self.get_profiles_dir();
+    let profile_path = profiles_dir.join(profile.id.to_string()).join("profile");
+
+    if let Some(proxy_id_ref) = proxy_id {
+      if let Some(proxy_settings) = PROXY_MANAGER.get_proxy_settings_by_id(proxy_id_ref) {
+        self
+          .apply_proxy_settings_to_profile(&profile_path, &proxy_settings, None)
+          .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("Failed to apply proxy settings: {e}").into()
+          })?;
+      } else {
+        // Proxy ID provided but proxy not found, disable proxy
+        self
+          .disable_proxy_settings_in_profile(&profile_path)
+          .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("Failed to disable proxy settings: {e}").into()
+          })?;
+      }
+    } else {
+      // No proxy ID provided, disable proxy
+      self
+        .disable_proxy_settings_in_profile(&profile_path)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+          format!("Failed to disable proxy settings: {e}").into()
+        })?;
+    }
+
+    Ok(())
+  }
+
   pub async fn update_profile_proxy(
     &self,
     app_handle: tauri::AppHandle,
@@ -1171,36 +1212,8 @@ impl ProfileManager {
       }
     }
 
-    // Update on-disk browser profile config immediately
-    if let Some(proxy_id_ref) = &proxy_id {
-      if let Some(proxy_settings) = PROXY_MANAGER.get_proxy_settings_by_id(proxy_id_ref) {
-        let profiles_dir = self.get_profiles_dir();
-        let profile_path = profiles_dir.join(profile.id.to_string()).join("profile");
-        self
-          .apply_proxy_settings_to_profile(&profile_path, &proxy_settings, None)
-          .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("Failed to apply proxy settings: {e}").into()
-          })?;
-      } else {
-        // Proxy ID provided but proxy not found, disable proxy
-        let profiles_dir = self.get_profiles_dir();
-        let profile_path = profiles_dir.join(profile.id.to_string()).join("profile");
-        self
-          .disable_proxy_settings_in_profile(&profile_path)
-          .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("Failed to disable proxy settings: {e}").into()
-          })?;
-      }
-    } else {
-      // No proxy ID provided, disable proxy
-      let profiles_dir = self.get_profiles_dir();
-      let profile_path = profiles_dir.join(profile.id.to_string()).join("profile");
-      self
-        .disable_proxy_settings_in_profile(&profile_path)
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-          format!("Failed to disable proxy settings: {e}").into()
-        })?;
-    }
+    // Update on-disk browser profile config immediately for persistent profiles.
+    self.update_profile_proxy_config(&profile, proxy_id.as_deref())?;
 
     // Emit profile update event so frontend UIs can refresh immediately (e.g. proxy manager)
     if let Err(e) = events::emit("profile-updated", &profile) {
@@ -1491,11 +1504,10 @@ impl ProfileManager {
         Ok(true)
       }
       Ok(None) => {
-        // No running instance found, clear process ID if set and stop proxy
-        if profile.ephemeral {
-          crate::ephemeral_dirs::remove_ephemeral_dir(&profile.id.to_string());
-        }
-
+        // Do NOT remove ephemeral dirs here. Chromium/Camoufox register their
+        // manager instance only AFTER CDP is ready, so a concurrent status poll
+        // can observe "not running" mid-launch and would wipe the dir the
+        // browser is still using. Ephemeral cleanup belongs to kill paths.
         let profiles_dir = self.get_profiles_dir();
         let profile_uuid_dir = profiles_dir.join(profile.id.to_string());
         let metadata_file = profile_uuid_dir.join("metadata.json");
@@ -1526,9 +1538,6 @@ impl ProfileManager {
       Err(e) => {
         // Error checking status, assume not running and clear process ID
         log::warn!("Warning: Failed to check Camoufox status: {e}");
-        if profile.ephemeral {
-          crate::ephemeral_dirs::remove_ephemeral_dir(&profile.id.to_string());
-        }
 
         let profiles_dir = self.get_profiles_dir();
         let profile_uuid_dir = profiles_dir.join(profile.id.to_string());
@@ -1615,11 +1624,8 @@ impl ProfileManager {
         Ok(true)
       }
       None => {
-        // No running instance found, clear process ID if set
-        if profile.ephemeral {
-          crate::ephemeral_dirs::remove_ephemeral_dir(&profile.id.to_string());
-        }
-
+        // Do NOT remove ephemeral dirs here — see check_camoufox_status.
+        // kill_browser_process owns ephemeral cleanup for dead workers.
         let profiles_dir = self.get_profiles_dir();
         let profile_uuid_dir = profiles_dir.join(profile.id.to_string());
         let metadata_file = profile_uuid_dir.join("metadata.json");
@@ -1923,6 +1929,30 @@ mod tests {
       path_str.contains("binaries"),
       "Binaries dir should contain binaries"
     );
+  }
+
+  #[test]
+  fn test_update_profile_proxy_skips_missing_ephemeral_profile_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let _data_guard = crate::app_dirs::set_test_data_dir(temp_dir.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let profile_id = uuid::Uuid::new_v4();
+    let profile = BrowserProfile {
+      id: profile_id,
+      name: "ephemeral-proxy-test".to_string(),
+      browser: "camoufox".to_string(),
+      version: "test".to_string(),
+      ephemeral: true,
+      ..BrowserProfile::default()
+    };
+
+    manager.update_profile_proxy_config(&profile, None).unwrap();
+
+    assert!(!manager
+      .get_profiles_dir()
+      .join(profile_id.to_string())
+      .join("profile")
+      .exists());
   }
 
   #[test]

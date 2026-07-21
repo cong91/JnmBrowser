@@ -12,6 +12,83 @@ const NORD_WG_DNS: &str = "103.86.96.100";
 const NORD_WG_PORT: u16 = 51820;
 const NORD_WG_KEEPALIVE: u16 = 25;
 
+/// Preferred Nord locations when ChatGPT rejects the current egress country.
+/// Order is intentional: Asia first, then common OpenAI-supported regions.
+pub const NORD_FALLBACK_COUNTRY_CODES: &[&str] = &[
+  "JP", "SG", "TW", "KR", "US", "CA", "GB", "DE", "NL", "FR", "AU",
+];
+
+/// Max automatic location switches per credential / alias attempt budget.
+pub const MAX_NORD_LOCATION_FALLBACKS: u32 = 3;
+
+/// Detect OpenAI "unsupported country/region/territory" style failures.
+pub fn is_unsupported_region_error(message: &str) -> bool {
+  let lower = message.to_ascii_lowercase();
+  if lower.contains("unsupported_country_region_territory") {
+    return true;
+  }
+  if lower.contains("country, region, or territory not supported") {
+    return true;
+  }
+  // request_forbidden alone is too broad; require region wording too.
+  if lower.contains("request_forbidden")
+    && (lower.contains("country") || lower.contains("region") || lower.contains("territory"))
+  {
+    return true;
+  }
+  false
+}
+
+/// Next allowlisted country code, skipping the current location and already-tried codes.
+pub fn next_fallback_country_code(current: Option<&str>, tried: &[String]) -> Option<&'static str> {
+  let current = current.map(str::trim).filter(|s| !s.is_empty());
+  NORD_FALLBACK_COUNTRY_CODES.iter().copied().find(|code| {
+    let same_current = current.is_some_and(|c| c.eq_ignore_ascii_case(code));
+    let already_tried = tried.iter().any(|t| t.trim().eq_ignore_ascii_case(code));
+    !same_current && !already_tried
+  })
+}
+
+/// Resolve a Nord country id from ISO-like country code (case-insensitive).
+pub fn resolve_country_id_by_code(countries: &[NordCountry], code: &str) -> Option<u32> {
+  let code = code.trim();
+  if code.is_empty() {
+    return None;
+  }
+  countries
+    .iter()
+    .find(|c| c.code.eq_ignore_ascii_case(code))
+    .map(|c| c.id)
+}
+
+/// Best-effort country code extraction from a display name like `Nord · Vietnam #46`.
+pub fn infer_country_code_from_vpn_name(name: &str) -> Option<String> {
+  let lower = name.to_ascii_lowercase();
+  let map = [
+    ("japan", "JP"),
+    ("singapore", "SG"),
+    ("taiwan", "TW"),
+    ("korea", "KR"),
+    ("united states", "US"),
+    ("usa", "US"),
+    ("canada", "CA"),
+    ("united kingdom", "GB"),
+    ("uk ", "GB"),
+    ("germany", "DE"),
+    ("netherlands", "NL"),
+    ("france", "FR"),
+    ("australia", "AU"),
+    ("vietnam", "VN"),
+    ("hong kong", "HK"),
+  ];
+  for (needle, code) in map {
+    if lower.contains(needle) {
+      return Some((*code).to_string());
+    }
+  }
+  None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NordWireGuardCredentials {
   pub nordlynx_private_key: String,
@@ -379,6 +456,83 @@ pub async fn build_rotated_nord_wireguard_conf(
   Ok((server, conf))
 }
 
+/// Rewrite a stored Nord WireGuard inventory conf to a different country and restart worker.
+///
+/// Keeps the existing Interface PrivateKey (session). Returns the selected server.
+pub async fn retarget_nord_vpn_to_country(
+  vpn_id: &str,
+  country_code: &str,
+) -> Result<NordWireGuardServer, String> {
+  let country_code = country_code.trim();
+  if country_code.is_empty() {
+    return Err("Country code is required".into());
+  }
+
+  let (private_key, avoid_station, avoid_pk, source) = {
+    let storage = crate::vpn::VPN_STORAGE
+      .lock()
+      .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+    let config = storage
+      .load_config(vpn_id)
+      .map_err(|e| format!("Load VPN config for retarget: {e}"))?;
+    let source = config.source.clone().unwrap_or_default();
+    // Allow plain nord and nord-ephemeral pool peers.
+    if !source.is_empty() && !source.starts_with("nord") {
+      return Err(format!(
+        "VPN {vpn_id} source={source:?} is not a Nord inventory conf"
+      ));
+    }
+    let private_key = extract_wireguard_private_key(&config.config_data)?;
+    let avoid_station = extract_wireguard_peer_endpoint_host(&config.config_data);
+    let avoid_pk = extract_wireguard_peer_public_key(&config.config_data);
+    (private_key, avoid_station, avoid_pk, source)
+  };
+
+  let countries = list_nord_countries().await?;
+  let country_id = resolve_country_id_by_code(&countries, country_code)
+    .ok_or_else(|| format!("Nord country code not found: {country_code}"))?;
+
+  let (server, new_conf) = build_rotated_nord_wireguard_conf(
+    &private_key,
+    avoid_station.as_deref(),
+    avoid_pk.as_deref(),
+    Some(country_id),
+  )
+  .await?;
+
+  {
+    let storage = crate::vpn::VPN_STORAGE
+      .lock()
+      .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+    storage
+      .update_config_data(vpn_id, &new_conf, Some(&default_nord_vpn_name(&server)))
+      .map_err(|e| format!("Save retargeted VPN config: {e}"))?;
+    // Ensure source remains nord-family even if older conf lacked it.
+    if source.is_empty() {
+      let _ = storage.update_config_meta(vpn_id, Some("nord".into()), None);
+    }
+  }
+
+  let _ = crate::vpn_worker_runner::stop_vpn_worker_by_vpn_id(vpn_id).await;
+  tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+  match crate::vpn_worker_runner::start_vpn_worker(vpn_id).await {
+    Ok(worker) => {
+      log::info!(
+        "Nord VPN retargeted to {} ({}) worker port {:?}",
+        server.hostname,
+        country_code,
+        worker.local_port
+      );
+    }
+    Err(e) => {
+      // Launch path will restart; still return success for conf rewrite.
+      log::warn!("vpn-worker restart after location retarget failed: {e}");
+    }
+  }
+
+  Ok(server)
+}
+
 /// Pick `count` servers preferring distinct stations (lowest load first).
 /// If fewer unique stations exist, cycles unique peers so the pool size is `count`.
 pub fn pick_distinct_nord_servers(
@@ -733,5 +887,55 @@ AllowedIPs = 0.0.0.0/0
     assert_eq!(extract_session_limit_from_json(&v), Some(6));
     let v2 = serde_json::json!({"foo": 1});
     assert_eq!(extract_session_limit_from_json(&v2), None);
+  }
+
+  #[test]
+  fn detects_unsupported_region_errors() {
+    assert!(is_unsupported_region_error(
+      r#"{"error":{"code":"unsupported_country_region_territory","message":"Country, region, or territory not supported","type":"request_forbidden"}}"#
+    ));
+    assert!(is_unsupported_region_error(
+      "request_forbidden: Country, region, or territory not supported"
+    ));
+    assert!(is_unsupported_region_error(
+      "Failed after 3 retries: unsupported_country_region_territory"
+    ));
+    assert!(!is_unsupported_region_error("invalid password"));
+    assert!(!is_unsupported_region_error("timeout waiting for OTP"));
+    assert!(!is_unsupported_region_error("request_forbidden"));
+  }
+
+  #[test]
+  fn next_fallback_skips_current_and_tried() {
+    assert_eq!(next_fallback_country_code(Some("VN"), &[]), Some("JP"));
+    assert_eq!(next_fallback_country_code(Some("JP"), &[]), Some("SG"));
+    assert_eq!(
+      next_fallback_country_code(Some("VN"), &["jp".into(), "SG".into()]),
+      Some("TW")
+    );
+    let tried: Vec<String> = NORD_FALLBACK_COUNTRY_CODES
+      .iter()
+      .map(|c| (*c).to_string())
+      .collect();
+    assert_eq!(next_fallback_country_code(Some("VN"), &tried), None);
+  }
+
+  #[test]
+  fn resolve_country_id_is_case_insensitive() {
+    let countries = vec![
+      NordCountry {
+        id: 108,
+        name: "Japan".into(),
+        code: "JP".into(),
+      },
+      NordCountry {
+        id: 195,
+        name: "Singapore".into(),
+        code: "SG".into(),
+      },
+    ];
+    assert_eq!(resolve_country_id_by_code(&countries, "jp"), Some(108));
+    assert_eq!(resolve_country_id_by_code(&countries, "SG"), Some(195));
+    assert_eq!(resolve_country_id_by_code(&countries, "US"), None);
   }
 }

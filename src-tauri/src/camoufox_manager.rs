@@ -2,6 +2,7 @@ use crate::browser_runner::BrowserRunner;
 use crate::camoufox::launcher::{CamoufoxLauncher, LaunchOptions};
 use crate::camoufox::{CamoufoxConfigBuilder, GeoIPOption, ScreenConstraints};
 use crate::profile::BrowserProfile;
+use playwright::api::Viewport;
 use playwright::api::{BrowserContext, Page};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -371,7 +372,49 @@ impl CamoufoxManager {
     let state = self.get_automation_state(profile_path).await?;
     let mut guard = state.lock().await;
     let pages = Self::list_pages_from_state(&mut guard).await?;
-    Ok(pages[guard.selected_tab_index].clone())
+    let page = pages[guard.selected_tab_index].clone();
+    // Ensure automation keeps working when the OS window is minimized/unfocused.
+    let _ = Self::prepare_page_for_background_automation(&page).await;
+    Ok(page)
+  }
+
+  /// Bring page forward, normalize viewport, and force visible/focus semantics.
+  /// Safe to call repeatedly; best-effort (never fails the launch path).
+  pub async fn prepare_page_for_background_automation(
+    page: &Page,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _ = page.bring_to_front().await;
+    // Force a real viewport so layout/input coordinates stay valid when minimized.
+    let needs_viewport = page
+      .viewport_size()
+      .ok()
+      .flatten()
+      .map(|v| v.width <= 0 || v.height <= 0)
+      .unwrap_or(true);
+    if needs_viewport {
+      let _ = page
+        .set_viewport_size(Viewport {
+          width: 1280,
+          height: 900,
+        })
+        .await;
+    }
+    // Override visibility/focus APIs that break when the window is not active.
+    let _ = page
+      .eval::<serde_json::Value>(
+        r#"(function(){
+          try {
+            Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+            Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+            if (typeof document.hasFocus === 'function') {
+              document.hasFocus = () => true;
+            }
+          } catch (_) {}
+          return true;
+        })()"#,
+      )
+      .await;
+    Ok(())
   }
 
   pub async fn list_pages(
@@ -792,6 +835,7 @@ impl CamoufoxManager {
       .bring_to_front()
       .await
       .map_err(|e| format!("Failed to activate initial Camoufox page: {e}"))?;
+    let _ = Self::prepare_page_for_background_automation(&page).await;
 
     let process_id = self
       .wait_for_camoufox_process_by_profile(&canonical_profile_path)
@@ -1178,26 +1222,39 @@ impl CamoufoxManager {
     // Clean up any dead instances before launching
     let _ = self.cleanup_dead_instances().await;
 
-    // For ephemeral profiles, write Firefox prefs to minimize disk writes
-    if override_profile_path.is_some() {
+    // Always ensure background-automation prefs exist (persistent contexts cannot
+    // take firefox_user_prefs via Playwright).
+    {
       let user_js_path = profile_path.join("user.js");
-      let prefs = concat!(
-        "user_pref(\"browser.cache.disk.enable\", false);\n",
-        "user_pref(\"browser.cache.memory.enable\", true);\n",
-        "user_pref(\"browser.sessionstore.resume_from_crash\", false);\n",
-        "user_pref(\"browser.sessionstore.max_tabs_undo\", 0);\n",
-        "user_pref(\"browser.sessionstore.max_windows_undo\", 0);\n",
-        "user_pref(\"places.history.enabled\", false);\n",
-        "user_pref(\"browser.formfill.enable\", false);\n",
-        "user_pref(\"signon.rememberSignons\", false);\n",
-        "user_pref(\"browser.bookmarks.max_backups\", 0);\n",
-        "user_pref(\"browser.shell.checkDefaultBrowser\", false);\n",
-        "user_pref(\"toolkit.crashreporter.enabled\", false);\n",
-        "user_pref(\"browser.pagethumbnails.capturing_disabled\", true);\n",
-        "user_pref(\"browser.download.manager.addToRecentDocs\", false);\n",
-      );
+      let mut prefs = String::new();
+      if let Ok(existing) = std::fs::read_to_string(&user_js_path) {
+        prefs = existing;
+      }
+      if override_profile_path.is_some() && !prefs.contains("browser.cache.disk.enable") {
+        prefs.push_str(concat!(
+          "user_pref(\"browser.cache.disk.enable\", false);\n",
+          "user_pref(\"browser.cache.memory.enable\", true);\n",
+          "user_pref(\"browser.sessionstore.resume_from_crash\", false);\n",
+          "user_pref(\"browser.sessionstore.max_tabs_undo\", 0);\n",
+          "user_pref(\"browser.sessionstore.max_windows_undo\", 0);\n",
+          "user_pref(\"places.history.enabled\", false);\n",
+          "user_pref(\"browser.formfill.enable\", false);\n",
+          "user_pref(\"signon.rememberSignons\", false);\n",
+          "user_pref(\"browser.bookmarks.max_backups\", 0);\n",
+          "user_pref(\"browser.shell.checkDefaultBrowser\", false);\n",
+          "user_pref(\"toolkit.crashreporter.enabled\", false);\n",
+          "user_pref(\"browser.pagethumbnails.capturing_disabled\", true);\n",
+          "user_pref(\"browser.download.manager.addToRecentDocs\", false);\n",
+        ));
+      }
+      if !prefs.contains("dom.min_background_timeout_value") {
+        if !prefs.ends_with('\n') && !prefs.is_empty() {
+          prefs.push('\n');
+        }
+        prefs.push_str(crate::camoufox::launcher::automation_background_user_js_lines());
+      }
       if let Err(e) = std::fs::write(&user_js_path, prefs) {
-        log::warn!("Failed to write ephemeral user.js: {e}");
+        log::warn!("Failed to write Camoufox user.js automation prefs: {e}");
       }
     }
 
@@ -1279,6 +1336,22 @@ mod tests {
     assert_eq!(default_config.fingerprint, None);
     assert_eq!(default_config.randomize_fingerprint_on_launch, None);
     assert_eq!(default_config.os, None);
+  }
+
+  #[test]
+  fn camoufox_automation_background_prefs_disable_timer_throttling() {
+    let prefs = crate::camoufox::launcher::automation_background_firefox_prefs();
+    assert_eq!(
+      prefs.get("dom.min_background_timeout_value"),
+      Some(&serde_json::json!(0))
+    );
+    assert_eq!(
+      prefs.get("dom.timeout.enable_budget_timer_throttling"),
+      Some(&serde_json::json!(false))
+    );
+    let lines = crate::camoufox::launcher::automation_background_user_js_lines();
+    assert!(lines.contains("dom.min_background_timeout_value"));
+    assert!(lines.contains("dom.timeout.enable_budget_timer_throttling"));
   }
 
   #[test]

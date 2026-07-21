@@ -132,6 +132,51 @@ pub struct LaunchOptions {
   pub debug: bool,
 }
 
+/// Firefox prefs that keep Camoufox responsive for automation when the window
+/// is minimized / unfocused (auto-login & auto-register).
+pub fn automation_background_firefox_prefs() -> HashMap<String, serde_json::Value> {
+  let mut prefs = HashMap::new();
+  // Don't throttle timers/requestAnimationFrame in background tabs/windows.
+  prefs.insert(
+    "dom.min_background_timeout_value".to_string(),
+    serde_json::json!(0),
+  );
+  prefs.insert(
+    "dom.min_background_timeout_value_without_budget_throttling".to_string(),
+    serde_json::json!(0),
+  );
+  prefs.insert(
+    "dom.timeout.enable_budget_timer_throttling".to_string(),
+    serde_json::json!(false),
+  );
+  prefs.insert(
+    "dom.timeout.background_throttling_max_budget".to_string(),
+    serde_json::json!(-1),
+  );
+  prefs.insert(
+    "dom.timeout.throttling_delay".to_string(),
+    serde_json::json!(0),
+  );
+  // Keep window focused/active semantics more stable for input automation.
+  prefs.insert(
+    "widget.disable-workspace-switch-animation".to_string(),
+    serde_json::json!(true),
+  );
+  prefs
+}
+
+/// Lines suitable for Firefox `user.js` / profile prefs.
+pub fn automation_background_user_js_lines() -> &'static str {
+  concat!(
+    "user_pref(\"dom.min_background_timeout_value\", 0);\n",
+    "user_pref(\"dom.min_background_timeout_value_without_budget_throttling\", 0);\n",
+    "user_pref(\"dom.timeout.enable_budget_timer_throttling\", false);\n",
+    "user_pref(\"dom.timeout.background_throttling_max_budget\", -1);\n",
+    "user_pref(\"dom.timeout.throttling_delay\", 0);\n",
+    "user_pref(\"widget.disable-workspace-switch-animation\", true);\n",
+  )
+}
+
 impl CamoufoxLauncher {
   /// Create a new Camoufox launcher.
   pub async fn new(executable_path: impl AsRef<Path>) -> Result<Self, LauncherError> {
@@ -187,6 +232,9 @@ impl CamoufoxLauncher {
 
     // Build Firefox user prefs
     let mut firefox_prefs = config.firefox_prefs.clone();
+    for (key, value) in automation_background_firefox_prefs() {
+      firefox_prefs.entry(key).or_insert(value);
+    }
     if let Some(user_prefs) = options.firefox_user_prefs {
       for (key, value) in user_prefs {
         firefox_prefs.insert(key, value);
@@ -270,13 +318,23 @@ impl CamoufoxLauncher {
       }
     }
 
-    // Build Firefox user prefs
-    let mut firefox_prefs = config.firefox_prefs.clone();
-    if let Some(user_prefs) = options.firefox_user_prefs {
-      for (key, value) in user_prefs {
-        firefox_prefs.insert(key, value);
+    // PersistentContextLauncher does not accept firefox_user_prefs. Ensure the
+    // profile has automation background prefs via user.js (caller may also write
+    // more prefs; we only append if missing).
+    let user_js_path = user_data_dir.as_ref().join("user.js");
+    if let Ok(mut existing) = std::fs::read_to_string(&user_js_path) {
+      if !existing.contains("dom.min_background_timeout_value") {
+        if !existing.ends_with('\n') && !existing.is_empty() {
+          existing.push('\n');
+        }
+        existing.push_str(automation_background_user_js_lines());
+        let _ = std::fs::write(&user_js_path, existing);
       }
+    } else {
+      let _ = std::fs::write(&user_js_path, automation_background_user_js_lines());
     }
+    // Keep options.firefox_user_prefs available for any future non-persistent path.
+    let _ = (&config.firefox_prefs, &options.firefox_user_prefs);
 
     // Get the Firefox browser type
     let firefox = self.playwright.firefox();

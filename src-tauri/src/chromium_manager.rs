@@ -130,6 +130,15 @@ impl ChromiumManager {
     }
   }
 
+  /// Flags that keep Chromium responsive for CDP automation when minimized/occluded.
+  fn automation_background_launch_args() -> Vec<String> {
+    vec![
+      "--disable-background-timer-throttling".to_string(),
+      "--disable-backgrounding-occluded-windows".to_string(),
+      "--disable-renderer-backgrounding".to_string(),
+    ]
+  }
+
   fn chromium_extension_launch_args(extension_paths: &[String]) -> Vec<String> {
     if extension_paths.is_empty() {
       return Vec::new();
@@ -988,8 +997,9 @@ impl ChromiumManager {
     };
     log::info!("Launching Chromium on CDP port {port} (detached)");
 
-    // Diagnostic: verify critical profile files and test cookie decryption
-    {
+    // Optional diagnostics for persistent profiles only. Ephemeral workers always
+    // start empty (no os_crypt_key/Cookies yet) — logging that is pure noise.
+    if !ephemeral {
       let profile_path_buf = std::path::PathBuf::from(profile_path);
       let key_path = profile_path_buf.join("os_crypt_key");
       let cookies_path = {
@@ -1006,13 +1016,12 @@ impl ChromiumManager {
 
       if key_path.exists() {
         let key_text = std::fs::read_to_string(&key_path).unwrap_or_default();
-        log::info!(
-          "Pre-launch: os_crypt_key present ({} bytes, content: '{}')",
-          key_text.len(),
-          key_text.trim()
+        log::debug!(
+          "Pre-launch: os_crypt_key present ({} bytes)",
+          key_text.len()
         );
       } else {
-        log::warn!("Pre-launch: os_crypt_key NOT FOUND");
+        log::debug!("Pre-launch: os_crypt_key not found yet (new or wiped profile)");
       }
 
       if cookies_path.exists() {
@@ -1031,7 +1040,7 @@ impl ChromiumManager {
           let total_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM cookies", [], |r| r.get(0))
             .unwrap_or(0);
-          log::info!(
+          log::debug!(
             "Pre-launch: Cookies DB has {} total cookies, {} encrypted",
             total_count,
             cookie_count
@@ -1055,11 +1064,13 @@ impl ChromiumManager {
                     &encryption_key,
                   );
                   match decrypted {
-                    Some(val) => log::info!(
-                      "Pre-launch: Cookie decryption SUCCEEDED for '{}' (host: {}, decrypted {} bytes)",
-                      name, host, val.len()
+                    Some(val) => log::debug!(
+                      "Pre-launch: Cookie decryption ok for '{}' (host: {}, {} bytes)",
+                      name,
+                      host,
+                      val.len()
                     ),
-                    None => log::error!(
+                    None => log::warn!(
                       "Pre-launch: Cookie decryption FAILED for '{}' (host: {}, encrypted {} bytes)",
                       name, host, encrypted.len()
                     ),
@@ -1068,11 +1079,11 @@ impl ChromiumManager {
               }
             }
           } else {
-            log::error!("Pre-launch: Failed to derive encryption key from os_crypt_key");
+            log::debug!("Pre-launch: could not derive encryption key from os_crypt_key");
           }
         }
       } else {
-        log::warn!("Pre-launch: Cookies NOT FOUND");
+        log::debug!("Pre-launch: Cookies not found yet (new or wiped profile)");
       }
     }
 
@@ -1086,7 +1097,9 @@ impl ChromiumManager {
       "--no-default-browser-check".to_string(),
       "--disable-background-mode".to_string(),
       "--disable-component-update".to_string(),
-      "--disable-background-timer-throttling".to_string(),
+    ];
+    args.extend(Self::automation_background_launch_args());
+    args.extend([
       "--crash-server-url=".to_string(),
       "--disable-updater".to_string(),
       "--disable-session-crashed-bubble".to_string(),
@@ -1096,7 +1109,7 @@ impl ChromiumManager {
       "--use-mock-keychain".to_string(),
       "--password-store=basic".to_string(),
       "--disable-non-proxied-udp".to_string(),
-    ];
+    ]);
 
     args.extend(Self::fingerprint_chromium_launch_args(profile, config));
 
@@ -1196,12 +1209,17 @@ impl ChromiumManager {
         let _ = self
           .send_cdp_command(ws_url, "Emulation.clearDeviceMetricsOverride", json!({}))
           .await;
+        // Keep document.hasFocus()/visibility semantics usable while the OS
+        // window is minimized or not the active foreground window.
         let _ = self
           .send_cdp_command(
             ws_url,
             "Emulation.setFocusEmulationEnabled",
-            json!({ "enabled": false }),
+            json!({ "enabled": true }),
           )
+          .await;
+        let _ = self
+          .send_cdp_command(ws_url, "Page.bringToFront", json!({}))
           .await;
         let media_features = Self::build_media_emulation_features(&fingerprint);
         let _ = self
@@ -1331,6 +1349,29 @@ impl ChromiumManager {
       }
     }
     None
+  }
+
+  /// Look up CDP port by the process id recorded at launch.
+  /// Prefer this over path matching for ephemeral workers: status-check races
+  /// can move/remove the dir mapping while the browser is still alive.
+  pub async fn get_cdp_port_by_pid(&self, process_id: u32) -> Option<u16> {
+    let inner = self.inner.lock().await;
+    for instance in inner.instances.values() {
+      if instance.process_id == Some(process_id) {
+        return instance.cdp_port;
+      }
+    }
+    None
+  }
+
+  /// Return any live CDP port if exactly one Chromium instance is tracked.
+  /// Useful when path lookup fails but the auto-login worker is the only browser.
+  pub async fn get_single_cdp_port(&self) -> Option<u16> {
+    let inner = self.inner.lock().await;
+    if inner.instances.len() != 1 {
+      return None;
+    }
+    inner.instances.values().next().and_then(|i| i.cdp_port)
   }
 
   pub async fn find_chromium_by_profile(&self, profile_path: &str) -> Option<ChromiumLaunchResult> {
@@ -1551,6 +1592,18 @@ mod tests {
   use super::ChromiumManager;
   use crate::profile::BrowserProfile;
   use serde_json::json;
+
+  #[test]
+  fn automation_launch_args_disable_background_throttling() {
+    let args = ChromiumManager::automation_background_launch_args();
+    assert!(args
+      .iter()
+      .any(|a| a == "--disable-background-timer-throttling"));
+    assert!(args
+      .iter()
+      .any(|a| a == "--disable-backgrounding-occluded-windows"));
+    assert!(args.iter().any(|a| a == "--disable-renderer-backgrounding"));
+  }
 
   #[test]
   fn test_chromium_extension_launch_args_empty() {
