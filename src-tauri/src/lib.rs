@@ -1536,6 +1536,151 @@ async fn generate_sample_fingerprint(
   }
 }
 
+/// Build the main app window. On Windows, a previous zombie instance can leave
+/// WebView2 user-data busy (HRESULT 0x800700AA). Clear a stale lockfile when no
+/// JnmBrowser process is alive, then retry once before failing loudly.
+fn create_main_window(app: &tauri::App) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
+  #[cfg(target_os = "windows")]
+  {
+    clear_stale_webview2_lock_if_safe();
+  }
+
+  let mut last_err = None;
+  for attempt in 0..2 {
+    if attempt > 0 {
+      log::warn!("Retrying main window creation after WebView2 failure...");
+      #[cfg(target_os = "windows")]
+      {
+        clear_stale_webview2_lock_if_safe();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+      }
+    }
+
+    let mut win_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+      .title("JnmBrowser")
+      // Larger default so auto-login/register dialogs and tables are readable.
+      .inner_size(1120.0, 720.0)
+      .min_inner_size(960.0, 600.0)
+      .resizable(true)
+      .fullscreen(false)
+      .center()
+      .focused(true)
+      .visible(true);
+
+    #[cfg(target_os = "windows")]
+    {
+      win_builder = win_builder.decorations(false);
+      // Debug builds isolate WebView2 under com.jnmbrowser-dev so `tauri dev`
+      // does not fight an installed release build for com.jnmbrowser\EBWebView
+      // (HRESULT 0x800700AA). Release builds keep Tauri's default directory.
+      if let Some(local) = dirs::data_local_dir() {
+        if let Some(data_dir) = main_webview_data_directory(&local, cfg!(debug_assertions)) {
+          win_builder = win_builder.data_directory(data_dir);
+        }
+      }
+    }
+
+    match win_builder.build() {
+      Ok(window) => {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(window);
+      }
+      Err(e) => {
+        let msg = e.to_string();
+        log::error!(
+          "failed to create main webview (attempt {}): {msg}",
+          attempt + 1
+        );
+        last_err = Some(e);
+        let busy = msg.contains("0x800700AA")
+          || msg.to_ascii_lowercase().contains("resource is in use")
+          || msg.to_ascii_lowercase().contains("is in use");
+        if !busy {
+          break;
+        }
+      }
+    }
+  }
+
+  Err(
+    last_err
+      .map(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+      .unwrap_or_else(|| "failed to create main webview".into()),
+  )
+}
+
+/// WebView2 user-data directory for the main window.
+///
+/// Debug builds (`tauri dev`, `cargo run`) isolate WebView2 under
+/// `com.jnmbrowser-dev` so they can coexist with an installed release build
+/// that owns `com.jnmbrowser\EBWebView`. Without isolation, starting dev while
+/// the installed app is running makes WebView2 fail with
+/// `HRESULT 0x800700AA ("The requested resource is in use")` because both
+/// builds share the same EBWebView user-data directory.
+///
+/// Release builds return `None` so Tauri falls back to its default
+/// `<LocalData>/<identifier>` directory, preserving existing profiles.
+#[cfg(target_os = "windows")]
+fn main_webview_data_directory(
+  local_data: &std::path::Path,
+  is_dev: bool,
+) -> Option<std::path::PathBuf> {
+  if is_dev {
+    Some(local_data.join("com.jnmbrowser-dev"))
+  } else {
+    None
+  }
+}
+
+#[cfg(target_os = "windows")]
+fn clear_stale_webview2_lock_if_safe() {
+  let Some(local) = dirs::data_local_dir() else {
+    return;
+  };
+  let is_dev = cfg!(debug_assertions);
+  let data_dir =
+    main_webview_data_directory(&local, is_dev).unwrap_or_else(|| local.join("com.jnmbrowser"));
+  let lock_path = data_dir.join("EBWebView").join("lockfile");
+  if !lock_path.exists() {
+    return;
+  }
+
+  // Release builds share `com.jnmbrowser` with other installed instances, so
+  // only clear the lock when no other JnmBrowser process is alive. Dev builds
+  // use an isolated `com.jnmbrowser-dev` directory that no other build touches,
+  // so a stale lock there is always safe to remove.
+  if !is_dev {
+    let system = sysinfo::System::new_with_specifics(
+      sysinfo::RefreshKind::nothing().with_processes(sysinfo::ProcessRefreshKind::everything()),
+    );
+    let self_pid = std::process::id();
+    let jnm_alive = system.processes().values().any(|proc| {
+      let name = proc.name().to_string_lossy().to_ascii_lowercase();
+      if !(name == "jnmbrowser.exe" || name == "jnmbrowser") {
+        return false;
+      }
+      proc.pid().as_u32() != self_pid
+    });
+    if jnm_alive {
+      log::warn!(
+        "WebView2 lockfile present and another JnmBrowser process is alive; not clearing {}",
+        lock_path.display()
+      );
+      return;
+    }
+  }
+
+  match std::fs::remove_file(&lock_path) {
+    Ok(()) => log::warn!("Removed stale WebView2 lockfile: {}", lock_path.display()),
+    Err(e) => log::warn!(
+      "Failed to remove WebView2 lockfile {}: {e}",
+      lock_path.display()
+    ),
+  }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let args: Vec<String> = env::args().collect();
@@ -1612,22 +1757,11 @@ pub fn run() {
         }
       }
 
-      // Create the main window programmatically
+      // Create the main window programmatically.
+      // On Windows, a previous crashed/zombie instance can leave WebView2 user-data
+      // busy (HRESULT 0x800700AA "resource is in use") so the shell never appears.
       #[allow(unused_variables)]
-      let win_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-        .title("JnmBrowser")
-        .inner_size(840.0, 500.0)
-        .resizable(false)
-        .fullscreen(false)
-        .center()
-        .focused(true)
-        .visible(true);
-
-      #[cfg(target_os = "windows")]
-      let win_builder = win_builder.decorations(false);
-
-      #[allow(unused_variables)]
-      let window = win_builder.build().unwrap();
+      let window = create_main_window(app)?;
 
       // Set transparent titlebar for macOS
       #[cfg(target_os = "macos")]
@@ -2404,6 +2538,7 @@ pub fn run() {
       auto_service::openai::login::commands::delete_login_result_cmd,
       auto_service::openai::login::commands::update_login_result_status_cmd,
       auto_service::openai::login::commands::update_login_result_note_cmd,
+      auto_service::openai::login::commands::update_login_result_fields_cmd,
       auto_service::openai::login::commands::export_login_results_cmd,
       auto_service::openai::login::commands::push_login_results_to_sub2api_cmd,
       // Sub2API settings commands
@@ -2463,6 +2598,18 @@ mod tests {
   fn test_codex_cli_powershell_script_detection() {
     let cli = super::CodexCli::new(PathBuf::from(r"C:\nvm4w\nodejs\codex.ps1"));
     assert!(matches!(cli.kind, super::CodexCliKind::PowerShellScript));
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn test_dev_webview_data_directory_is_isolated() {
+    let local_data = PathBuf::from(r"C:\Users\test\AppData\Local");
+
+    assert_eq!(
+      super::main_webview_data_directory(&local_data, true),
+      Some(local_data.join("com.jnmbrowser-dev"))
+    );
+    assert_eq!(super::main_webview_data_directory(&local_data, false), None);
   }
 
   fn check_unused_commands(verbose: bool) {
