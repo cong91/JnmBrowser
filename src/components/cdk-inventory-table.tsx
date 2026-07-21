@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuRefreshCw, LuTrash2 } from "react-icons/lu";
 import { Button } from "@/components/ui/button";
@@ -127,7 +127,7 @@ export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
             {records.map((row) => {
               const isOpen = expanded === row.cdk;
               return (
-                <tbody key={row.cdk} className="contents">
+                <Fragment key={row.cdk}>
                   <tr
                     className="cursor-pointer border-b hover:bg-muted/40"
                     onClick={() =>
@@ -221,7 +221,7 @@ export function CdkInventoryTable({ records, onRefresh, onDelete }: Props) {
                       </td>
                     </tr>
                   )}
-                </tbody>
+                </Fragment>
               );
             })}
           </tbody>

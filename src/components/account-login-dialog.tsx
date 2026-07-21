@@ -449,7 +449,10 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[min(92vh,820px)] w-[min(96vw,1100px)] max-w-none flex-col overflow-hidden">
+      <DialogContent
+        aria-describedby={undefined}
+        className="flex h-[min(92vh,820px)] w-[min(96vw,1100px)] max-w-none flex-col overflow-hidden"
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <LuLogIn className="h-5 w-5 text-primary" />

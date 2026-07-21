@@ -302,7 +302,9 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       rotateEveryN:
         networkMode === "nord" || networkMode === "vpn" ? rotateEveryN : 0,
       nordGroup:
-        networkMode === "nord" ? nordGroup.trim() || undefined : undefined,
+        networkMode === "nord" || networkMode === "vpn"
+          ? nordGroup.trim() || undefined
+          : undefined,
       nordServerName:
         networkMode === "nord" ? nordServerName.trim() || undefined : undefined,
       emailProvider,
@@ -322,7 +324,10 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[min(92vh,860px)] w-[min(96vw,1100px)] max-w-none flex-col overflow-hidden">
+      <DialogContent
+        aria-describedby={undefined}
+        className="flex h-[min(92vh,860px)] w-[min(96vw,1100px)] max-w-none flex-col overflow-hidden"
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <LuRocket className="h-5 w-5 text-primary" />

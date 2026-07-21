@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -164,6 +165,11 @@ impl StoredProxy {
   }
 }
 
+// Temporary browser PIDs for concurrent launches (before real PID is known).
+// Real OS PIDs never collide with this range on modern systems; concurrent
+// auto-reg workers previously all used PID 0/1 and stomped each other's maps.
+const TEMP_BROWSER_PID_BASE: u32 = 2_000_000_000;
+
 // Global proxy manager to track active proxies and stored proxy configurations
 pub struct ProxyManager {
   active_proxies: Mutex<HashMap<u32, ProxyInfo>>, // Maps browser process ID to proxy info
@@ -172,6 +178,8 @@ pub struct ProxyManager {
   // Track active proxy IDs by profile name for targeted cleanup
   profile_active_proxy_ids: Mutex<HashMap<String, String>>, // Maps profile name to proxy id
   stored_proxies: Mutex<HashMap<String, StoredProxy>>,      // Maps proxy ID to stored proxy
+  /// Monotonic counter for unique pre-launch temp PIDs (concurrency-safe).
+  next_temp_browser_pid: AtomicU32,
 }
 
 impl ProxyManager {
@@ -181,6 +189,7 @@ impl ProxyManager {
       profile_proxies: Mutex::new(HashMap::new()),
       profile_active_proxy_ids: Mutex::new(HashMap::new()),
       stored_proxies: Mutex::new(HashMap::new()),
+      next_temp_browser_pid: AtomicU32::new(TEMP_BROWSER_PID_BASE),
     };
 
     // Load stored proxies on initialization
@@ -1817,6 +1826,23 @@ impl ProxyManager {
     }
   }
 
+  /// Allocate a unique temporary browser PID for `start_proxy` before the real
+  /// OS PID is known. Concurrent auto-reg workers must not share key 0/1 or
+  /// `update_proxy_pid` will drop all but one mapping.
+  pub fn allocate_temp_browser_pid(&self) -> u32 {
+    // Wrap within the reserved high range so we never collide with real PIDs.
+    let next = self.next_temp_browser_pid.fetch_add(1, Ordering::Relaxed);
+    if next < TEMP_BROWSER_PID_BASE {
+      // Extremely unlikely wrap; reset and continue.
+      self
+        .next_temp_browser_pid
+        .store(TEMP_BROWSER_PID_BASE + 1, Ordering::Relaxed);
+      TEMP_BROWSER_PID_BASE
+    } else {
+      next
+    }
+  }
+
   // Update the PID mapping for an existing proxy
   pub fn update_proxy_pid(&self, old_pid: u32, new_pid: u32) -> Result<(), String> {
     let mut proxies = self.active_proxies.lock().unwrap();
@@ -2628,6 +2654,36 @@ mod tests {
 
     // Unknown PID returns None
     assert!(pm.get_active_proxy(9999).is_none());
+  }
+
+  #[test]
+  fn test_allocate_temp_browser_pid_is_unique_for_concurrency() {
+    let pm = ProxyManager::new();
+    let a = pm.allocate_temp_browser_pid();
+    let b = pm.allocate_temp_browser_pid();
+    let c = pm.allocate_temp_browser_pid();
+    assert_ne!(a, b);
+    assert_ne!(b, c);
+    assert_ne!(a, c);
+    // Reserved high range — must not collide with real OS PIDs used in tests.
+    assert!(a >= 2_000_000_000);
+    assert!(b >= 2_000_000_000);
+    assert!(c >= 2_000_000_000);
+
+    // Concurrent-style: three workers start proxy under unique temp keys, then
+    // remap to real PIDs — all three mappings must survive (old bug: shared 0).
+    pm.insert_active_proxy(a, make_proxy_info("px_s0", 9101, Some("worker-s0")));
+    pm.insert_active_proxy(b, make_proxy_info("px_s1", 9102, Some("worker-s1")));
+    pm.insert_active_proxy(c, make_proxy_info("px_s2", 9103, Some("worker-s2")));
+    pm.update_proxy_pid(a, 24600).unwrap();
+    pm.update_proxy_pid(b, 27244).unwrap();
+    pm.update_proxy_pid(c, 10188).unwrap();
+    assert_eq!(pm.get_active_proxy(24600).unwrap().id, "px_s0");
+    assert_eq!(pm.get_active_proxy(27244).unwrap().id, "px_s1");
+    assert_eq!(pm.get_active_proxy(10188).unwrap().id, "px_s2");
+    assert!(pm.get_active_proxy(a).is_none());
+    assert!(pm.get_active_proxy(b).is_none());
+    assert!(pm.get_active_proxy(c).is_none());
   }
 
   #[test]
