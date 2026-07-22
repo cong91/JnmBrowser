@@ -331,6 +331,10 @@ impl CdkStore {
 
   fn list_all(&self) -> Vec<CdkInventoryRecord> {
     let mut results: Vec<_> = self.records.values().cloned().collect();
+    for record in &mut results {
+      // Always recompute from the usage ledger + reservations; never trust disk.
+      record.remaining = self.remaining_capacity(&record.cdk);
+    }
     results.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     results
   }
@@ -845,6 +849,35 @@ mod tests {
         .copied(),
       None
     );
+  }
+
+  #[test]
+  fn list_all_enriches_remaining_from_usage_and_reservations() {
+    let temp = TempDir::new().unwrap();
+    let store = test_store(&temp);
+    {
+      let mut locked = store.lock().unwrap();
+      locked.usage.insert(usage_key("MAIL-REM"), 2);
+      locked.persist_usage().unwrap();
+      locked.save(&CdkInventoryRecord::new("MAIL-REM", 3, "task-list"));
+      assert_eq!(locked.remaining_capacity("MAIL-REM"), 4);
+    }
+
+    let listed = store.lock().unwrap().list_all();
+    let row = listed
+      .iter()
+      .find(|r| canonical_cdk(&r.cdk) == "MAIL-REM")
+      .expect("MAIL-REM row");
+    assert_eq!(row.remaining, 4);
+
+    // Active reservation of 1 reduces remaining to 3 while held.
+    let _hold = reserve_slots_in_store(&store, &["MAIL-REM".into()], "task-hold", 1).unwrap();
+    let listed2 = store.lock().unwrap().list_all();
+    let row2 = listed2
+      .iter()
+      .find(|r| canonical_cdk(&r.cdk) == "MAIL-REM")
+      .expect("MAIL-REM row");
+    assert_eq!(row2.remaining, 3);
   }
 
   #[test]

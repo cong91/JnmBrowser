@@ -1824,7 +1824,17 @@
     "smsTokenMissing": "No saved VI-OTP token found. Save it in SMS settings, or paste a token override below.",
     "smsTokenRequired": "SMS is enabled but no VI-OTP token is available. Save a token in SMS settings or enter an override.",
     "settingsTab": "Settings",
-    "settingsHint": "Configure VPN/proxy, Nord, and SMS here. The Register tab only enables options."
+    "settingsHint": "Configure VPN/proxy, Nord, and SMS here. The Register tab only enables options.",
+    "cdkRemaining": "Remaining",
+    "cdkRemainingOfMax": "Remaining (of {{max}})",
+    "cdkTopUp": "Top-up",
+    "cdkTopUpTitle": "Continue this CDK",
+    "cdkTopUpHint": "Request more accounts up to remaining free slots. History is kept.",
+    "cdkTopUpDisabledFull": "No free slots left (max 6). Delete stats to fully reset quota.",
+    "cdkTopUpDisabledRunning": "Registration still running for this CDK.",
+    "cdkPickFromInventory": "Use CDK from stats",
+    "cdkPickPlaceholder": "Select a CDK with free slots…",
+    "cdkRawEntryHint": "Or paste new CDK/card codes below"
   },
   "sms": {
     "title": "SMS / OTP Verification",

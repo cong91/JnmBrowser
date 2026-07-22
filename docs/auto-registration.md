@@ -93,11 +93,25 @@ Every CDK used is persisted under app data `cdk_inventory/`:
 | `freeTrialYes` | free-trial eligible successes |
 | `freeTrialNo` | registered but **no** free trial (saved, status invalid) |
 | `failed` | hard failures after retries |
+| `remaining` | Free slots left for this card (**ledger-backed**, 0–6; recomputed on list) |
 | `accounts[]` | per-email detail (success / free trial / error) |
 
 UI: Auto Registration → **CDK stats** tab. Commands: `list_cdk_inventory_cmd`, `delete_cdk_inventory_cmd`.
 
-Each canonical card (`trim` + case-insensitive) has a lifetime budget of six logical account slots. Active tasks reserve slots atomically so the same card cannot be over-allocated concurrently; full-flow retries reuse one slot and one account identity. The usage ledger stores only one-way SHA-256 card identifiers and is kept separately from the CDK stats rows, so deleting a stats row does not reset the provider/card quota.
+Each canonical card (`trim` + case-insensitive) has a lifetime budget of six logical account slots. Active tasks reserve slots atomically so the same card cannot be over-allocated concurrently; full-flow retries reuse one slot and one account identity. The usage ledger stores only one-way SHA-256 card identifiers and is the **quota source of truth** (`remaining = 6 − used − reserved`).
+
+#### Continue / Top-up (partial CDK)
+
+When a batch ends early (`attempted` below what you wanted, or free slots left under the 6-cap):
+
+1. Open **CDK stats** and check **Remaining**.
+2. Click **Top-up** on a row with remaining > 0 (disabled while `status=running` or remaining is 0).
+3. The Register tab prefills that CDK and clamps **accounts per CDK** to remaining. History (`accounts[]`, free-trial counts, base email) is **kept**.
+4. Start again — the engine still clamps via `cdk_remaining_capacity` / slot reservation.
+
+**Delete** on a CDK stats row is a **full reset**: it removes the stats history **and** clears that card’s usage-ledger entry so quota returns to 6 free slots. Prefer Top-up when you only need more accounts without wiping history.
+
+Raw multi-line CDK entry still works for brand-new cards and multi-CDK batches.
 
 ### Via Tauri Commands
 

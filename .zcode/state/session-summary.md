@@ -1,6 +1,6 @@
 ---
 purpose: Anchored session summary (survives across turns)
-updated: 2026-07-16
+updated: 2026-07-22
 source: generated-by-zcode-starterkit-session-summary-hook
 ---
 
@@ -9,26 +9,7 @@ source: generated-by-zcode-starterkit-session-summary-hook
 ## State
 active
 
-## Files Read (35)
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\AGENTS.md
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\app_dirs.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\proxy_storage.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\lib.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\synchronizer.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\hooks\use-sync-session.ts
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\components\sync-follower-dialog.tsx
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\types.ts
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\capture.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\components\profile-data-table.tsx
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\app\page.tsx
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\components\recorder-dialog.tsx
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\commands.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\browser.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\storage.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\dns_blocklist.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.beads\artifacts\jnmbrowser-8bo\prd.json
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\components\profile-info-dialog.tsx
+## Files Read (40)
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\MCP_全阶段开发计划书.md
 - C:\Users\PC\.zcode\cli\exec\sess_d34a2b9d-8c5a-4165-8c75-3d72b46e016a\call_00_oEkUPDDMSM4oQXHGvPl54503-stdout.log
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\camoufox_manager.rs
@@ -45,11 +26,32 @@ active
 - C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/engine.rs
 - C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/hooks/use-registration-events.ts
 - C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/account-registration-dialog.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\package.json
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\issues.jsonl
+- C:\Users\mrc\Documents\projects\JnmBrowser\docs\auto-registration.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\engine.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\types.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\task.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\commands.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\email\mod.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\email\gmail_123452026.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\email\sms_iosmq.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\store.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\cdk-inventory-table.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\account-registration-dialog.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\hooks\use-registration-events.ts
+- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\artifacts\audit-recorder\audit.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\artifacts\audit-recorder\audit-cdk-quota.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-cnu\prd.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\config.yaml
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\metadata.json
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-cnu\prd.json
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-cnu\progress.txt
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\prd.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-8qs\plan.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\plan.md
 
-## Files Modified (23)
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\AGENTS.md — ## Gotchas
-
-- **Proxy binary**: `donut-proxy` must be copied before dev/build. T
+## Files Modified (30)
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\app_dirs.rs — assert!(dns_blocklist_dir().ends_with("dns_blocklists"));
     assert!(recordings
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder.rs — /// Internal session state held by the manager.
@@ -99,19 +101,42 @@ path = "tests/vpn_integration.rs"
 [[test]]
 na
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\tauri.conf.json —     "beforeBuildCommand": "node scripts/tauri-before-build.mjs",
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/registration-progress-card.tsx —             <LuCheck className="h-5 w-5 text-success" />
-            ) : isFaile
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/engine.rs —   // -----------------------------------------------------------------------
-  /
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/hooks/use-registration-events.ts — export interface RegistrationProgress {
-  taskId: string;
-  cdkIndex: number;
-  
+- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/registration-progress-card.tsx —             <CredentialRow label={t("registration.accessToken")} value={progress
+- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/engine.rs — }
+
+// --------------------------------------------------------------------------
+- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/hooks/use-registration-events.ts — export interface RegistrationResult {
+  success: boolean;
+  email: string;
+  pas
 - C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/account-registration-dialog.tsx —             <Button
               className="w-full"
               onClick={hand
+- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/types.rs —   pub account_id: String,
+  pub access_token: String,
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\types.rs —       created_at: now,
+      updated_at: now,
+      task_id: task_id.to_string()
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\store.rs —   #[test]
+  fn release_slot_without_claim_is_noop_on_usage() {
+    let temp = Te
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\engine.rs —       let msg = format!(
+        "All CDKs are at max capacity ({MAX_ACCOUNTS_PE
+- C:\Users\mrc\Documents\projects\JnmBrowser\docs\auto-registration.md — Every CDK used is persisted under app data `cdk_inventory/`:
 
-## Files Created (12)
+| Field | Meaning 
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\hooks\use-registration-events.ts — export interface CdkInventoryRecord {
+  cdk: string;
+  baseEmail: string;
+  targ
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\account-registration-dialog.tsx —                 <Input
+                  id="perCdk"
+                  type="num
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\cdk-inventory-table.tsx —                             title={
+                              isRunning
+    
+
+## Files Created (16)
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.zcode\specs\action-recording\audit.md
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\types.rs
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\inject_script.rs
@@ -123,7 +148,11 @@ na
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.beads\artifacts\jnmbrowser-8bo\progress.txt
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\tests\recorder_integration.rs
 - C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.zcode\artifacts\audit-recorder\audit.md
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/types.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\artifacts\audit-recorder\audit-cdk-quota.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\prd.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\prd.json
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\progress.txt
+- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\plan.md
 
 ## Decisions (0)
 - (none)

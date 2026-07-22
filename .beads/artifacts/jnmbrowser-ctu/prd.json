@@ -1,0 +1,135 @@
+{
+  "beadId": "jnmbrowser-ctu",
+  "prdName": "cdk-inventory-picker-top-up-mode",
+  "tasks": [
+    {
+      "id": "backend-1",
+      "category": "backend",
+      "description": "List inventory (or companion DTO) includes ledger-backed remaining slots per CDK (0..6) using the same calculation as cdk_remaining_capacity; unit tests cover partial used/reserved cases.",
+      "steps": [
+        "cargo test --manifest-path src-tauri/Cargo.toml --lib auto_service::openai::register::store::tests",
+        "Assert remaining decreases with used/reserved; full CDK reports 0"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/auto_service/openai/register/store.rs",
+          "src-tauri/src/auto_service/openai/register/types.rs",
+          "src-tauri/src/auto_service/openai/register/commands.rs",
+          "src-tauri/src/lib.rs"
+        ]
+      }
+    },
+    {
+      "id": "frontend-1",
+      "category": "frontend",
+      "description": "CdkInventoryTable shows remaining and a Continue/Top-up control when remaining > 0; Delete remains for full clear; callback notifies parent with cdk + remaining.",
+      "steps": [
+        "Typecheck/biome clean for touched files",
+        "UI: remaining visible; Top-up disabled or hidden when remaining=0"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["backend-1"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src/components/cdk-inventory-table.tsx",
+          "src/hooks/use-registration-events.ts"
+        ]
+      }
+    },
+    {
+      "id": "frontend-2",
+      "category": "frontend",
+      "description": "Registration dialog supports selecting an existing inventory CDK (picker/top-up mode), prefills code, defaults and clamps accountsPerCdk to remaining; raw multi-CDK entry still works for new batches; start invokes engine without requiring delete.",
+      "steps": [
+        "Top-up path cannot submit accountsPerCdk > remaining for selected CDK",
+        "History retained path: same CDK row still listed after top-up start (no delete)"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["frontend-1"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src/components/account-registration-dialog.tsx",
+          "src/hooks/use-registration-events.ts"
+        ]
+      }
+    },
+    {
+      "id": "i18n-1",
+      "category": "i18n",
+      "description": "All 7 locales include new registration/CDK remaining and top-up strings (non-empty); docs/auto-registration.md documents remaining, Continue/Top-up, and that delete is full reset.",
+      "steps": [
+        "Every new key exists in all 7 locales with non-empty values",
+        "No t(key, fallback) usage",
+        "Docs mention continue/top-up and remaining capacity"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": [
+          "src/i18n/locales/en.json",
+          "src/i18n/locales/es.json",
+          "src/i18n/locales/fr.json",
+          "src/i18n/locales/ja.json",
+          "src/i18n/locales/pt.json",
+          "src/i18n/locales/ru.json",
+          "src/i18n/locales/zh.json",
+          "docs/auto-registration.md"
+        ]
+      }
+    },
+    {
+      "id": "backend-2",
+      "category": "backend",
+      "description": "When a CDK has remaining=0, engine messages guide users to free capacity via Delete (full reset) or note max 6 — not the only path for partial continue (partial continue is UI-led).",
+      "steps": [
+        "Logs/messages no longer imply delete is required for partial remaining cases",
+        "Full capacity still refuses additional reservations"
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": true,
+        "conflicts_with": [],
+        "files": ["src-tauri/src/auto_service/openai/register/engine.rs"]
+      }
+    }
+  ],
+  "context": {
+    "patterns": [
+      "Quota: usage ledger + reservations in register/store.rs",
+      "Engine retry-cap clamps per_cdk_target via cdk_remaining_capacity",
+      "UI inventory tables: cdk-inventory-table + account-registration-dialog tabs",
+      "i18n: registration.* in 7 locales"
+    ],
+    "keyFiles": [
+      "src-tauri/src/auto_service/openai/register/store.rs",
+      "src-tauri/src/auto_service/openai/register/engine.rs",
+      "src/components/cdk-inventory-table.tsx",
+      "src/components/account-registration-dialog.tsx",
+      ".zcode/artifacts/audit-recorder/audit-cdk-quota.md"
+    ],
+    "nonGoals": [
+      "reset_cdk_usage (quota-only reset)",
+      "Change MAX_ACCOUNTS_PER_CDK",
+      "Auto-continue without user action",
+      "Merge inventory tables"
+    ]
+  },
+  "beadMetadata": {
+    "depends_on": [],
+    "parallel": false,
+    "conflicts_with": [],
+    "blocks": [],
+    "estimated_hours": 8
+  }
+}

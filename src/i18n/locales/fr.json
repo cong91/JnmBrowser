@@ -1824,7 +1824,17 @@
     "smsTokenMissing": "Aucun jeton VI-OTP enregistré. Enregistrez-le dans les paramètres SMS, ou collez un jeton de remplacement ci-dessous.",
     "smsTokenRequired": "Le SMS est activé mais aucun jeton VI-OTP n’est disponible. Enregistrez un jeton dans les paramètres SMS ou saisissez un remplacement.",
     "settingsTab": "Paramètres",
-    "settingsHint": "Configurez VPN/proxy, Nord et SMS ici. L’onglet Register active seulement les options."
+    "settingsHint": "Configurez VPN/proxy, Nord et SMS ici. L’onglet Register active seulement les options.",
+    "cdkRemaining": "Restants",
+    "cdkRemainingOfMax": "Restants (sur {{max}})",
+    "cdkTopUp": "Compléter",
+    "cdkTopUpTitle": "Continuer ce CDK",
+    "cdkTopUpHint": "Demandez plus de comptes jusqu'aux emplacements restants. L'historique est conservé.",
+    "cdkTopUpDisabledFull": "Plus d'emplacements libres (max 6). Supprimez les stats pour réinitialiser le quota.",
+    "cdkTopUpDisabledRunning": "L'enregistrement de ce CDK est encore en cours.",
+    "cdkPickFromInventory": "Utiliser un CDK des stats",
+    "cdkPickPlaceholder": "Sélectionnez un CDK avec des emplacements libres…",
+    "cdkRawEntryHint": "Ou collez de nouveaux codes CDK/carte ci-dessous"
   },
   "sms": {
     "title": "Vérification SMS / OTP",

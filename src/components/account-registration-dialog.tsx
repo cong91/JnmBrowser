@@ -84,6 +84,8 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     "gmail.123452026.xyz",
   );
   const [activeTab, setActiveTab] = useState("register");
+  /** When set, Start clamps accountsPerCdk to this remaining budget for the selected CDK. */
+  const [topUpRemaining, setTopUpRemaining] = useState<number | null>(null);
 
   const effectiveAccountsPerCdk = clampAccountsPerCard(
     emailProvider,
@@ -236,13 +238,82 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
 
-  const cdkCount = parseCdks(cdkText).length;
-  const totalAccounts = cdkCount * effectiveAccountsPerCdk;
+  const remainingByCdk = (() => {
+    const map = new Map<string, number>();
+    for (const row of cdkInventory) {
+      map.set(row.cdk.trim().toUpperCase(), row.remaining ?? 0);
+    }
+    return map;
+  })();
+
+  const topUpOptions = cdkInventory.filter(
+    (r) => (r.remaining ?? 0) > 0 && r.status !== "running",
+  );
+
+  const parsedCdks = parseCdks(cdkText);
+  const cdkCount = parsedCdks.length;
+
+  /** Live remaining for a single known inventory CDK (prefer list over top-up snapshot). */
+  const liveSingleRemaining = (() => {
+    if (parsedCdks.length !== 1) return null;
+    const key = parsedCdks[0].trim().toUpperCase();
+    if (remainingByCdk.has(key)) {
+      return remainingByCdk.get(key) ?? 0;
+    }
+    if (topUpRemaining != null) return topUpRemaining;
+    return null;
+  })();
+
+  const accountsPerCdkCap =
+    liveSingleRemaining != null
+      ? Math.max(0, Math.min(6, liveSingleRemaining))
+      : 6;
+
+  const displayAccountsPerCdk =
+    liveSingleRemaining != null
+      ? Math.min(effectiveAccountsPerCdk, Math.max(0, liveSingleRemaining))
+      : effectiveAccountsPerCdk;
+
+  const totalAccounts = cdkCount * Math.max(displayAccountsPerCdk, 0);
+
+  const resolveStartAccountsPerCdk = (cdks: string[]): number => {
+    let n = effectiveAccountsPerCdk;
+    if (cdks.length === 1) {
+      const key = cdks[0].trim().toUpperCase();
+      const rem = remainingByCdk.has(key)
+        ? (remainingByCdk.get(key) ?? 0)
+        : topUpRemaining;
+      if (typeof rem === "number") {
+        n = Math.min(n, Math.max(0, rem));
+      }
+    }
+    return n;
+  };
+
+  const handleTopUp = (cdk: string, remaining: number) => {
+    if (remaining < 1) {
+      toast.error(t("registration.cdkTopUpDisabledFull"));
+      return;
+    }
+    setCdkText(cdk);
+    setAccountsPerCdk(clampAccountsPerCard(emailProvider, remaining));
+    setTopUpRemaining(remaining);
+    setActiveTab("register");
+    toast.message(t("registration.cdkTopUpTitle"), {
+      description: t("registration.cdkTopUpHint"),
+    });
+  };
 
   const handleStart = async () => {
     const cdks = parseCdks(cdkText);
     if (cdks.length === 0) {
       toast.error(t("registration.cardCodesRequired"));
+      return;
+    }
+
+    const accountsPerCdkForStart = resolveStartAccountsPerCdk(cdks);
+    if (accountsPerCdkForStart < 1) {
+      toast.error(t("registration.cdkTopUpDisabledFull"));
       return;
     }
 
@@ -274,7 +345,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
         networkMode === "proxy" ? proxyId.trim() || undefined : undefined,
       vpnId: networkMode === "vpn" ? vpnId.trim() || undefined : undefined,
       maxRetries,
-      accountsPerCdk: effectiveAccountsPerCdk,
+      accountsPerCdk: accountsPerCdkForStart,
       headless,
       concurrency:
         networkMode === "nord"
@@ -413,14 +484,71 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                     ? t("registration.mailCardLabel")
                     : t("registration.cdkLabel")}
                 </Label>
+                {topUpOptions.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cdkPick" className="text-xs font-normal">
+                      {t("registration.cdkPickFromInventory")}
+                    </Label>
+                    <Select
+                      value={(() => {
+                        const codes = parseCdks(cdkText);
+                        if (codes.length !== 1) return undefined;
+                        const key = codes[0].trim().toUpperCase();
+                        return topUpOptions.some(
+                          (r) => r.cdk.trim().toUpperCase() === key,
+                        )
+                          ? key
+                          : undefined;
+                      })()}
+                      onValueChange={(v) => {
+                        if (!v) return;
+                        const row = topUpOptions.find(
+                          (r) => r.cdk.trim().toUpperCase() === v,
+                        );
+                        if (row) {
+                          handleTopUp(row.cdk, row.remaining ?? 0);
+                        }
+                      }}
+                    >
+                      <SelectTrigger id="cdkPick">
+                        <SelectValue
+                          placeholder={t("registration.cdkPickPlaceholder")}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {topUpOptions.map((row) => (
+                          <SelectItem
+                            key={row.cdk}
+                            value={row.cdk.trim().toUpperCase()}
+                          >
+                            {row.cdk} · {row.remaining ?? 0}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[11px] text-muted-foreground">
+                      {t("registration.cdkRawEntryHint")}
+                    </p>
+                  </div>
+                ) : null}
                 <Textarea
                   id="cdks"
                   placeholder={cardCodesPlaceholder(emailProvider)}
                   value={cdkText}
-                  onChange={(e) => setCdkText(e.target.value)}
+                  onChange={(e) => {
+                    setCdkText(e.target.value);
+                    setTopUpRemaining(null);
+                  }}
                   rows={4}
                   className="font-mono text-xs"
                 />
+                {topUpRemaining != null ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t("registration.cdkTopUpHint")}{" "}
+                    {t("registration.cdkRemainingOfMax", { max: 6 })}:{" "}
+                    {topUpRemaining}
+                  </p>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   {emailProvider === "sms.iosmq.xyz"
                     ? t("registration.mailCardHint", {
@@ -503,17 +631,22 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   id="perCdk"
                   type="number"
                   min={1}
-                  max={6}
-                  value={effectiveAccountsPerCdk}
-                  onChange={(e) =>
-                    setAccountsPerCdk(
-                      clampAccountsPerCard(
-                        emailProvider,
-                        Number(e.target.value),
-                      ),
-                    )
-                  }
+                  max={Math.max(1, accountsPerCdkCap || 6)}
+                  value={Math.max(displayAccountsPerCdk, 0)}
+                  onChange={(e) => {
+                    let n = Number(e.target.value);
+                    if (liveSingleRemaining != null) {
+                      n = Math.min(n, Math.max(0, liveSingleRemaining));
+                    }
+                    setAccountsPerCdk(clampAccountsPerCard(emailProvider, n));
+                  }}
                 />
+                {liveSingleRemaining != null ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    {t("registration.cdkRemainingOfMax", { max: 6 })}:{" "}
+                    {liveSingleRemaining}
+                  </p>
+                ) : null}
               </div>
 
               <div className="space-y-2">
@@ -895,6 +1028,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               records={cdkInventory}
               onRefresh={refreshCdkInventory}
               onDelete={deleteCdkRecord}
+              onTopUp={handleTopUp}
             />
           </TabsContent>
         </Tabs>

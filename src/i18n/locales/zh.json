@@ -1824,7 +1824,17 @@
     "smsTokenMissing": "未找到已保存的 VI-OTP 令牌。请在 SMS 设置中保存，或在下方粘贴覆盖令牌。",
     "smsTokenRequired": "已启用短信，但没有可用的 VI-OTP 令牌。请在 SMS 设置中保存令牌，或输入覆盖令牌。",
     "settingsTab": "设置",
-    "settingsHint": "在此配置 VPN/代理、Nord 和短信。注册页仅开关选项。"
+    "settingsHint": "在此配置 VPN/代理、Nord 和短信。注册页仅开关选项。",
+    "cdkRemaining": "剩余额度",
+    "cdkRemainingOfMax": "剩余（共 {{max}}）",
+    "cdkTopUp": "补齐额度",
+    "cdkTopUpTitle": "继续此 CDK",
+    "cdkTopUpHint": "在剩余额度内继续创建账号。历史记录会保留。",
+    "cdkTopUpDisabledFull": "已无剩余额度（最多 6）。删除统计可完整重置配额。",
+    "cdkTopUpDisabledRunning": "此 CDK 仍在注册中。",
+    "cdkPickFromInventory": "从统计中选择 CDK",
+    "cdkPickPlaceholder": "选择仍有额度的 CDK…",
+    "cdkRawEntryHint": "或在下方粘贴新的 CDK/卡密"
   },
   "sms": {
     "title": "短信 / OTP 验证",

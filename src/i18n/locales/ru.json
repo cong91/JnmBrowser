@@ -1824,7 +1824,17 @@
     "smsTokenMissing": "Сохранённый токен VI-OTP не найден. Сохраните его в настройках SMS или вставьте токен переопределения ниже.",
     "smsTokenRequired": "SMS включён, но токен VI-OTP недоступен. Сохраните токен в настройках SMS или введите переопределение.",
     "settingsTab": "Настройки",
-    "settingsHint": "VPN/proxy, Nord и SMS настраиваются здесь. На вкладке Register только включение."
+    "settingsHint": "VPN/proxy, Nord и SMS настраиваются здесь. На вкладке Register только включение.",
+    "cdkRemaining": "Осталось",
+    "cdkRemainingOfMax": "Осталось (из {{max}})",
+    "cdkTopUp": "Дозаполнить",
+    "cdkTopUpTitle": "Продолжить этот CDK",
+    "cdkTopUpHint": "Запросите ещё аккаунты в пределах свободных слотов. История сохраняется.",
+    "cdkTopUpDisabledFull": "Свободных слотов нет (макс. 6). Удалите статистику для полного сброса квоты.",
+    "cdkTopUpDisabledRunning": "Регистрация по этому CDK ещё выполняется.",
+    "cdkPickFromInventory": "Взять CDK из статистики",
+    "cdkPickPlaceholder": "Выберите CDK со свободными слотами…",
+    "cdkRawEntryHint": "Или вставьте новые коды CDK/карты ниже"
   },
   "sms": {
     "title": "SMS / OTP проверка",
