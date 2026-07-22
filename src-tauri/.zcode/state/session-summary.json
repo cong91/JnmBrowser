@@ -9,7 +9,10 @@
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/engine.rs": "        let mut succeeded = false;\n\n        for attempt in 0..max_retries {",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/store.rs": "    let base_dir = data_dir().join(\"registered_accounts\");",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/mod.rs": "pub mod commands;\npub mod engine;\npub mod sentinel;\npub mod store;\npub mod task;",
-      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/commands.rs": "/// Start a new auto-registration task. Returns the task_id.\n#[tauri::command]\np"
+      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/commands.rs": "/// Start a new auto-registration task. Returns the task_id.\n#[tauri::command]\np",
+      "C:\\Users\\mrc\\Documents\\projects\\JnmBrowser\\src-tauri\\src\\api_client.rs": "    } else if let Some(stripped) = pre_release.strip_prefix('a') {\n      (PreRel",
+      "C:\\Users\\mrc\\Documents\\projects\\JnmBrowser\\src-tauri\\src\\app_auto_updater.rs": "              log::info!(\n                \"Log file content (last 500 chars): {}",
+      "C:\\Users\\mrc\\Documents\\projects\\JnmBrowser\\src-tauri\\src\\proxy_manager.rs": "      // Parse auth\n      let (username, password) = {\n        let colon_pos = a"
     },
     "created": [
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/types.rs",
@@ -33,7 +36,11 @@
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/browser.rs": "",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/mcp_server.rs": "",
       "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/create-profile-dialog.tsx": "",
-      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/i18n/locales/en.json": ""
+      "C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/i18n/locales/en.json": "",
+      "C:\\Users\\mrc\\Documents\\projects\\JnmBrowser\\src-tauri\\src\\auto_service\\openai\\register\\engine.rs": "",
+      "C:\\Users\\mrc\\Documents\\projects\\JnmBrowser\\src-tauri\\src\\api_client.rs": "",
+      "C:\\Users\\mrc\\Documents\\projects\\JnmBrowser\\src-tauri\\src\\app_auto_updater.rs": "",
+      "C:\\Users\\mrc\\Documents\\projects\\JnmBrowser\\src-tauri\\src\\proxy_manager.rs": ""
     }
   },
   "decisions": [],

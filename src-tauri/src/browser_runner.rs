@@ -671,9 +671,7 @@ impl BrowserRunner {
       if let Err(e) = PROXY_MANAGER.update_proxy_pid(temp_pid, process_id) {
         log::warn!("Warning: Failed to update proxy PID mapping: {e}");
       } else {
-        log::info!(
-          "Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}"
-        );
+        log::info!("Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}");
       }
 
       // Save the updated profile
@@ -2507,9 +2505,7 @@ pub async fn launch_browser_profile(
   );
 
   // Remap the unique temp proxy key to the real browser PID after launch.
-  if let (Some(temp_pid), Some(actual_pid)) =
-    (pending_proxy_temp_pid, updated_profile.process_id)
-  {
+  if let (Some(temp_pid), Some(actual_pid)) = (pending_proxy_temp_pid, updated_profile.process_id) {
     let _ = PROXY_MANAGER.update_proxy_pid(temp_pid, actual_pid);
   }
 
