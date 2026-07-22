@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -12,12 +14,36 @@ const POLL_INTERVAL_SECS: u64 = 3;
 /// Uses `reqwest` (async) internally — calls are bridged via `tokio::runtime::Handle`.
 pub struct Gmail123452026Service {
   aliases: EmailAliasGenerator,
+  /// CDK → OTP codes already returned / attempted (skip stale codes on re-poll).
+  seen_codes: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Gmail123452026Service {
   pub fn new() -> Self {
     Self {
       aliases: EmailAliasGenerator::default(),
+      seen_codes: Mutex::new(HashMap::new()),
+    }
+  }
+
+  fn is_seen(&self, cdk: &str, code: &str) -> bool {
+    self
+      .seen_codes
+      .lock()
+      .map(|map| map.get(cdk).is_some_and(|set| set.contains(code.trim())))
+      .unwrap_or(false)
+  }
+
+  fn remember_code(&self, cdk: &str, code: &str) {
+    let code = code.trim();
+    if code.is_empty() {
+      return;
+    }
+    if let Ok(mut map) = self.seen_codes.lock() {
+      map
+        .entry(cdk.to_string())
+        .or_default()
+        .insert(code.to_string());
     }
   }
 
@@ -168,8 +194,15 @@ impl EmailService for Gmail123452026Service {
             Ok(vcr) => match vcr.status.as_str() {
               "success" => {
                 if let Some(code) = vcr.code {
+                  let code = code.trim().to_string();
                   if !code.is_empty() {
-                    return Ok(code);
+                    if self.is_seen(cdk, &code) {
+                      // Stale OTP already tried for this CDK — wait for a newer mail.
+                      // Keep polling until timeout.
+                    } else {
+                      self.remember_code(cdk, &code);
+                      return Ok(code);
+                    }
                   }
                 }
                 // "success" without a code — keep polling
@@ -207,6 +240,10 @@ impl EmailService for Gmail123452026Service {
 
       std::thread::sleep(poll_timeout);
     }
+  }
+
+  fn mark_verification_code_used(&self, cdk: &str, code: &str) {
+    self.remember_code(cdk, code);
   }
 
   fn check_health(&self) -> bool {

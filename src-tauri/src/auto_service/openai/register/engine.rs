@@ -2406,7 +2406,7 @@ impl RegistrationEngine {
       profile.id
     ));
     // Give auth.openai.com time to settle cookies after the authorize redirect.
-    sleep(std::time::Duration::from_secs(2)).await;
+    self.human_pause(1400, 2600).await;
     if let Ok(url) = session.current_url().await {
       cur_url = url;
       self.log(&format!("{prefix} Post-authorize URL: {cur_url}"));
@@ -2462,28 +2462,73 @@ impl RegistrationEngine {
             self.log(&format!("{prefix} Auth UI URL: {cur_url}"));
           }
 
-          // OpenAI sometimes jumps to email-verification without a password form
-          // (especially after choose-an-account). Never mark register_submitted
-          // until the password is actually set — otherwise create_account → 400.
-          let skipped_password_form = cur_url.contains("email-verification")
+          // OpenAI sometimes lands on email-verification without showing a password form
+          // (especially after choose-an-account). Prefer UI password; only force
+          // API register when session is still on a password-capable step.
+          // Never force-register on a stale email-otp step → invalid_auth_step.
+          let on_email_otp_surface = cur_url.contains("email-verification")
             || cur_url.contains("email-otp")
             || cur_url.contains("about-you");
 
-          if skipped_password_form {
-            self.log(&format!(
-              "{prefix} Password form skipped by UI ({cur_url}); forcing API register"
-            ));
-            let reg_js = format!(
-              "fetch('https://auth.openai.com/api/accounts/user/register', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ username: '{email}', password: '{pw}' }}) }})",
-              did = self.device_id,
-              email = alias_email,
-              pw = password,
-            );
-            let reg = session.fetch_json(&reg_js).await?;
-            self.log(&format!("{prefix} Force-register response: {reg}"));
-            let st = reg["_status"].as_u64().unwrap_or(200);
-            if st != 200 || reg.get("error").is_some() {
-              return Err(format!("Force API register failed: {reg}"));
+          if on_email_otp_surface {
+            // Attempt 1: recover password form via "Continue with password".
+            self.human_pause(400, 900).await;
+            let recovered = self
+              .click_by_text(
+                session,
+                "password",
+                "button, a, [role='button'], div[role='button']",
+              )
+              .await
+              .is_ok();
+            if recovered {
+              self.human_pause(700, 1400).await;
+            }
+            if self
+              .page_has_selector(
+                session,
+                r#"input[name="new-password"], input[type="password"], input[autocomplete="new-password"]"#,
+              )
+              .await
+            {
+              self
+                .submit_password_via_ui(session, password)
+                .await
+                .map_err(|e| format!("password UI after recovery failed: {e}"))?;
+              self.log(&format!(
+                "{prefix} Password submitted via recovered UI form"
+              ));
+            } else {
+              // Fresh authorize session, then force register once.
+              self.log(&format!(
+                "{prefix} Password form missing on {cur_url}; refreshing authorize then force-register"
+              ));
+              let auth_url = self.create_authorize_url(session, alias_email).await?;
+              session.navigate(&auth_url, 30).await?;
+              self.human_pause(1200, 2000).await;
+              if let Err(e) = self.advance_auth_ui_to_password(session, alias_email).await {
+                self.log(&format!("{prefix} advance_auth_ui after refresh: {e}"));
+              }
+              if self
+                .page_has_selector(
+                  session,
+                  r#"input[name="new-password"], input[type="password"], input[autocomplete="new-password"]"#,
+                )
+                .await
+              {
+                self
+                  .submit_password_via_ui(session, password)
+                  .await
+                  .map_err(|e| format!("password UI after authorize refresh failed: {e}"))?;
+                self.log(&format!(
+                  "{prefix} Password submitted via UI after authorize refresh"
+                ));
+              } else {
+                let reg = self
+                  .force_api_register(session, alias_email, password)
+                  .await?;
+                self.log(&format!("{prefix} Force-register response: {reg}"));
+              }
             }
           } else {
             match self.submit_password_via_ui(session, password).await {
@@ -2492,18 +2537,13 @@ impl RegistrationEngine {
               }
               Err(ui_err) => {
                 self.log(&format!("{prefix} UI password submit failed: {ui_err}"));
-                let reg_js = format!(
-                "fetch('https://auth.openai.com/api/accounts/user/register', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ username: '{email}', password: '{pw}' }}) }})",
-                did = self.device_id, email = alias_email, pw = password,
-              );
-                let reg = session.fetch_json(&reg_js).await?;
+                let reg = self
+                  .force_api_register(session, alias_email, password)
+                  .await
+                  .map_err(|api_err| {
+                    format!("UI password failed ({ui_err}); API register failed: {api_err}")
+                  })?;
                 self.log(&format!("{prefix} Register response: {reg}"));
-                let st = reg["_status"].as_u64().unwrap_or(200);
-                if st != 200 || reg.get("error").is_some() {
-                  return Err(format!(
-                    "UI password failed ({ui_err}); API register failed: {reg}"
-                  ));
-                }
               }
             }
           }
@@ -2526,7 +2566,7 @@ impl RegistrationEngine {
           self.log(&format!("{prefix} OTP send response: {otp_send_resp}"));
 
           // After password submit, settle on current URL (usually email-verification).
-          sleep(std::time::Duration::from_secs(2)).await;
+          self.human_pause(1200, 2400).await;
           cur_url = session
             .current_url()
             .await
@@ -2557,46 +2597,142 @@ impl RegistrationEngine {
             cur_url = "https://auth.openai.com/create-account/password".to_string();
             continue;
           }
-          self.emit(
-            app_handle,
-            RegistrationStep::PollingOtp,
-            &format!("{prefix} Waiting for OTP..."),
-            cdk_idx,
-            alias_idx,
-            total_cdks,
-            None,
-          );
-          let otp = email_service
-            .poll_verification_code(cdk, 150)
-            .map_err(|e| format!("OTP: {e}"))?;
-          self.log(&format!("{prefix} OTP: {otp}"));
 
-          self.emit(
-            app_handle,
-            RegistrationStep::VerifyingOtp,
-            &format!("{prefix} Verifying OTP..."),
-            cdk_idx,
-            alias_idx,
-            total_cdks,
-            None,
-          );
-          let verify_js = format!(
-            "fetch('https://auth.openai.com/api/accounts/email-otp/validate', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ code: '{otp}' }}) }})",
-            did = self.device_id,
-          );
-          let verify = session.fetch_json(&verify_js).await?;
-          let vs = verify["_status"].as_u64().unwrap_or(200);
-          if vs != 200 {
-            let body = verify["_body"].as_str().unwrap_or("");
-            if body.contains("wrong") || body.contains("401") {
-              continue;
+          // Up to 3 OTP cycles: poll → validate; on 401 refresh page + re-send + wait
+          // for a *new* code (provider tracks used OTP codes per CDK).
+          let mut otp_ok = false;
+          let mut last_otp_err = String::new();
+          for otp_attempt in 1..=3 {
+            self.emit(
+              app_handle,
+              RegistrationStep::PollingOtp,
+              &format!("{prefix} Waiting for OTP (attempt {otp_attempt}/3)..."),
+              cdk_idx,
+              alias_idx,
+              total_cdks,
+              None,
+            );
+            // First attempt can use longer poll; after 401 re-send, shorter wait for new mail.
+            let poll_secs = if otp_attempt == 1 { 150 } else { 90 };
+            let otp = match email_service.poll_verification_code(cdk, poll_secs) {
+              Ok(c) => c,
+              Err(e) => {
+                last_otp_err = format!("OTP poll: {e}");
+                self.log(&format!("{prefix} {last_otp_err}"));
+                break;
+              }
+            };
+            self.log(&format!("{prefix} OTP (attempt {otp_attempt}/3): {otp}"));
+            // Always mark attempted — even before validate — so a failed 401 cannot
+            // re-use the same mailbox code on the next poll.
+            email_service.mark_verification_code_used(cdk, &otp);
+
+            self.emit(
+              app_handle,
+              RegistrationStep::VerifyingOtp,
+              &format!("{prefix} Verifying OTP..."),
+              cdk_idx,
+              alias_idx,
+              total_cdks,
+              None,
+            );
+            // Ensure we are on the verification page with a live auth session cookie.
+            let page_url = session.current_url().await.unwrap_or_default();
+            if !page_url.contains("email-verification") && !page_url.contains("email-otp") {
+              let _ = session
+                .navigate("https://auth.openai.com/email-verification", 20)
+                .await;
+              self.human_pause(800, 1500).await;
             }
-            return Err(format!("OTP verify HTTP {vs}: {body}"));
+
+            let verify_js = format!(
+              "fetch('https://auth.openai.com/api/accounts/email-otp/validate', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ code: '{otp}' }}) }})",
+              did = self.device_id,
+            );
+            let verify = session.fetch_json(&verify_js).await?;
+            let vs = verify["_status"].as_u64().unwrap_or(200);
+            if vs == 200 && verify.get("error").is_none() {
+              cur_url = verify["continue_url"]
+                .as_str()
+                .unwrap_or("https://auth.openai.com/about-you")
+                .to_string();
+              self.log(&format!(
+                "{prefix} OTP verified (attempt {otp_attempt}/3) → {cur_url}"
+              ));
+              otp_ok = true;
+              break;
+            }
+
+            let body = verify
+              .get("_body")
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string();
+            last_otp_err = format!("OTP verify HTTP {vs}: {body} | {verify}");
+            self.log(&format!("{prefix} {last_otp_err}"));
+
+            // 401 / wrong code → stale or not-yet-bound OTP: full page refresh + re-send
+            // so OpenAI issues a *new* code; mailbox poll skips used codes.
+            let is_stale = vs == 401
+              || body.to_ascii_lowercase().contains("wrong")
+              || body.to_ascii_lowercase().contains("invalid")
+              || body.to_ascii_lowercase().contains("unauthorized")
+              || verify
+                .get("error")
+                .map(|e| e.to_string().to_ascii_lowercase())
+                .is_some_and(|s| s.contains("invalid") || s.contains("unauthorized"));
+
+            if !is_stale || otp_attempt == 3 {
+              break;
+            }
+
+            self.log(&format!(
+              "{prefix} OTP rejected (likely stale/unsent binding); refresh page + re-send for new code"
+            ));
+            // Full page reload to rebind auth session cookies to the OTP challenge.
+            let _ = session
+              .navigate("https://auth.openai.com/email-verification", 25)
+              .await;
+            self.human_pause(1200, 2200).await;
+
+            // Prefer UI "Resend email" then API send as backup.
+            let mut resent = false;
+            for label in ["Resend email", "Resend", "Send code again", "Resend code"] {
+              if self
+                .click_by_text(session, label, "button, a, [role='button']")
+                .await
+                .is_ok()
+              {
+                self.log(&format!("{prefix} Clicked resend control: {label}"));
+                resent = true;
+                break;
+              }
+            }
+            let otp_send = format!(
+              "fetch('https://auth.openai.com/api/accounts/email-otp/send', {{ method: 'POST', credentials: 'include', headers: {{ accept: 'application/json', 'content-type': 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{}}) }})",
+              did = self.device_id,
+            );
+            match session.fetch_json(&otp_send).await {
+              Ok(resp) => {
+                self.log(&format!(
+                  "{prefix} OTP re-send response (ui_resend={resent}): {resp}"
+                ));
+              }
+              Err(e) => {
+                self.log(&format!("{prefix} OTP re-send API failed: {e}"));
+              }
+            }
+            // Give the mailbox time to receive the *new* message before polling.
+            self.human_pause(2500, 4500).await;
           }
-          cur_url = verify["continue_url"]
-            .as_str()
-            .unwrap_or("https://auth.openai.com/about-you")
-            .to_string();
+
+          if !otp_ok {
+            return Err(if last_otp_err.is_empty() {
+              "OTP verification failed".into()
+            } else {
+              last_otp_err
+            });
+          }
           continue;
         }
 
@@ -2836,41 +2972,7 @@ impl RegistrationEngine {
       total_cdks,
       None,
     );
-    if let Err(e) = session.navigate("https://chatgpt.com/", 45).await {
-      self.log(&format!("{prefix} token-extract navigate warn: {e}"));
-    }
-    sleep(std::time::Duration::from_secs(2)).await;
-
-    let mut auth_session = session
-      .fetch_json("fetch('https://chatgpt.com/api/auth/session', { credentials: 'include', headers: { accept: 'application/json' } })")
-      .await
-      .unwrap_or_else(|e| {
-        self.log(&format!("{prefix} absolute session fetch failed: {e}"));
-        serde_json::json!({})
-      });
-    if auth_session
-      .get("accessToken")
-      .and_then(|v| v.as_str())
-      .unwrap_or("")
-      .is_empty()
-    {
-      auth_session = session
-        .fetch_json("fetch('/api/auth/session', { credentials: 'include', headers: { accept: 'application/json' } })")
-        .await
-        .unwrap_or_else(|e| {
-          self.log(&format!("{prefix} relative session fetch failed: {e}"));
-          serde_json::json!({})
-        });
-    }
-    let access_token = auth_session["accessToken"]
-      .as_str()
-      .unwrap_or("")
-      .to_string();
-    let account_id = auth_session
-      .get("account")
-      .and_then(|a| a["id"].as_str())
-      .unwrap_or("")
-      .to_string();
+    let (access_token, account_id) = self.extract_access_token_with_retry(session, prefix).await;
 
     self.log(&format!(
       "{prefix} accessToken obtained={}, account={account_id}",
@@ -2977,7 +3079,7 @@ impl RegistrationEngine {
           if attempt < TWO_FA_ATTEMPTS {
             // Reset UI surface before retrying the 2FA flow only.
             let _ = session.navigate("https://chatgpt.com/", 15).await;
-            sleep(std::time::Duration::from_secs(2)).await;
+            self.human_pause(1400, 2600).await;
           }
         }
       }
@@ -3226,6 +3328,109 @@ impl RegistrationEngine {
       .unwrap_or(false)
   }
 
+  /// Human-like pause between automation steps (random within range).
+  async fn human_pause(&self, min_ms: u64, max_ms: u64) {
+    use crate::browser_actions::jitter_ms;
+    sleep(jitter_ms(min_ms, max_ms)).await;
+  }
+
+  async fn force_api_register(
+    &mut self,
+    session: &mut BrowserSession,
+    alias_email: &str,
+    password: &str,
+  ) -> Result<serde_json::Value, String> {
+    let reg_js = format!(
+      "fetch('https://auth.openai.com/api/accounts/user/register', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ username: '{email}', password: '{pw}' }}) }})",
+      did = self.device_id,
+      email = alias_email,
+      pw = password,
+    );
+    let reg = session.fetch_json(&reg_js).await?;
+    let st = reg["_status"].as_u64().unwrap_or(200);
+    if st != 200 || reg.get("error").is_some() {
+      return Err(format!("{reg}"));
+    }
+    Ok(reg)
+  }
+
+  /// Poll `/api/auth/session` with human-like waits. Session cookies often land
+  /// a few seconds after ChatGPT home paints (live miss: johnbeasley token empty).
+  async fn extract_access_token_with_retry(
+    &mut self,
+    session: &mut BrowserSession,
+    prefix: &str,
+  ) -> (String, String) {
+    if let Err(e) = session.navigate("https://chatgpt.com/", 45).await {
+      self.log(&format!("{prefix} token-extract navigate warn: {e}"));
+    }
+    self.human_pause(1500, 2800).await;
+
+    for attempt in 1..=5 {
+      let mut auth_session = session
+        .fetch_json(
+          "fetch('https://chatgpt.com/api/auth/session', { credentials: 'include', headers: { accept: 'application/json' } })",
+        )
+        .await
+        .unwrap_or_else(|e| {
+          self.log(&format!(
+            "{prefix} absolute session fetch failed (attempt {attempt}): {e}"
+          ));
+          serde_json::json!({})
+        });
+      if auth_session
+        .get("accessToken")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .is_empty()
+      {
+        auth_session = session
+          .fetch_json(
+            "fetch('/api/auth/session', { credentials: 'include', headers: { accept: 'application/json' } })",
+          )
+          .await
+          .unwrap_or_else(|e| {
+            self.log(&format!(
+              "{prefix} relative session fetch failed (attempt {attempt}): {e}"
+            ));
+            serde_json::json!({})
+          });
+      }
+
+      let access_token = auth_session["accessToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+      let account_id = auth_session
+        .get("account")
+        .and_then(|a| a["id"].as_str())
+        .or_else(|| auth_session.get("user").and_then(|u| u["id"].as_str()))
+        .unwrap_or("")
+        .to_string();
+
+      if !access_token.is_empty() {
+        if attempt > 1 {
+          self.log(&format!(
+            "{prefix} accessToken recovered on attempt {attempt}/5"
+          ));
+        }
+        return (access_token, account_id);
+      }
+
+      self.log(&format!(
+        "{prefix} accessToken empty on attempt {attempt}/5; waiting before retry"
+      ));
+      // Soft reload home once mid-way — session cookie can finish after SPA boot.
+      if attempt == 3 {
+        let _ = session.navigate("https://chatgpt.com/", 30).await;
+      }
+      self
+        .human_pause(1200 + attempt as u64 * 400, 2200 + attempt as u64 * 600)
+        .await;
+    }
+    (String::new(), String::new())
+  }
+
   /// Fill password field + submit create-password form (recording path).
   async fn submit_password_via_ui(
     &mut self,
@@ -3415,44 +3620,483 @@ impl RegistrationEngine {
     (eligible, plan_type, detail_parts.join(" | "))
   }
 
-  /// Drive Settings → Security → Authenticator app using stable locators from recordings.
-  async fn enable_2fa(&mut self, session: &mut BrowserSession) -> Result<String, String> {
-    // Ensure we are on ChatGPT home with a live session.
-    session.navigate("https://chatgpt.com/", 20).await?;
-    sleep(std::time::Duration::from_secs(2)).await;
+  /// Capture a compact ChatGPT UI snapshot for 2FA navigation debugging.
+  /// Writes full JSON under TEMP and logs a short summary (no secrets).
+  async fn dump_2fa_ui_snapshot(&mut self, session: &mut BrowserSession, phase: &str) {
+    let js = r#"(function(){
+      const textOf = (el) => ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g,' ').trim().slice(0,160);
+      const rectOf = (el) => {
+        try {
+          const r = el.getBoundingClientRect();
+          return {x:Math.round(r.left), y:Math.round(r.top), w:Math.round(r.width), h:Math.round(r.height)};
+        } catch (_) { return null; }
+      };
+      const testids = Array.from(document.querySelectorAll('[data-testid]'))
+        .slice(0, 120)
+        .map((el) => ({
+          testid: el.getAttribute('data-testid'),
+          tag: el.tagName,
+          role: el.getAttribute('role'),
+          aria: el.getAttribute('aria-label'),
+          text: textOf(el).slice(0, 80),
+          rect: rectOf(el),
+        }));
+      // Prefer leaf menu rows (menuitem / option / links) over giant containers.
+      const menuRows = Array.from(document.querySelectorAll(
+        '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-testid*="menu"], a[href*="settings"], a[href*="security"]'
+      )).slice(0, 60).map((el) => ({
+        tag: el.tagName,
+        role: el.getAttribute('role'),
+        testid: el.getAttribute('data-testid'),
+        href: el.getAttribute('href'),
+        aria: el.getAttribute('aria-label'),
+        text: textOf(el).slice(0, 120),
+        rect: rectOf(el),
+      }));
+      const openPanels = Array.from(document.querySelectorAll(
+        '[role="menu"], [role="dialog"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-state="open"]'
+      )).slice(0, 20).map((el) => ({
+        tag: el.tagName,
+        role: el.getAttribute('role'),
+        testid: el.getAttribute('data-testid'),
+        text: textOf(el).slice(0, 220),
+        rect: rectOf(el),
+      }));
+      const settingsHits = Array.from(document.querySelectorAll('button, a, [role="menuitem"], [role="button"], div, span, li'))
+        .filter((el) => {
+          const t = textOf(el);
+          const tid = el.getAttribute('data-testid') || '';
+          return /(^|\b)settings(\b|$)/i.test(t) || /settings/i.test(tid) || /security/i.test(t) || /authenticator/i.test(t);
+        })
+        .slice(0, 30)
+        .map((el) => ({
+          tag: el.tagName,
+          testid: el.getAttribute('data-testid'),
+          role: el.getAttribute('role'),
+          text: textOf(el).slice(0, 100),
+          href: el.getAttribute('href'),
+          rect: rectOf(el),
+        }));
+      const body = ((document.body && (document.body.innerText || document.body.textContent)) || '')
+        .replace(/\s+/g,' ')
+        .trim()
+        .slice(0, 1200);
+      return {
+        url: location.href,
+        title: document.title,
+        path: location.pathname + location.search + location.hash,
+        hasSettingsTestid: !!document.querySelector('[data-testid="settings-menu-item"]'),
+        hasAccountsProfile: !!document.querySelector('[data-testid="accounts-profile-button"]'),
+        hasMfaToggle: !!document.querySelector('[data-testid="mfa-authenticator-toggle"]'),
+        openDialogs: document.querySelectorAll('[role="dialog"], [data-state="open"]').length,
+        testids,
+        menuRows,
+        openPanels,
+        settingsHits,
+        body,
+      };
+    })()"#;
+    match session.evaluate(js, false).await {
+      Ok(result) => {
+        let value = result
+          .get("value")
+          .cloned()
+          .unwrap_or(serde_json::json!({}));
+        // Persist full dump for offline inspection (log lines are truncated by hosts).
+        let dump_path = std::env::temp_dir().join(format!(
+          "jnmbrowser-2fa-ui-{}-{}.json",
+          phase,
+          Utc::now().format("%H%M%S")
+        ));
+        if let Ok(pretty) = serde_json::to_string_pretty(&value) {
+          let _ = std::fs::write(&dump_path, pretty);
+          self.log(&format!(
+            "2FA UI dump [{phase}] wrote {}",
+            dump_path.display()
+          ));
+        }
+        let summary = serde_json::json!({
+          "url": value.get("url"),
+          "path": value.get("path"),
+          "hasSettingsTestid": value.get("hasSettingsTestid"),
+          "hasAccountsProfile": value.get("hasAccountsProfile"),
+          "hasMfaToggle": value.get("hasMfaToggle"),
+          "openDialogs": value.get("openDialogs"),
+          "settingsHits": value.get("settingsHits"),
+          "menuRows": value.get("menuRows"),
+          "openPanels": value.get("openPanels").and_then(|v| v.as_array()).map(|a| a.len()),
+          "body": value.get("body").and_then(|v| v.as_str()).map(|s| s.chars().take(280).collect::<String>()),
+        });
+        self.log(&format!("2FA UI dump [{phase}] summary: {}", summary));
+      }
+      Err(e) => self.log(&format!("2FA UI dump [{phase}] failed: {e}")),
+    }
+  }
 
-    // Open profile menu (bottom-left account area → settings menu item).
-    // Prefer data-testid from enable2FA / register_2 recordings.
+  /// Close free-offer / splash dialogs that can intercept profile-menu clicks.
+  /// Live dump showed `openDialogs=1` + multiple `close-button` while Settings was missing.
+  async fn dismiss_2fa_blockers(&mut self, session: &mut BrowserSession) {
+    let js = r#"(function(){
+      const clicked = [];
+      const tryClick = (el, why) => {
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+        try { el.click(); clicked.push(why); } catch (_) {}
+      };
+      // Prefer explicit close buttons in open dialogs / overlays.
+      for (const el of Array.from(document.querySelectorAll(
+        '[data-testid="close-button"], button[aria-label="Close"], [role="dialog"] button[aria-label="Close"]'
+      )).slice(0, 6)) {
+        tryClick(el, el.getAttribute('data-testid') || el.getAttribute('aria-label') || 'close');
+      }
+      // Free-offer CTA can sit as a modal layer; Escape is a soft dismiss.
+      try {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
+        clicked.push('escape');
+      } catch (_) {}
+      return clicked;
+    })()"#;
+    match session.evaluate(js, false).await {
+      Ok(result) => {
+        let value = result
+          .get("value")
+          .cloned()
+          .unwrap_or(serde_json::json!([]));
+        self.log(&format!("2FA dismiss blockers: {value}"));
+      }
+      Err(e) => self.log(&format!("2FA dismiss blockers failed: {e}")),
+    }
+    sleep(std::time::Duration::from_millis(400)).await;
+  }
+
+  /// Open the account profile menu. Live DOM (2026-07-22) uses
+  /// `data-testid="accounts-profile-button"` (not legacy `profile-button`).
+  ///
+  /// Important: there are often two nodes with that testid (compact avatar +
+  /// wider name chip). `querySelector` hits the first; we must pick the widest
+  /// visible chip so the full menu (Settings) mounts.
+  async fn open_profile_menu_for_2fa(
+    &mut self,
+    session: &mut BrowserSession,
+  ) -> Result<(), String> {
+    use crate::browser_actions::{click_point_in_rect, HumanProfile};
+
+    // Prefer JS-picked largest accounts-profile-button over brittle first-match CSS.
+    let pick_js = r#"(function(){
+      const nodes = Array.from(document.querySelectorAll(
+        '[data-testid="accounts-profile-button"], [data-testid="profile-button"], [aria-label*="open profile menu" i], [aria-label="Open profile menu"]'
+      ));
+      let best = null;
+      let bestArea = 0;
+      for (const el of nodes) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        // Prefer the wider account chip (name + Free) over the 38px avatar.
+        const area = r.width * r.height + (r.width >= 120 ? 10000 : 0);
+        if (area > bestArea) {
+          bestArea = area;
+          best = el;
+        }
+      }
+      if (!best) return { ok: false, reason: 'not_found' };
+      best.scrollIntoView({ block: 'center', inline: 'center' });
+      const r2 = best.getBoundingClientRect();
+      return {
+        ok: true,
+        testid: best.getAttribute('data-testid'),
+        aria: best.getAttribute('aria-label'),
+        x: r2.left,
+        y: r2.top,
+        w: r2.width,
+        h: r2.height
+      };
+    })()"#;
+
+    if let Ok(result) = session.evaluate(pick_js, false).await {
+      if let Some(value) = result.get("value") {
+        if value["ok"].as_bool() == Some(true) {
+          let x = value["x"].as_f64().unwrap_or(0.0);
+          let y = value["y"].as_f64().unwrap_or(0.0);
+          let w = value["w"].as_f64().unwrap_or(1.0);
+          let h = value["h"].as_f64().unwrap_or(1.0);
+          let (tx, ty) = click_point_in_rect(x, y, w, h);
+          let from = (x.max(8.0) - 24.0, y.max(8.0) - 18.0);
+          session
+            .human_click(from, (tx, ty), &HumanProfile::careful())
+            .await?;
+          self.log(&format!(
+            "2FA opened profile menu via largest chip testid={} aria={} rect=({x:.0},{y:.0},{w:.0}x{h:.0})",
+            value["testid"].as_str().unwrap_or(""),
+            value["aria"].as_str().unwrap_or("")
+          ));
+          return Ok(());
+        }
+      }
+    }
+
+    // Coordinate fallback from live rects: chip ~ (8,665) size 246x52; avatar ~ (8,719).
+    for (x, y) in [(130.0, 690.0), (27.0, 739.0), (65.0, 640.0)] {
+      if self.click_xy(session, x, y).await.is_ok() {
+        self.log(&format!("2FA profile menu xy fallback: ({x},{y})"));
+        return Ok(());
+      }
+    }
+    Err("profile menu button: not_found".into())
+  }
+
+  /// Click Settings inside the open profile menu.
+  /// Primary: `settings-menu-item` testid. Fallbacks: role/text.
+  /// Does NOT re-click the profile button on every miss (that toggles the menu closed).
+  async fn open_settings_from_profile_menu(
+    &mut self,
+    session: &mut BrowserSession,
+  ) -> Result<(), String> {
+    // Poll briefly — menu mount can lag after the profile click.
+    for attempt in 1..=6 {
+      // Detect menu presence before clicking; if missing, reopen once.
+      let menu_open = session
+        .evaluate(
+          r#"(function(){
+            return !!(
+              document.querySelector('[data-testid="settings-menu-item"]') ||
+              Array.from(document.querySelectorAll('[role="menu"] [role="menuitem"], [role="menuitem"]'))
+                .some((el) => /^settings$/i.test((el.innerText || el.textContent || '').trim()))
+            );
+          })()"#,
+          false,
+        )
+        .await
+        .ok()
+        .and_then(|v| v["value"].as_bool())
+        .unwrap_or(false);
+
+      if !menu_open {
+        if attempt > 1 {
+          // Close any half-open panel, then reopen cleanly.
+          let _ = session
+            .evaluate(
+              r#"(function(){
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                return true;
+              })()"#,
+              false,
+            )
+            .await;
+          sleep(std::time::Duration::from_millis(250)).await;
+        }
+        let _ = self.open_profile_menu_for_2fa(session).await;
+        sleep(std::time::Duration::from_millis(700)).await;
+      }
+
+      if self
+        .click_selector(
+          session,
+          r#"[data-testid="settings-menu-item"]"#,
+          "settings menu item",
+        )
+        .await
+        .is_ok()
+      {
+        self.log(&format!(
+          "2FA settings menu item clicked (testid, attempt {attempt})"
+        ));
+        return Ok(());
+      }
+
+      // Text / role fallbacks observed across ChatGPT shell variants.
+      if self
+        .click_by_text(
+          session,
+          "Settings",
+          r#"[data-testid="settings-menu-item"], [role="menuitem"], button, a, div[role="button"]"#,
+        )
+        .await
+        .is_ok()
+      {
+        self.log(&format!("2FA settings opened via text (attempt {attempt})"));
+        return Ok(());
+      }
+
+      sleep(std::time::Duration::from_millis(400)).await;
+    }
+
+    self
+      .dump_2fa_ui_snapshot(session, "settings_menu_not_found")
+      .await;
+    Err("settings menu item: not_found".into())
+  }
+
+  /// Fast in-page hash open for Settings/Security.
+  ///
+  /// Do **not** use CDP `Page.navigate` for `…/#settings/…`: hash-only navigations
+  /// often never fire `Page.loadEventFired`, so the 20s navigation waiter times out
+  /// even though the SPA already opened the modal (live batch 2026-07-22).
+  async fn open_settings_security_via_hash(
+    &mut self,
+    session: &mut BrowserSession,
+  ) -> Result<(), String> {
+    let set_hash = session
+      .evaluate(
+        r#"(function(){
+          try {
+            // Prefer SPA hash routing without a full document navigation.
+            if (location.hash !== '#settings/Security') {
+              location.hash = '#settings/Security';
+            } else {
+              // Retrigger listeners if already on the hash.
+              location.hash = '#settings';
+              location.hash = '#settings/Security';
+            }
+            return { ok: true, href: location.href };
+          } catch (e) {
+            return { ok: false, error: String(e) };
+          }
+        })()"#,
+        false,
+      )
+      .await;
+    match set_hash {
+      Ok(v) => self.log(&format!(
+        "2FA hash route set: {}",
+        v.get("value").cloned().unwrap_or_default()
+      )),
+      Err(e) => return Err(format!("hash route evaluate failed: {e}")),
+    }
+    self.human_pause(700, 1400).await;
+    self.dismiss_2fa_blockers(session).await;
+
+    if self.mfa_toggle_present(session).await {
+      self.log("2FA Security panel ready via hash route");
+      return Ok(());
+    }
+
+    // Modal may open on General — click Security tab.
     if self
-      .click_selector(
-        session,
-        r#"[data-testid="profile-button"], button[data-testid="profile-button"], nav button[aria-haspopup="menu"]"#,
-        "profile menu button",
+      .click_selector(session, r#"[data-testid="security-tab"]"#, "security tab")
+      .await
+      .is_ok()
+      || self
+        .click_by_text(
+          session,
+          "Security and login",
+          r#"[data-testid="security-tab"], button, [role='tab'], div[role='tab']"#,
+        )
+        .await
+        .is_ok()
+      || self
+        .click_by_text(session, "Security", "button, [role='tab'], div[role='tab']")
+        .await
+        .is_ok()
+    {
+      self.human_pause(600, 1200).await;
+      if self.mfa_toggle_present(session).await {
+        self.log("2FA Security tab opened after hash route");
+        return Ok(());
+      }
+    }
+    Err("hash settings/security route did not expose mfa toggle".into())
+  }
+
+  async fn mfa_toggle_present(&mut self, session: &mut BrowserSession) -> bool {
+    session
+      .evaluate(
+        r#"(function(){ return !!document.querySelector('[data-testid="mfa-authenticator-toggle"]'); })()"#,
+        false,
       )
       .await
-      .is_err()
-    {
-      // Fallback: click near bottom-left chrome where account chip lives.
-      self.click_xy(session, 65.0, 640.0).await?;
+      .ok()
+      .and_then(|v| v["value"].as_bool())
+      .unwrap_or(false)
+  }
+
+  /// Open Security panel for 2FA.
+  /// Primary (live-proven, reliable): profile menu → Settings → Security tab.
+  /// Secondary (fast, no CDP navigate timeout): in-page `#settings/Security` hash.
+  async fn open_security_panel_for_2fa(
+    &mut self,
+    session: &mut BrowserSession,
+  ) -> Result<(), String> {
+    // 1) Profile menu path first — this is what succeeded in every live enable.
+    self.dismiss_2fa_blockers(session).await;
+    if self.open_profile_menu_for_2fa(session).await.is_ok() {
+      self.human_pause(700, 1300).await;
+      self
+        .dump_2fa_ui_snapshot(session, "after_profile_click")
+        .await;
+      if self.open_settings_from_profile_menu(session).await.is_ok() {
+        self.human_pause(600, 1100).await;
+        if self
+          .click_selector(session, r#"[data-testid="security-tab"]"#, "security tab")
+          .await
+          .is_ok()
+          || self
+            .click_by_text(
+              session,
+              "Security and login",
+              r#"[data-testid="security-tab"], button, [role='tab'], div[role='tab']"#,
+            )
+            .await
+            .is_ok()
+          || self
+            .click_by_text(session, "Security", "button, [role='tab'], div[role='tab']")
+            .await
+            .is_ok()
+        {
+          self.human_pause(700, 1300).await;
+          if self.mfa_toggle_present(session).await {
+            self.log("2FA Security panel ready via profile menu");
+            return Ok(());
+          }
+        }
+      }
+    } else {
+      self.log("2FA profile menu open failed; trying hash route");
     }
-    sleep(std::time::Duration::from_millis(800)).await;
+
+    // 2) Hash fallback without CDP navigation timeout.
+    if let Err(e) = self.open_settings_security_via_hash(session).await {
+      return Err(format!(
+        "could not open Security panel (menu+hash failed): {e}"
+      ));
+    }
+    Ok(())
+  }
+
+  /// Drive Settings → Security → Authenticator app using stable locators from recordings.
+  async fn enable_2fa(&mut self, session: &mut BrowserSession) -> Result<String, String> {
+    // Ensure we are on ChatGPT with a live session.
+    session.navigate("https://chatgpt.com/", 20).await?;
+    self.human_pause(1200, 2200).await;
+    self.dismiss_2fa_blockers(session).await;
+    self
+      .dump_2fa_ui_snapshot(session, "home_before_settings")
+      .await;
+
+    self.open_security_panel_for_2fa(session).await?;
 
     self
-      .click_selector(
-        session,
-        r#"[data-testid="settings-menu-item"]"#,
-        "settings menu item",
+      .dump_2fa_ui_snapshot(session, "security_panel_ready")
+      .await;
+
+    // Toggle authenticator app on (skip if already checked).
+    let already_on = session
+      .evaluate(
+        r#"(function(){
+          const t = document.querySelector('[data-testid="mfa-authenticator-toggle"]');
+          if (!t) return false;
+          return t.getAttribute('aria-checked') === 'true' || t.getAttribute('data-state') === 'checked';
+        })()"#,
+        false,
       )
-      .await?;
-    sleep(std::time::Duration::from_secs(1)).await;
-
-    // Security tab — avoid brittle radix ids; match text content.
-    self
-      .click_by_text(session, "Security", "button, [role='tab'], div[role='tab']")
-      .await?;
-    sleep(std::time::Duration::from_secs(1)).await;
-
-    // Toggle authenticator app on.
+      .await
+      .ok()
+      .and_then(|v| v["value"].as_bool())
+      .unwrap_or(false);
+    if already_on {
+      return Err("mfa authenticator already enabled; secret not available from toggle".into());
+    }
     self
       .click_selector(
         session,
@@ -3812,28 +4456,60 @@ impl RegistrationEngine {
   // -----------------------------------------------------------------------
 
   async fn create_authorize_url(
-    &self,
+    &mut self,
     session: &mut BrowserSession,
     alias_email: &str,
   ) -> Result<String, String> {
-    let csrf_json = session
-      .fetch_json("fetch('/api/auth/csrf', { headers: { accept: 'application/json', referer: 'https://chatgpt.com/' } })")
-      .await?;
-    let csrf_token = csrf_json["csrfToken"].as_str().ok_or("No csrfToken")?;
-    let session_log_id = Uuid::new_v4().to_string();
-    let login_hint = urlencoding::encode(alias_email);
-    let signin_js = format!(
-      "fetch('/api/auth/signin/openai?prompt=login&ext-oai-did={did}&auth_session_logging_id={sid}&screen_hint=login_or_signup&login_hint={email}', {{ method: 'POST', headers: {{ 'content-type': 'application/x-www-form-urlencoded', referer: 'https://chatgpt.com/' }}, body: new URLSearchParams({{ callbackUrl: '/', csrfToken: '{token}', json: 'true' }}) }})",
-      did = self.device_id,
-      sid = session_log_id,
-      email = login_hint,
-      token = csrf_token,
-    );
-    let signin = session.fetch_json(&signin_js).await?;
-    signin["url"]
-      .as_str()
-      .map(str::to_string)
-      .ok_or_else(|| "No authorize URL".to_string())
+    // Ensure we are on chatgpt origin before csrf/signin fetch (avoids No csrfToken
+    // when previous step left us on about:blank or auth.openai.com).
+    let cur = session.current_url().await.unwrap_or_default();
+    if !cur.starts_with("https://chatgpt.com") {
+      session.navigate("https://chatgpt.com/", 25).await?;
+      self.human_pause(900, 1600).await;
+    }
+
+    let mut last_err = String::from("No csrfToken");
+    for attempt in 1..=4 {
+      let csrf_json = session
+        .fetch_json("fetch('/api/auth/csrf', { credentials: 'include', headers: { accept: 'application/json', referer: 'https://chatgpt.com/' } })")
+        .await
+        .unwrap_or_else(|e| {
+          last_err = format!("csrf fetch failed: {e}");
+          serde_json::json!({})
+        });
+      if let Some(csrf_token) = csrf_json["csrfToken"].as_str().filter(|s| !s.is_empty()) {
+        let session_log_id = Uuid::new_v4().to_string();
+        let login_hint = urlencoding::encode(alias_email);
+        let signin_js = format!(
+          "fetch('/api/auth/signin/openai?prompt=login&ext-oai-did={did}&auth_session_logging_id={sid}&screen_hint=login_or_signup&login_hint={email}', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/x-www-form-urlencoded', referer: 'https://chatgpt.com/' }}, body: new URLSearchParams({{ callbackUrl: '/', csrfToken: '{token}', json: 'true' }}) }})",
+          did = self.device_id,
+          sid = session_log_id,
+          email = login_hint,
+          token = csrf_token,
+        );
+        let signin = session.fetch_json(&signin_js).await?;
+        if let Some(url) = signin["url"].as_str().filter(|s| !s.is_empty()) {
+          return Ok(url.to_string());
+        }
+        last_err = format!("No authorize URL (attempt {attempt}): {signin}");
+      } else {
+        last_err = format!(
+          "No csrfToken (attempt {attempt}): {}",
+          csrf_json
+            .get("_status")
+            .cloned()
+            .unwrap_or_else(|| csrf_json.clone())
+        );
+      }
+      // Soft reload home + human wait — thrashing relaunch on every miss is too robotic.
+      if attempt == 2 {
+        let _ = session.navigate("https://chatgpt.com/", 20).await;
+      }
+      self
+        .human_pause(700 + attempt as u64 * 300, 1400 + attempt as u64 * 400)
+        .await;
+    }
+    Err(last_err)
   }
 
   async fn authorize_with_retry(
@@ -3850,6 +4526,8 @@ impl RegistrationEngine {
         self.log(&format!(
           "Authorize retry {attempt}/{max_attempts}: relaunching same worker with new fingerprint..."
         ));
+        // Human-like backoff before kill/relaunch thrash.
+        self.human_pause(1500, 3200).await;
         // Kill only — keep the same worker profile metadata for relaunch.
         // Abort the retry chain on kill failure: relaunching would stack a
         // second browser on the still-running one and freeze the machine.
@@ -3870,14 +4548,25 @@ impl RegistrationEngine {
           let _ = session.set_cookie("oai-did", &self.device_id, domain).await;
         }
         session.navigate("https://chatgpt.com/", 20).await?;
+        self.human_pause(1200, 2200).await;
         self.log(&format!(
           "Worker relaunched for authorize retry: {} ({})",
           profile.name, profile.id
         ));
       }
 
-      let auth_url = self.create_authorize_url(session, alias_email).await?;
+      let auth_url = match self.create_authorize_url(session, alias_email).await {
+        Ok(u) => u,
+        Err(e) => {
+          self.log(&format!(
+            "create_authorize_url failed (attempt {attempt}): {e}"
+          ));
+          // Only hard-relaunch after soft csrf retries inside create_authorize_url.
+          continue;
+        }
+      };
       session.navigate(&auth_url, 30).await?;
+      self.human_pause(800, 1500).await;
       let cur = session.current_url().await?;
 
       if is_cloudflare_block(&cur) {
@@ -3888,7 +4577,7 @@ impl RegistrationEngine {
       return Ok(cur);
     }
 
-    Err("Authorize failed after max retries — persistent Cloudflare block".into())
+    Err("Authorize failed after max retries — csrf/authorize/Cloudflare".into())
   }
 
   // -----------------------------------------------------------------------
@@ -4133,9 +4822,31 @@ impl RegistrationEngine {
         ));
       }
     }
+    // Fallback: downloaded browsers registry (critical for chromium — empty version
+    // resolves to binaries/fingerprint-chromium/ and fails to find chrome.exe).
+    if version.is_empty() {
+      let registry = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
+      let mut versions = registry.get_downloaded_versions(browser_str);
+      versions.sort_by(|a, b| {
+        crate::api_client::VersionComponent::parse(b)
+          .cmp(&crate::api_client::VersionComponent::parse(a))
+      });
+      if let Some(v) = versions.into_iter().next() {
+        version = v;
+        self.log(&format!(
+          "Using installed {browser_str} version from registry: {version}"
+        ));
+      }
+    }
+
     if version.is_empty() && browser_str == "camoufox" {
       version = "v135.0.1-beta.24".into();
       self.log(&format!("Using default Camoufox version: {version}"));
+    }
+    if version.is_empty() {
+      return Err(format!(
+        "No downloaded {browser_str} version found. Install the browser in JnmBrowser first."
+      ));
     }
 
     let browser =

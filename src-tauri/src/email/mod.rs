@@ -105,11 +105,19 @@ pub trait EmailService: Send + Sync {
   fn generate_alias(&self, base_email: &str) -> Result<String, EmailServiceError>;
 
   /// Poll for a verification code sent to the email associated with the card/CDK.
+  ///
+  /// Implementations must not return a code already recorded via
+  /// [`mark_verification_code_used`] for this CDK (stale OTP after a failed
+  /// OpenAI validate → 401).
   fn poll_verification_code(
     &self,
     cdk: &str,
     timeout_secs: u64,
   ) -> Result<String, EmailServiceError>;
+
+  /// Remember that this OTP was already attempted for `cdk` so the next poll
+  /// waits for a newer code (e.g. after OpenAI returns HTTP 401).
+  fn mark_verification_code_used(&self, cdk: &str, code: &str);
 
   /// Check if the service is reachable.
   #[allow(dead_code)]

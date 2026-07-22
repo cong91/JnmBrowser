@@ -333,14 +333,16 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin probe-free-trial --   --pro
 
 After tokens are extracted, the engine enables ChatGPT authenticator 2FA in the same browser session:
 
-1. Open account menu → Settings (`data-testid=settings-menu-item`)
-2. Open **Security** tab
+1. **Primary (live-proven):** open largest `data-testid=accounts-profile-button` chip → `data-testid=settings-menu-item` → **Security and login** (`data-testid=security-tab`)
+2. **Secondary:** set in-page hash `#settings/Security` (no CDP full navigation — hash-only navigate does not fire `loadEventFired` and used to burn 20s)
 3. Toggle **Authenticator app** (`data-testid=mfa-authenticator-toggle`)
 4. Click the underlined reveal-secret link (`button.interactive-label-accent.underline`) so the base32 secret is shown
 5. Click **Copy code** (`button[aria-label="Copy code"]`)
 6. Scrape the base32 secret from the dialog (same value that was copied)
 7. Generate a local TOTP code from that secret (RFC 6238, HMAC-SHA1, 30s, 6 digits)
 8. Fill `#totp_otp` with the 6-digit code and confirm
+
+Token extract retries `/api/auth/session` up to 5 times with human jitter (session cookies often land after first home paint).
 
 Policy:
 - Only the 2FA step is retried (default 3 attempts) inside the same browser session

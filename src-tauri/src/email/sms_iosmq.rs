@@ -402,6 +402,23 @@ impl EmailService for SmsIosmqService {
     }
   }
 
+  fn mark_verification_code_used(&self, cdk: &str, code: &str) {
+    let cdk = cdk.trim();
+    let code = code.trim();
+    if cdk.is_empty() || code.is_empty() {
+      return;
+    }
+    // Identity without provider id → still skips plain code matches next poll.
+    let entry = (code.to_string(), None, None);
+    self.remember_codes(cdk, std::slice::from_ref(&entry));
+    if let Ok(mut seen_codes) = self.seen_codes.lock() {
+      seen_codes
+        .entry(cdk.to_string())
+        .or_default()
+        .insert(format!("code:{code}"));
+    }
+  }
+
   fn check_health(&self) -> bool {
     let url = format!(
       "{}/api/v1/order/lookup?code=health-check&poll=false",

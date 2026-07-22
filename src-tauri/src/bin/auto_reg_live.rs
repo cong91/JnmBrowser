@@ -18,11 +18,13 @@ use donutbrowser_lib::auto_service::openai::register::{RegistrationConfig, Regis
 use donutbrowser_lib::email::{build_email_service, EmailProvider, EmailService};
 
 struct LiveArgs {
-  cdk: String,
+  /// One or more CDKs (comma-separated or repeated `--cdk`).
+  cdks: Vec<String>,
   browser: String,
   profile_id: Option<String>,
   max_retries: u32,
   accounts_per_cdk: u32,
+  concurrency: u32,
   network_mode: NetworkMode,
   rotate_every_n: u32,
   nord_group: Option<String>,
@@ -47,12 +49,25 @@ fn parse_email_provider(value: &str) -> EmailProvider {
   })
 }
 
+fn push_cdks(dest: &mut Vec<String>, raw: &str) {
+  for part in raw.split([',', ';', ' ', '\n', '\t']) {
+    let c = part.trim();
+    if !c.is_empty() {
+      dest.push(c.to_string());
+    }
+  }
+}
+
 fn parse_args() -> LiveArgs {
-  let mut cdk = std::env::var("AUTO_REG_CDK").unwrap_or_default();
+  let mut cdks: Vec<String> = Vec::new();
+  if let Ok(env_cdk) = std::env::var("AUTO_REG_CDK") {
+    push_cdks(&mut cdks, &env_cdk);
+  }
   let mut browser = std::env::var("AUTO_REG_BROWSER").unwrap_or_else(|_| "camoufox".into());
   let mut profile_id = std::env::var("AUTO_REG_PROFILE_ID").ok();
   let mut max_retries = 1u32;
   let mut accounts_per_cdk = 1u32;
+  let mut concurrency = 1u32;
   let mut network_mode = NetworkMode::None;
   let mut rotate_every_n = 0u32;
   let mut nord_group = std::env::var("AUTO_REG_NORD_GROUP").ok();
@@ -71,11 +86,18 @@ fn parse_args() -> LiveArgs {
   if let Ok(n) = std::env::var("AUTO_REG_ACCOUNTS_PER_CDK") {
     accounts_per_cdk = n.parse().unwrap_or(1);
   }
+  if let Ok(n) = std::env::var("AUTO_REG_CONCURRENCY") {
+    concurrency = n.parse().unwrap_or(1);
+  }
 
   let mut args = std::env::args().skip(1);
   while let Some(arg) = args.next() {
     match arg.as_str() {
-      "--cdk" => cdk = args.next().unwrap_or_default(),
+      "--cdk" => {
+        if let Some(v) = args.next() {
+          push_cdks(&mut cdks, &v);
+        }
+      }
       "--browser" => browser = args.next().unwrap_or(browser),
       "--profile-id" => profile_id = args.next(),
       "--max-retries" => {
@@ -89,6 +111,12 @@ fn parse_args() -> LiveArgs {
           .next()
           .and_then(|v| v.parse().ok())
           .unwrap_or(accounts_per_cdk);
+      }
+      "--concurrency" => {
+        concurrency = args
+          .next()
+          .and_then(|v| v.parse().ok())
+          .unwrap_or(concurrency);
       }
       "--network" => {
         network_mode = parse_network_mode(&args.next().unwrap_or_default());
@@ -108,7 +136,7 @@ fn parse_args() -> LiveArgs {
         }
       }
       other if other.starts_with("--cdk=") => {
-        cdk = other.trim_start_matches("--cdk=").to_string();
+        push_cdks(&mut cdks, other.trim_start_matches("--cdk="));
       }
       other if other.starts_with("--browser=") => {
         browser = other.trim_start_matches("--browser=").to_string();
@@ -131,6 +159,12 @@ fn parse_args() -> LiveArgs {
           .parse()
           .unwrap_or(accounts_per_cdk);
       }
+      other if other.starts_with("--concurrency=") => {
+        concurrency = other
+          .trim_start_matches("--concurrency=")
+          .parse()
+          .unwrap_or(concurrency);
+      }
       other if other.starts_with("--nord-group=") => {
         nord_group = Some(other.trim_start_matches("--nord-group=").to_string());
       }
@@ -147,21 +181,34 @@ fn parse_args() -> LiveArgs {
     }
   }
 
-  if cdk.is_empty() {
+  // de-dupe while preserving order
+  let mut seen = std::collections::HashSet::new();
+  cdks.retain(|c| seen.insert(c.clone()));
+
+  if cdks.is_empty() {
     eprintln!(
-      "Usage: auto-reg-live --cdk GMAIL-XXXX [--browser camoufox] [--profile-id UUID] \
-       [--network none|proxy|vpn|nord] [--vpn-id ID] [--rotate-every N] [--accounts-per-cdk N] \
-       [--nord-group \"United States\"] [--email-provider gmail.123452026.xyz|sms.iosmq.xyz]"
+      "Usage: auto-reg-live --cdk GMAIL-XXXX[,GMAIL-YYYY] [--concurrency N] [--browser camoufox] \
+       [--profile-id UUID] [--network none|proxy|vpn|nord] [--vpn-id ID] [--rotate-every N] \
+       [--accounts-per-cdk N] [--nord-group \"United States\"] \
+       [--email-provider gmail.123452026.xyz|sms.iosmq.xyz]"
     );
     std::process::exit(2);
   }
 
+  // Default concurrency to CDK count when user runs multi-CDK without flag
+  // (still clamp 1..=8; engine also clamps).
+  if concurrency <= 1 && cdks.len() > 1 {
+    concurrency = cdks.len().min(8) as u32;
+  }
+  concurrency = concurrency.clamp(1, 8);
+
   LiveArgs {
-    cdk,
+    cdks,
     browser,
     profile_id,
     max_retries,
     accounts_per_cdk,
+    concurrency,
     network_mode,
     rotate_every_n,
     nord_group,
@@ -176,11 +223,12 @@ fn main() {
 
   let args = parse_args();
   eprintln!("=== LIVE AUTO-REGISTER ===");
-  eprintln!("cdk={}", args.cdk);
+  eprintln!("cdks={:?}", args.cdks);
   eprintln!("browser={}", args.browser);
   eprintln!("profile_id={:?}", args.profile_id);
   eprintln!("max_retries={}", args.max_retries);
   eprintln!("accounts_per_cdk={}", args.accounts_per_cdk);
+  eprintln!("concurrency={}", args.concurrency);
   eprintln!("network_mode={:?}", args.network_mode);
   eprintln!("rotate_every_n={}", args.rotate_every_n);
   eprintln!("nord_group={:?}", args.nord_group);
@@ -196,7 +244,7 @@ fn main() {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         let result = rt.block_on(async move {
           let mut config = RegistrationConfig {
-            cdks: vec![args.cdk],
+            cdks: args.cdks,
             profile_id: args.profile_id,
             proxy_id: None,
             vpn_id: args.vpn_id,
@@ -204,7 +252,7 @@ fn main() {
             max_retries: args.max_retries,
             accounts_per_cdk: args.accounts_per_cdk.max(1),
             headless: false,
-            concurrency: 1,
+            concurrency: args.concurrency.max(1),
             nord_max_sessions: 6,
             network_mode: args.network_mode,
             rotate_every_n: args.rotate_every_n,
@@ -228,8 +276,8 @@ fn main() {
             std::process::exit(2);
           }
           eprintln!(
-            "effective network_mode={:?} rotate_every_n={} email_provider={}",
-            config.network_mode, config.rotate_every_n, config.email_provider
+            "effective network_mode={:?} rotate_every_n={} concurrency={} email_provider={}",
+            config.network_mode, config.rotate_every_n, config.concurrency, config.email_provider
           );
 
           let cancel = Arc::new(AtomicBool::new(false));
@@ -253,6 +301,8 @@ fn main() {
           eprintln!("{line}");
         }
 
+        // Batch multi-CDK: account_id may be "batch:N" and success means any/all
+        // depending on engine aggregation — exit 0 only if success flag true.
         std::process::exit(if result.success { 0 } else { 1 });
       });
       Ok(())
