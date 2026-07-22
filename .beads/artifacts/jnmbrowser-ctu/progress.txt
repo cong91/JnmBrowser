@@ -27,3 +27,9 @@ Started: 2026-07-21
 - frontend-1: cdk-inventory-table remaining column + Top-up action.
 - frontend-2: dialog picker + topUpRemaining clamp on start; wire onTopUp.
 - Verify: tsc clean; biome clean on touched UI; cargo store tests 15 passed.
+
+## 2026-07-21 review fix
+- fix(bead-jnmbrowser-ctu) b913470: live remaining cap for accounts input + Start total; block rem=0; a11y disabled reasons.
+
+## 2026-07-21 ship hold
+- User chose keep bead open (manual QA). Status remains in_progress.
