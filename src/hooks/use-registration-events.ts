@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
+import { upsertRegistrationProgress } from "@/components/registration-progress-selection";
 import type { EmailProvider } from "@/lib/email-providers";
 
 export interface RegistrationProgress {
@@ -122,11 +123,9 @@ export function useRegistrationEvents() {
       unlisten = await listen<RegistrationProgress>(
         "registration-progress",
         (event) => {
-          setProgressMap((prev) => {
-            const next = new Map(prev);
-            next.set(event.payload.taskId, event.payload);
-            return next;
-          });
+          setProgressMap((prev) =>
+            upsertRegistrationProgress(prev, event.payload),
+          );
           // Refresh inventories when a registration emits a result.
           if (event.payload.result) {
             void invoke<RegistrationResult[]>("list_registered_accounts_cmd")

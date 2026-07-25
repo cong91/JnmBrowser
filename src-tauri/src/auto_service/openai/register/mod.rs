@@ -14,6 +14,11 @@ pub use crate::auto_service::common::{nord_cli, totp};
 #[allow(unused_imports)]
 pub use engine::RegistrationEngine;
 #[allow(unused_imports)]
+pub(crate) use store::{
+  compare_and_update_registered_account, persist_inferred_email_provider,
+  BackfillPatchPrecondition, TwoFactorBackfillPatch,
+};
+#[allow(unused_imports)]
 pub use store::{
   delete_cdk_inventory, delete_registered_account, list_cdk_inventory, list_registered_accounts,
   save_registration_result,

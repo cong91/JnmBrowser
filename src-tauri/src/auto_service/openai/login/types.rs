@@ -158,6 +158,10 @@ pub fn should_rotate(success_count: u32, every_n: u32) -> bool {
   every_n > 0 && success_count > 0 && success_count.is_multiple_of(every_n)
 }
 
+const DEFAULT_SMS_SERVICE_ID: u32 = 1234;
+const DEFAULT_SMS_NETWORK: &str = "VINAPHONE";
+const DEFAULT_SMS_COUNTRY: &str = "vn";
+
 impl LoginConfig {
   fn non_empty(opt: &Option<String>) -> bool {
     opt.as_ref().is_some_and(|s| !s.trim().is_empty())
@@ -170,8 +174,28 @@ impl LoginConfig {
     }
   }
 
-  /// Normalize bare proxyId / vpnId into network_mode and default rotate.
+  /// Normalize bare proxyId / vpnId, SMS defaults, and VPN rotation.
   pub fn normalize(&mut self) {
+    self.sms_provider = self
+      .sms_provider
+      .take()
+      .map(|provider| provider.trim().to_ascii_lowercase())
+      .filter(|provider| !provider.is_empty());
+    if self.sms_provider.as_deref() == Some("viotp") {
+      self.sms_service_id.get_or_insert(DEFAULT_SMS_SERVICE_ID);
+      if !Self::non_empty(&self.sms_network) {
+        self.sms_network = Some(DEFAULT_SMS_NETWORK.into());
+      }
+      if !Self::non_empty(&self.sms_country) {
+        self.sms_country = Some(DEFAULT_SMS_COUNTRY.into());
+      }
+    } else {
+      self.sms_token = None;
+      self.sms_service_id = None;
+      self.sms_network = None;
+      self.sms_country = None;
+    }
+
     let has_vpn = Self::non_empty(&self.vpn_id);
     let has_proxy = Self::non_empty(&self.proxy_id);
     if self.network_mode == LoginNetworkMode::None && has_vpn {
@@ -196,6 +220,10 @@ impl LoginConfig {
     }
   }
 
+  pub fn uses_viotp(&self) -> bool {
+    self.sms_provider.as_deref() == Some("viotp")
+  }
+
   /// Validate configuration before starting.
   pub fn validate(&self) -> Result<(), String> {
     if self.credentials.is_empty() {
@@ -207,6 +235,14 @@ impl LoginConfig {
       }
       if self.sub2api_api_key.trim().is_empty() {
         return Err("Sub2API API key is required when push is enabled".into());
+      }
+    }
+    if let Some(provider) = self.sms_provider.as_deref() {
+      if provider != "viotp" {
+        return Err(format!("Unsupported SMS provider: {provider}"));
+      }
+      if self.sms_service_id.is_none() {
+        return Err("VIOTP requires smsServiceId".into());
       }
     }
     match self.network_mode {
@@ -557,6 +593,81 @@ mod tests {
     assert_eq!(c.network_mode, LoginNetworkMode::Vpn);
     assert_eq!(c.rotate_every_n, 1);
     assert_eq!(c.effective_vpn_id().as_deref(), Some("wg-1"));
+  }
+
+  #[test]
+  fn viotp_normalize_applies_proven_live_defaults() {
+    let mut c = LoginConfig {
+      credentials_text: String::new(),
+      credentials: vec![LoginCredential {
+        email: "a@x.com".into(),
+        password: "p".into(),
+        totp_secret: "secret".into(),
+      }],
+      browser_type: "chromium".into(),
+      max_retries: 1,
+      headless: false,
+      concurrency: 1,
+      sub2api_url: String::new(),
+      sub2api_api_key: String::new(),
+      sub2api_proxy_id: None,
+      sub2api_group_ids: None,
+      push_to_sub2api: false,
+      sms_provider: Some(" VIOTP ".into()),
+      sms_token: Some("token".into()),
+      sms_service_id: None,
+      sms_network: Some(" ".into()),
+      sms_country: None,
+      proxy_id: None,
+      vpn_id: None,
+      rotate_every_n: 0,
+      network_mode: LoginNetworkMode::None,
+    };
+
+    c.normalize();
+
+    assert!(c.uses_viotp());
+    assert_eq!(c.sms_service_id, Some(1234));
+    assert_eq!(c.sms_network.as_deref(), Some("VINAPHONE"));
+    assert_eq!(c.sms_country.as_deref(), Some("vn"));
+  }
+
+  #[test]
+  fn disabled_sms_normalize_clears_stale_viotp_settings() {
+    let mut c = LoginConfig {
+      credentials_text: String::new(),
+      credentials: vec![LoginCredential {
+        email: "a@x.com".into(),
+        password: "p".into(),
+        totp_secret: "secret".into(),
+      }],
+      browser_type: "chromium".into(),
+      max_retries: 1,
+      headless: false,
+      concurrency: 1,
+      sub2api_url: String::new(),
+      sub2api_api_key: String::new(),
+      sub2api_proxy_id: None,
+      sub2api_group_ids: None,
+      push_to_sub2api: false,
+      sms_provider: None,
+      sms_token: Some("stale-token".into()),
+      sms_service_id: Some(1234),
+      sms_network: Some("VINAPHONE".into()),
+      sms_country: Some("vn".into()),
+      proxy_id: None,
+      vpn_id: None,
+      rotate_every_n: 0,
+      network_mode: LoginNetworkMode::None,
+    };
+
+    c.normalize();
+
+    assert!(!c.uses_viotp());
+    assert_eq!(c.sms_token, None);
+    assert_eq!(c.sms_service_id, None);
+    assert_eq!(c.sms_network, None);
+    assert_eq!(c.sms_country, None);
   }
 
   #[test]

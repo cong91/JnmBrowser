@@ -37,6 +37,10 @@ name = "auto-login-live"
 path = "src/bin/auto_login_live.rs"
 
 [[bin]]
+name = "twofa-backfill-live"
+path = "src/bin/twofa_backfill_live.rs"
+
+[[bin]]
 name = "probe-free-trial"
 path = "src/bin/probe_free_trial.rs"
 

@@ -130,13 +130,31 @@ impl ChromiumManager {
     }
   }
 
-  /// Flags that keep Chromium responsive for CDP automation when minimized/occluded.
-  fn automation_background_launch_args() -> Vec<String> {
+  /// Flags that keep Chromium responsive when minimized or occluded.
+  fn background_responsiveness_launch_args() -> Vec<String> {
     vec![
       "--disable-background-timer-throttling".to_string(),
       "--disable-backgrounding-occluded-windows".to_string(),
       "--disable-renderer-backgrounding".to_string(),
     ]
+  }
+
+  fn ensure_non_automation_launch_args(args: &[String]) -> Result<(), String> {
+    const FORBIDDEN_SWITCHES: &[&str] = &[
+      "--enable-automation",
+      "--test-type",
+      "--remote-debugging-pipe",
+    ];
+    if let Some(flag) = args.iter().find(|arg| {
+      FORBIDDEN_SWITCHES
+        .iter()
+        .any(|forbidden| arg.as_str() == *forbidden || arg.starts_with(&format!("{forbidden}=")))
+    }) {
+      return Err(format!(
+        "Refusing to launch Chromium with automation-only switch {flag}"
+      ));
+    }
+    Ok(())
   }
 
   fn chromium_extension_launch_args(extension_paths: &[String]) -> Vec<String> {
@@ -1098,7 +1116,7 @@ impl ChromiumManager {
       "--disable-background-mode".to_string(),
       "--disable-component-update".to_string(),
     ];
-    args.extend(Self::automation_background_launch_args());
+    args.extend(Self::background_responsiveness_launch_args());
     args.extend([
       "--crash-server-url=".to_string(),
       "--disable-updater".to_string(),
@@ -1138,6 +1156,9 @@ impl ChromiumManager {
       args.push(format!("--proxy-server={proxy}"));
       args.push("--dns-prefetch-disable".to_string());
     }
+
+    Self::ensure_non_automation_launch_args(&args)
+      .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
 
     let mut command = TokioCommand::new(&executable_path);
     command
@@ -1597,8 +1618,8 @@ mod tests {
   use serde_json::json;
 
   #[test]
-  fn automation_launch_args_disable_background_throttling() {
-    let args = ChromiumManager::automation_background_launch_args();
+  fn background_responsiveness_args_do_not_enable_automation_mode() {
+    let args = ChromiumManager::background_responsiveness_launch_args();
     assert!(args
       .iter()
       .any(|a| a == "--disable-background-timer-throttling"));
@@ -1606,6 +1627,28 @@ mod tests {
       .iter()
       .any(|a| a == "--disable-backgrounding-occluded-windows"));
     assert!(args.iter().any(|a| a == "--disable-renderer-backgrounding"));
+    ChromiumManager::ensure_non_automation_launch_args(&args)
+      .expect("background responsiveness switches must not enable automation mode");
+  }
+
+  #[test]
+  fn non_automation_guard_allows_cdp_port_but_rejects_test_harness_switches() {
+    ChromiumManager::ensure_non_automation_launch_args(&[
+      "--remote-debugging-port=9222".into(),
+      "--remote-debugging-address=127.0.0.1".into(),
+    ])
+    .expect("CDP over a loopback port must remain available");
+
+    for forbidden in [
+      "--enable-automation",
+      "--enable-automation=true",
+      "--test-type",
+      "--remote-debugging-pipe",
+    ] {
+      let error = ChromiumManager::ensure_non_automation_launch_args(&[forbidden.into()])
+        .expect_err("automation-only switch must be rejected");
+      assert!(error.contains(forbidden.split('=').next().unwrap_or(forbidden)));
+    }
   }
 
   #[test]

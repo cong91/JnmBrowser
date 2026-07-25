@@ -12,6 +12,37 @@ use std::path::{Path, PathBuf};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use url::Url;
 
+struct ProfileCreationGuard {
+  profile_dir: PathBuf,
+  committed: bool,
+}
+
+impl ProfileCreationGuard {
+  fn new(profile_dir: PathBuf) -> Self {
+    Self {
+      profile_dir,
+      committed: false,
+    }
+  }
+
+  fn commit(&mut self) {
+    self.committed = true;
+  }
+}
+
+impl Drop for ProfileCreationGuard {
+  fn drop(&mut self) {
+    if !self.committed && self.profile_dir.exists() {
+      if let Err(error) = fs::remove_dir_all(&self.profile_dir) {
+        log::warn!(
+          "Failed to roll back partial profile directory {}: {error}",
+          self.profile_dir.display()
+        );
+      }
+    }
+  }
+}
+
 pub struct ProfileManager {
   camoufox_manager: &'static crate::camoufox_manager::CamoufoxManager,
   chromium_manager: &'static crate::chromium_manager::ChromiumManager,
@@ -108,7 +139,10 @@ impl ProfileManager {
     let profile_data_dir = profile_uuid_dir.join("profile");
     let profile_file = profile_uuid_dir.join("metadata.json");
 
-    // Create profile directory with UUID and profile subdirectory
+    // Create profile directory with UUID and profile subdirectory.
+    // The guard owns only this newly generated UUID path and removes it if any
+    // later creation step fails.
+    let mut creation_guard = ProfileCreationGuard::new(profile_uuid_dir.clone());
     create_dir_all(&profile_uuid_dir)?;
     if !ephemeral {
       create_dir_all(&profile_data_dir)?;
@@ -376,6 +410,7 @@ impl ProfileManager {
       log::warn!("Warning: Failed to emit profiles-changed event: {e}");
     }
 
+    creation_guard.commit();
     Ok(profile)
   }
 
@@ -2086,6 +2121,19 @@ mod tests {
     let err = ProfileManager::normalize_launch_hook(Some("ftp://example.com/hook".to_string()))
       .unwrap_err();
     assert!(err.to_string().contains("http or https"));
+  }
+
+  #[test]
+  fn profile_creation_guard_removes_partial_uuid_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    let partial_dir = temp_dir.path().join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&partial_dir).unwrap();
+
+    {
+      let _guard = ProfileCreationGuard::new(partial_dir.clone());
+    }
+
+    assert!(!partial_dir.exists());
   }
 }
 

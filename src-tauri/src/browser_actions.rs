@@ -28,11 +28,11 @@ impl Default for HumanProfile {
   fn default() -> Self {
     Self {
       wpm: Some(62.0),
-      think_min_ms: 120,
-      think_max_ms: 480,
-      mouse_steps: 12,
-      post_type_min_ms: 80,
-      post_type_max_ms: 320,
+      think_min_ms: 60,
+      think_max_ms: 240,
+      mouse_steps: 8,
+      post_type_min_ms: 40,
+      post_type_max_ms: 160,
     }
   }
 }
@@ -42,11 +42,11 @@ impl HumanProfile {
   pub fn form_fill() -> Self {
     Self {
       wpm: Some(55.0),
-      think_min_ms: 90,
-      think_max_ms: 350,
-      mouse_steps: 10,
-      post_type_min_ms: 60,
-      post_type_max_ms: 220,
+      think_min_ms: 45,
+      think_max_ms: 175,
+      mouse_steps: 7,
+      post_type_min_ms: 30,
+      post_type_max_ms: 110,
     }
   }
 
@@ -54,11 +54,11 @@ impl HumanProfile {
   pub fn careful() -> Self {
     Self {
       wpm: Some(48.0),
-      think_min_ms: 180,
-      think_max_ms: 700,
-      mouse_steps: 16,
-      post_type_min_ms: 120,
-      post_type_max_ms: 400,
+      think_min_ms: 90,
+      think_max_ms: 350,
+      mouse_steps: 10,
+      post_type_min_ms: 60,
+      post_type_max_ms: 200,
     }
   }
 }

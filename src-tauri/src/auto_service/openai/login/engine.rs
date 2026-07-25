@@ -84,12 +84,17 @@ impl OAuthCallbackListener {
           accept = listener.accept() => {
             match accept {
               Ok((mut socket, _)) => {
-                if let Some(result) = handle_oauth_callback_connection(&mut socket).await {
-                  if let Some(sender) = tx.take() {
-                    let _ = sender.send(Ok(result));
+                tokio::select! {
+                  _ = &mut shutdown_rx => break,
+                  result = handle_oauth_callback_connection(&mut socket) => {
+                    if let Some(result) = result {
+                      if let Some(sender) = tx.take() {
+                        let _ = sender.send(Ok(result));
+                      }
+                      // Keep accepting briefly so Chrome can finish loading success HTML,
+                      // but only the first valid code is returned.
+                    }
                   }
-                  // Keep accepting briefly so Chrome can finish loading success HTML,
-                  // but only the first valid code is returned.
                 }
               }
               Err(_) => break,
@@ -682,6 +687,8 @@ enum LoginPageType {
   LoginEmail,
   LoginPassword,
   TwoFactor,
+  /// Email OTP verification (distinct from TOTP authenticator).
+  EmailOtp,
   /// Enter phone number (country select + tel input).
   AddPhone,
   /// Enter SMS OTP after phone number was submitted.
@@ -801,13 +808,16 @@ fn detect_login_page_type(url: &str) -> LoginPageType {
     || path.contains("create-account/password");
   // "authorize" alone is the OAuth start URL — only treat as email entry when it looks like login.
   let is_email_entry = path.contains("identifier")
-    || path.contains("email-otp")
     || path.contains("/log-in")
     || path.contains("/login")
     || path.contains("log-in-or-create")
     || (path.contains("oauth/authorize") && !path.contains("consent"));
   if is_password {
     LoginPageType::LoginPassword
+  } else if path.contains("email-otp") {
+    // Email OTP verification page (distinct from TOTP authenticator).
+    // Must check before generic "mfa"/"challenge" to avoid misclassification.
+    LoginPageType::EmailOtp
   } else if path.contains("mfa")
     || path.contains("totp")
     || path.contains("2fa")
@@ -1339,6 +1349,8 @@ impl LoginEngine {
     let mut sms_number_attempts: u32 = 0;
     // Loops spent waiting for AddPhone → PhoneOtp after a submit (detect stuck form).
     let mut add_phone_wait_loops: u32 = 0;
+    // Email OTP must switch to the authenticator challenge; never submit TOTP to email input.
+    let mut email_otp_switch_attempts: u32 = 0;
 
     // Step 4-8: Login flow state machine.
     // Returning accounts (phone already verified) skip AddPhone/PhoneOtp and land on Consent.
@@ -1363,7 +1375,10 @@ impl LoginEngine {
       // URL can lag SPA transitions (or be chrome-error without path). Probe DOM.
       if matches!(
         page,
-        LoginPageType::Unknown | LoginPageType::LoginEmail | LoginPageType::AddPhone
+        LoginPageType::Unknown
+          | LoginPageType::LoginEmail
+          | LoginPageType::TwoFactor
+          | LoginPageType::AddPhone
       ) {
         if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
           let resolved_page = resolve_dom_page_override(page, dom_page);
@@ -1442,6 +1457,35 @@ impl LoginEngine {
           self.fill_and_submit_2fa(cdp, &totp_code).await?;
           sleep(std::time::Duration::from_secs(2)).await;
           cur_url = cdp.current_url().await.unwrap_or_default();
+        }
+
+        LoginPageType::EmailOtp => {
+          if credential.totp_secret.is_empty() {
+            return Err("Email OTP shown but no TOTP secret was provided".into());
+          }
+          email_otp_switch_attempts += 1;
+          if email_otp_switch_attempts > 3 {
+            return Err(
+              "Could not switch OpenAI email OTP challenge to authenticator TOTP after 3 attempts"
+                .into(),
+            );
+          }
+          self.log(&format!(
+            "{prefix} Email OTP challenge detected; switching to authenticator TOTP ({email_otp_switch_attempts}/3)"
+          ));
+          match self.select_totp_mfa_method(cdp, prefix).await {
+            Ok(true) => {
+              sleep(std::time::Duration::from_secs(2)).await;
+              cur_url = cdp.current_url().await.unwrap_or_default();
+              continue;
+            }
+            Ok(false) => {
+              return Err(
+                "OpenAI email OTP challenge did not expose an authenticator TOTP method".into(),
+              );
+            }
+            Err(e) => return Err(e),
+          }
         }
 
         LoginPageType::AddPhone => {
@@ -1530,18 +1574,47 @@ impl LoginEngine {
             number_info.request_id, number_info.phone_number
           ));
 
-          // First number: normal country select. After OTP timeout / re-rent: force
-          // reselect Vietnam + clear leftover digits (SPA often leaves +1 active).
-          let force_country = sms_number_attempts > 1;
+          // Re-rent: clear leftover digits. Avoid force-opening country Select when UI
+          // already shows Vietnam — force reselect collapses listbox (no_listbox).
+          if sms_number_attempts > 1 {
+            let _ = self.clear_phone_input(cdp).await;
+            sleep(std::time::Duration::from_millis(250)).await;
+          }
           self
-            .fill_phone_and_submit_inner(cdp, &number_info.phone_number, force_country)
+            .fill_phone_and_submit_inner(cdp, &number_info.phone_number, false)
             .await?;
-          // Wait for OpenAI to move to /phone-verification.
-          for _ in 0..10 {
+          // Wait for OpenAI to move to /phone-verification. Capture page error text
+          // when still stuck on add-phone (invalid number / rate limit / bot flags).
+          for _ in 0..12 {
             sleep(std::time::Duration::from_millis(500)).await;
             cur_url = cdp.current_url().await.unwrap_or_default();
             if matches!(detect_login_page_type(&cur_url), LoginPageType::PhoneOtp) {
               break;
+            }
+          }
+          if matches!(detect_login_page_type(&cur_url), LoginPageType::AddPhone) {
+            if let Ok(err_probe) = cdp
+              .evaluate(
+                r#"(function(){
+                  const body = (document.body && document.body.innerText || '').replace(/\s+/g,' ').trim();
+                  const alerts = Array.from(document.querySelectorAll('[role="alert"], .error, [data-error], [class*="error"]'))
+                    .map((el) => (el.innerText||'').replace(/\s+/g,' ').trim()).filter(Boolean).slice(0,4);
+                  return { alerts, body: body.slice(0,280) };
+                })()"#,
+                false,
+              )
+              .await
+            {
+              self.log(&format!(
+                "{prefix} Still on AddPhone after submit: {}",
+                err_probe
+                  .get("value")
+                  .map(|v| v.to_string())
+                  .unwrap_or_default()
+                  .chars()
+                  .take(320)
+                  .collect::<String>()
+              ));
             }
           }
           self.log(&format!("{prefix} After phone submit, URL: {cur_url}"));
@@ -2028,15 +2101,7 @@ impl LoginEngine {
         }
         continue;
       }
-      let dump = value_json
-        .get("dump")
-        .map(|d| d.to_string())
-        .unwrap_or_default();
       let url = value_json.get("url").and_then(|u| u.as_str()).unwrap_or("");
-      let body = value_json
-        .get("bodyText")
-        .and_then(|u| u.as_str())
-        .unwrap_or("");
       let ready = value_json
         .get("ready")
         .and_then(|u| u.as_str())
@@ -2046,7 +2111,7 @@ impl LoginEngine {
         .and_then(|u| u.as_u64())
         .unwrap_or(0);
       last_err = format!(
-        "fill {field}: {} url={url} ready={ready} iframes={iframes} body={body:?} dump={dump}",
+        "fill {field}: {} url={url} ready={ready} iframes={iframes}",
         value_json["reason"].as_str().unwrap_or("failed")
       );
     }
@@ -2107,33 +2172,77 @@ impl LoginEngine {
     cdp: &mut BrowserSession,
     prefix: &str,
   ) -> Result<bool, String> {
+    // Prefer trusted selector clicks for React controls; DOM .click() remains fallback.
+    for selector in [
+      r#"button:has-text("Google Authenticator")"#,
+      r#"[role="button"]:has-text("Google Authenticator")"#,
+      r#"button:has-text("Authentication app")"#,
+      r#"[role="button"]:has-text("Authentication app")"#,
+    ] {
+      if cdp.selector_click(selector).await.is_ok() {
+        self.log(&format!(
+          "{prefix} Selected authenticator TOTP method via {selector}"
+        ));
+        return Ok(true);
+      }
+    }
+
+    let current_url = cdp.current_url().await.unwrap_or_default();
+    if current_url.to_ascii_lowercase().contains("email-otp") {
+      for selector in [
+        r#"button:has-text("Try another method")"#,
+        r#"[role="button"]:has-text("Try another method")"#,
+        r#"button:has-text("Use another method")"#,
+        r#"[role="button"]:has-text("Use another method")"#,
+      ] {
+        if cdp.selector_click(selector).await.is_ok() {
+          self.log(&format!(
+            "{prefix} Opened MFA method chooser via {selector}"
+          ));
+          return Ok(true);
+        }
+      }
+    }
+
     let js = r#"(function(){
-      // If OTP input already present, no method selection needed.
-      const codeInput = document.querySelector(
-        'input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="tel"], input[type="text"]'
-      );
-      if (codeInput) {
-        const r = codeInput.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) return { action: 'input_ready' };
+      const url = location.href.toLowerCase();
+      const isEmailOtpPage = url.includes('email-otp');
+
+      // If OTP input already present AND NOT on email-otp page, no method selection needed.
+      // On email-otp page, the input is for email code — must switch to authenticator method.
+      if (!isEmailOtpPage) {
+        const codeInput = document.querySelector(
+          'input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="tel"], input[type="text"]'
+        );
+        if (codeInput) {
+          const r = codeInput.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) return { action: 'input_ready' };
+        }
       }
 
       const body = (document.body && document.body.innerText || '').replace(/\s+/g, ' ');
       const hasChooser = /Select a method to verify your identity/i.test(body)
         || /Google Authenticator or similar/i.test(body);
-      if (!hasChooser) return { action: 'none' };
-
-      // Authenticator unavailable on chooser.
-      if (/Google Authenticator or similar[\s\S]{0,120}temporarily unavailable/i.test(body)
-          || (/temporarily unavailable/i.test(body) && /Google Authenticator/i.test(body))) {
-        // Prefer Email fallback if listed.
-        const emailNodes = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-        for (const el of emailNodes) {
+      if (!hasChooser && isEmailOtpPage) {
+        const nodes = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+        for (const el of nodes) {
           const t = (el.innerText || el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
-          if (t === 'email' || t.startsWith('email')) {
-            el.click();
-            return { action: 'clicked_email_fallback', text: t.slice(0, 80) };
+          if (!t || t.length > 80) continue;
+          if (/try another method|use another method|choose another method|other verification method|different method/.test(t)) {
+            try {
+              el.scrollIntoView({ block: 'center' });
+              el.click();
+              return { action: 'clicked_method_chooser', text: t.slice(0, 80) };
+            } catch (_) {}
           }
         }
+      }
+      if (!hasChooser) return { action: 'none' };
+
+      // Authenticator unavailable on chooser. Login credentials are TOTP-only;
+      // never fall back to email OTP because no email code is available here.
+      if (/Google Authenticator or similar[\s\S]{0,120}temporarily unavailable/i.test(body)
+          || (/temporarily unavailable/i.test(body) && /Google Authenticator/i.test(body))) {
         return { action: 'totp_unavailable', body: body.slice(0, 240) };
       }
 
@@ -2161,7 +2270,7 @@ impl LoginEngine {
       .unwrap_or("none");
     match action {
       "none" | "input_ready" => Ok(false),
-      "clicked" | "clicked_email_fallback" => {
+      "clicked" | "clicked_method_chooser" => {
         let text = value
           .get("text")
           .and_then(|t| t.as_str())
@@ -2502,50 +2611,75 @@ impl LoginEngine {
 
     // Wait until the virtualized listbox actually mounts options.
     // Camoufox often needs longer than Chromium before rows appear.
+    // If DOM .click() left an empty shell, retry with a trusted mouse click on the trigger.
     let mut options_ready = false;
-    for _ in 0..20 {
-      let state = cdp
-        .evaluate(
-          r#"(function(){
-            const lb = document.querySelector('[role="listbox"]');
-            const opts = Array.from(document.querySelectorAll('[role="option"]'));
-            return {
-              hasListbox: !!lb,
-              optionCount: opts.length,
-              sample: opts.slice(0, 5).map((el) => ({
-                key: el.getAttribute('data-key') || '',
-                text: (el.innerText||'').replace(/\s+/g,' ').trim().slice(0,40)
-              }))
-            };
-          })()"#,
-          false,
-        )
-        .await
-        .ok()
-        .and_then(|r| r.get("value").cloned())
-        .unwrap_or_default();
-      let count = state
-        .get("optionCount")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-      if state.get("hasListbox").and_then(|v| v.as_bool()) == Some(true) && count > 0 {
-        options_ready = true;
-        self.log(&format!(
-          "Country listbox ready: {count} options mounted, sample={}",
-          state
-            .get("sample")
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-            .chars()
-            .take(180)
-            .collect::<String>()
-        ));
+    for open_try in 0..3 {
+      for _ in 0..16 {
+        let state = cdp
+          .evaluate(
+            r#"(function(){
+              const lb = document.querySelector('[role="listbox"]');
+              const opts = Array.from(document.querySelectorAll('[role="option"]'));
+              return {
+                hasListbox: !!lb,
+                optionCount: opts.length,
+                sample: opts.slice(0, 5).map((el) => ({
+                  key: el.getAttribute('data-key') || '',
+                  text: (el.innerText||'').replace(/\s+/g,' ').trim().slice(0,40)
+                }))
+              };
+            })()"#,
+            false,
+          )
+          .await
+          .ok()
+          .and_then(|r| r.get("value").cloned())
+          .unwrap_or_default();
+        let count = state
+          .get("optionCount")
+          .and_then(|v| v.as_u64())
+          .unwrap_or(0);
+        if state.get("hasListbox").and_then(|v| v.as_bool()) == Some(true) && count > 0 {
+          options_ready = true;
+          self.log(&format!(
+            "Country listbox ready: {count} options mounted, sample={}",
+            state
+              .get("sample")
+              .map(|s| s.to_string())
+              .unwrap_or_default()
+              .chars()
+              .take(180)
+              .collect::<String>()
+          ));
+          break;
+        }
+        sleep(std::time::Duration::from_millis(200)).await;
+      }
+      if options_ready {
         break;
       }
-      sleep(std::time::Duration::from_millis(200)).await;
-    }
-    if !options_ready {
-      // Re-click trigger once if first open left an empty shell.
+      self.log(&format!(
+        "Country listbox not ready after open try {}; retrying with mouse click",
+        open_try + 1
+      ));
+      // Trusted pointer on the trigger is more reliable than synthetic DOM events.
+      let rect_js = r#"(function(){
+        const trigger = document.querySelector('button[aria-haspopup="listbox"]');
+        if (!trigger) return null;
+        try { trigger.scrollIntoView({ block: 'center' }); } catch(_) {}
+        const r = trigger.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) return null;
+        return { x: r.left + r.width/2, y: r.top + r.height/2 };
+      })()"#;
+      if let Ok(rect_res) = cdp.evaluate(rect_js, false).await {
+        if let Some(rect) = rect_res.get("value") {
+          let x = rect.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0);
+          let y = rect.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0);
+          if x > 1.0 && y > 1.0 {
+            let _ = cdp.mouse_click(x, y).await;
+          }
+        }
+      }
       let _ = cdp.evaluate(open_js, false).await;
       sleep(std::time::Duration::from_millis(600)).await;
     }
@@ -3311,6 +3445,12 @@ impl LoginEngine {
       const hasPwd = !!document.querySelector('input[type="password"], input[name="password"], input[autocomplete="current-password"]');
       if (hasPwd) return 'password';
       const hasCode = !!document.querySelector('input[autocomplete="one-time-code"], input[name="code"], input[inputmode="numeric"]');
+      // Email OTP page: URL has email-otp, or body mentions email verification/code explicitly.
+      const emailOtpSignal = href.includes('email-otp')
+        || (hasCode
+          && /email|inbox|sent.*code.*email|code.*email/i.test(body)
+          && !/authenticator|google authenticator|two-factor|2fa|mfa/i.test(body));
+      if (emailOtpSignal) return 'email_otp';
       // Phone SMS OTP page (after add-phone submit): code field + phone wording, not authenticator.
       if (hasCode && /phone|sms|text message|verification code/i.test(body)
           && !/authenticator|google authenticator|two-factor|2fa|mfa/i.test(body)) {
@@ -3344,6 +3484,7 @@ impl LoginEngine {
       "callback" => LoginPageType::Callback,
       "phone" => LoginPageType::AddPhone,
       "phone_otp" => LoginPageType::PhoneOtp,
+      "email_otp" => LoginPageType::EmailOtp,
       "password" => LoginPageType::LoginPassword,
       "totp" => LoginPageType::TwoFactor,
       "email" => LoginPageType::LoginEmail,
@@ -4317,6 +4458,15 @@ mod tests {
   }
 
   #[test]
+  fn email_otp_url_is_classified_separately_from_login_and_totp() {
+    let url = "https://auth.openai.com/mfa-challenge/email-otp?state=test";
+
+    assert_eq!(detect_login_page_type(url), LoginPageType::EmailOtp);
+    assert_ne!(detect_login_page_type(url), LoginPageType::LoginEmail);
+    assert_ne!(detect_login_page_type(url), LoginPageType::TwoFactor);
+  }
+
+  #[test]
   fn oauth_authorize_url_with_localhost_redirect_is_login_email() {
     let url = concat!(
       "https://auth.openai.com/oauth/authorize?client_id=codex",
@@ -4458,11 +4608,11 @@ mod tests {
     tokio::time::timeout(std::time::Duration::from_secs(3), listener.shutdown())
       .await
       .expect("callback shutdown should not wait for the stalled request");
-
-    let rebound = TcpListener::bind(&addr)
-      .await
-      .expect("callback listener must release the port before retry");
-    drop(rebound);
     drop(stalled_client);
+
+    let rebound = OAuthCallbackListener::start_on_addr(&addr)
+      .await
+      .expect("callback listener must retry until Windows releases the port");
+    drop(rebound);
   }
 }

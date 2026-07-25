@@ -8,7 +8,13 @@ import { toast } from "sonner";
 import { CdkInventoryTable } from "@/components/cdk-inventory-table";
 import { RegisteredAccountsTable } from "@/components/registered-accounts-table";
 import { RegistrationProgressCard } from "@/components/registration-progress-card";
+import {
+  isTerminalRegistrationProgress,
+  registrationProgressKey,
+  selectRegistrationProgressList,
+} from "@/components/registration-progress-selection";
 import { SmsProviderFields } from "@/components/sms-provider-fields";
+import { TwoFactorBackfillDialog } from "@/components/two-factor-backfill-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -84,6 +90,12 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     "gmail.123452026.xyz",
   );
   const [activeTab, setActiveTab] = useState("register");
+  const [twoFactorBackfillOpen, setTwoFactorBackfillOpen] = useState(false);
+  const [twoFactorBackfillKeys, setTwoFactorBackfillKeys] = useState<string[]>(
+    [],
+  );
+  const [twoFactorBackfillRunning, setTwoFactorBackfillRunning] =
+    useState(false);
   /** When set, Start clamps accountsPerCdk to this remaining budget for the selected CDK. */
   const [topUpRemaining, setTopUpRemaining] = useState<number | null>(null);
 
@@ -103,7 +115,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     { value: "Australia", labelKey: "registration.nordLocAustralia" },
   ] as const;
 
-  const progressList = Array.from(progressMap.values());
+  const progressList = selectRegistrationProgressList(progressMap);
 
   // Prefer WireGuard inventory created from Nord Access Token; CLI is backup only.
   useEffect(() => {
@@ -252,6 +264,18 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
   const parsedCdks = parseCdks(cdkText);
   const cdkCount = parsedCdks.length;
+  const selectedVpnMaxSessions = Math.min(
+    6,
+    Math.max(
+      1,
+      vpnConfigs.find((config) => config.id === vpnId)?.max_sessions ?? 6,
+    ),
+  );
+  const concurrencyLimit = networkMode === "vpn" ? selectedVpnMaxSessions : 8;
+  const displayedConcurrency =
+    networkMode === "nord"
+      ? 1
+      : Math.min(concurrencyLimit, Math.max(1, concurrency));
 
   /** Live remaining for a single known inventory CDK (prefer list over top-up snapshot). */
   const liveSingleRemaining = (() => {
@@ -347,28 +371,9 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       maxRetries,
       accountsPerCdk: accountsPerCdkForStart,
       headless,
-      concurrency:
-        networkMode === "nord"
-          ? 1
-          : networkMode === "vpn"
-            ? Math.min(
-                6,
-                Math.max(
-                  1,
-                  vpnConfigs.find((v) => v.id === vpnId)?.max_sessions ?? 6,
-                ),
-              )
-            : Math.min(8, Math.max(1, concurrency)),
+      concurrency: networkMode === "nord" ? 1 : displayedConcurrency,
       nordMaxSessions:
-        networkMode === "vpn"
-          ? Math.min(
-              6,
-              Math.max(
-                1,
-                vpnConfigs.find((v) => v.id === vpnId)?.max_sessions ?? 6,
-              ),
-            )
-          : undefined,
+        networkMode === "vpn" ? selectedVpnMaxSessions : undefined,
       networkMode,
       rotateEveryN:
         networkMode === "nord" || networkMode === "vpn" ? rotateEveryN : 0,
@@ -391,6 +396,12 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   const handleDelete = async (accountId: string) => {
     await deleteAccount(accountId);
     await refreshAccounts();
+  };
+
+  const handleActivateTwoFactor = (selectedKeys: string[]) => {
+    if (selectedKeys.length === 0 || twoFactorBackfillRunning) return;
+    setTwoFactorBackfillKeys(selectedKeys);
+    setTwoFactorBackfillOpen(true);
   };
 
   return (
@@ -657,25 +668,15 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   id="concurrency"
                   type="number"
                   min={1}
-                  max={8}
-                  disabled={networkMode === "nord" || networkMode === "vpn"}
-                  value={
-                    networkMode === "nord"
-                      ? 1
-                      : networkMode === "vpn"
-                        ? Math.min(
-                            6,
-                            Math.max(
-                              1,
-                              vpnConfigs.find((v) => v.id === vpnId)
-                                ?.max_sessions ?? 6,
-                            ),
-                          )
-                        : concurrency
-                  }
+                  max={concurrencyLimit}
+                  disabled={networkMode === "nord"}
+                  value={displayedConcurrency}
                   onChange={(e) =>
                     setConcurrency(
-                      Math.min(8, Math.max(1, Number(e.target.value) || 1)),
+                      Math.min(
+                        concurrencyLimit,
+                        Math.max(1, Number(e.target.value) || 1),
+                      ),
                     )
                   }
                 />
@@ -683,7 +684,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   {networkMode === "nord"
                     ? t("registration.concurrencyNordHint")
                     : networkMode === "vpn"
-                      ? t("registration.concurrencyVpnAutoHint")
+                      ? t("registration.nordMaxSessionsHint")
                       : t("registration.concurrencyHint")}
                 </p>
               </div>
@@ -998,10 +999,12 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
             ) : (
               progressList.map((p) => (
                 <RegistrationProgressCard
-                  key={p.taskId}
+                  key={registrationProgressKey(p)}
                   progress={p}
                   onCancel={
-                    p.result ? undefined : () => cancelRegistration(p.taskId)
+                    isTerminalRegistrationProgress(p)
+                      ? undefined
+                      : () => cancelRegistration(p.taskId)
                   }
                 />
               ))
@@ -1017,6 +1020,8 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               onDelete={handleDelete}
               onRefresh={refreshAccounts}
               onUpdateStatus={updateAccountStatus}
+              onActivateTwoFactor={handleActivateTwoFactor}
+              twoFactorBackfillRunning={twoFactorBackfillRunning}
             />
           </TabsContent>
 
@@ -1033,6 +1038,13 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
           </TabsContent>
         </Tabs>
       </DialogContent>
+      <TwoFactorBackfillDialog
+        open={twoFactorBackfillOpen}
+        onOpenChange={setTwoFactorBackfillOpen}
+        selectedAccountKeys={twoFactorBackfillKeys}
+        onTerminal={refreshAccounts}
+        onRunningChange={setTwoFactorBackfillRunning}
+      />
     </Dialog>
   );
 }

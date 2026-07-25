@@ -2,7 +2,8 @@
 
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
-import { useMemo, useState } from "react";
+import { ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   LuCheck,
@@ -16,6 +17,15 @@ import {
   LuTrash2,
 } from "react-icons/lu";
 import { toast } from "sonner";
+import {
+  accountKey,
+  deriveSelectedAccounts,
+  deriveWorkflowTargetKeys,
+  getFilteredSelectionState,
+  pruneSelectedAccountKeys,
+  setFilteredAccountSelection,
+  toggleAccountSelection,
+} from "@/components/two-factor-backfill-selection";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,6 +51,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type {
   AccountInventoryStatus,
   RegistrationResult,
@@ -56,6 +71,8 @@ interface Props {
     status: AccountInventoryStatus,
     note?: string,
   ) => Promise<void> | void;
+  onActivateTwoFactor?: (selectedKeys: string[]) => void;
+  twoFactorBackfillRunning?: boolean;
 }
 
 type ExportField =
@@ -224,15 +241,13 @@ function statusLabelKey(
   }
 }
 
-function accountKey(acc: RegistrationResult): string {
-  return acc.accountId || acc.email;
-}
-
 export function RegisteredAccountsTable({
   accounts,
   onDelete,
   onRefresh,
   onUpdateStatus,
+  onActivateTwoFactor,
+  twoFactorBackfillRunning = false,
 }: Props) {
   const { t } = useTranslation();
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
@@ -270,9 +285,21 @@ export function RegisteredAccountsTable({
   }, [accounts, statusFilter]);
 
   const selectedAccounts = useMemo(
-    () => filtered.filter((a) => selected.has(accountKey(a))),
+    () => deriveSelectedAccounts(accounts, selected),
+    [accounts, selected],
+  );
+  const selectedKeys = useMemo(
+    () => deriveWorkflowTargetKeys(accounts, selected),
+    [accounts, selected],
+  );
+  const filteredSelection = useMemo(
+    () => getFilteredSelectionState(selected, filtered),
     [filtered, selected],
   );
+
+  useEffect(() => {
+    setSelected((previous) => pruneSelectedAccountKeys(previous, accounts));
+  }, [accounts]);
 
   const exportCount =
     selectedAccounts.length > 0
@@ -298,24 +325,18 @@ export function RegisteredAccountsTable({
     }
   };
 
-  const toggleSelect = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const toggleSelect = (account: RegistrationResult) => {
+    setSelected((previous) => toggleAccountSelection(previous, account));
   };
 
-  const allFilteredSelected =
-    filtered.length > 0 && selectedAccounts.length === filtered.length;
-
   const toggleSelectAll = () => {
-    if (allFilteredSelected) {
-      setSelected(new Set());
-      return;
-    }
-    setSelected(new Set(filtered.map(accountKey)));
+    setSelected((previous) =>
+      setFilteredAccountSelection(
+        previous,
+        filtered,
+        !filteredSelection.checked,
+      ),
+    );
   };
 
   const applyPreset = (preset: ExportPreset) => {
@@ -605,6 +626,27 @@ export function RegisteredAccountsTable({
               })}
             </span>
             <div className="ml-auto flex flex-wrap gap-1.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7"
+                    onClick={() => onActivateTwoFactor?.(selectedKeys)}
+                    disabled={
+                      !onActivateTwoFactor ||
+                      selectedKeys.length === 0 ||
+                      twoFactorBackfillRunning
+                    }
+                  >
+                    <ShieldCheck className="mr-1.5 h-3.5 w-3.5" />
+                    {t("registration.twoFactorBackfill.action")}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {t("registration.twoFactorBackfill.actionTooltip")}
+                </TooltipContent>
+              </Tooltip>
               <Button
                 size="sm"
                 variant="ghost"
@@ -650,7 +692,11 @@ export function RegisteredAccountsTable({
               <TableRow className="hover:bg-transparent">
                 <TableHead className="w-10">
                   <Checkbox
-                    checked={allFilteredSelected}
+                    checked={
+                      filteredSelection.indeterminate
+                        ? "indeterminate"
+                        : filteredSelection.checked
+                    }
                     onCheckedChange={toggleSelectAll}
                     aria-label={t("registration.selectAll")}
                   />
@@ -678,7 +724,7 @@ export function RegisteredAccountsTable({
                     <TableCell>
                       <Checkbox
                         checked={selected.has(id)}
-                        onCheckedChange={() => toggleSelect(id)}
+                        onCheckedChange={() => toggleSelect(acc)}
                         aria-label={acc.email}
                       />
                     </TableCell>
@@ -801,7 +847,7 @@ export function RegisteredAccountsTable({
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
-                        onClick={() => onDelete?.(acc.accountId)}
+                        onClick={() => onDelete?.(id)}
                         aria-label={t("common.buttons.delete")}
                       >
                         <LuTrash2 className="h-3.5 w-3.5 text-destructive" />

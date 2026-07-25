@@ -24,13 +24,17 @@ pub async fn start_auto_login(
   config.parse_credentials();
   config.normalize();
 
-  // Resolve SMS token first: config override → encrypted settings store.
-  let mut sms_token = config
-    .sms_token
-    .clone()
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty());
-  if sms_token.is_none() {
+  // Resolve SMS token only when VIOTP is enabled: config override → encrypted settings store.
+  let mut sms_token = if config.uses_viotp() {
+    config
+      .sms_token
+      .clone()
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+  } else {
+    None
+  };
+  if config.uses_viotp() && sms_token.is_none() {
     let manager = SettingsManager::instance();
     sms_token = manager
       .get_sms_api_token(&app_handle)
@@ -41,6 +45,9 @@ pub async fn start_auto_login(
       .filter(|s| !s.is_empty());
   }
   config.sms_token = sms_token.clone();
+  if config.uses_viotp() && sms_token.is_none() {
+    return Err("VIOTP is enabled but no SMS API token is configured".into());
+  }
 
   // Resolve Sub2API settings before validate so stored credentials work.
   if config.sub2api_url.trim().is_empty() || config.sub2api_api_key.trim().is_empty() {

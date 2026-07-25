@@ -8,10 +8,16 @@ use chrono::Utc;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 
-use super::types::{AccountInventoryStatus, CdkInventoryRecord, RegistrationResult};
+use super::types::{
+  AccountInventoryStatus, CdkInventoryRecord, EmailProviderProvenance, RegistrationOutcomeReason,
+  RegistrationResult, TwoFactorBackfillAccessState, TwoFactorBackfillOutcome,
+  TwoFactorBackfillState,
+};
 use crate::app_dirs::data_dir;
+use crate::email::EmailProvider;
 
-static STORE: Lazy<Mutex<CredentialStore>> = Lazy::new(|| Mutex::new(CredentialStore::new()));
+static STORE: Lazy<Result<Mutex<CredentialStore>, String>> =
+  Lazy::new(|| CredentialStore::new().map(Mutex::new));
 static CDK_STORE: Lazy<Arc<Mutex<CdkStore>>> = Lazy::new(|| Arc::new(Mutex::new(CdkStore::new())));
 
 pub const MAX_ACCOUNTS_PER_CDK: u32 = 6;
@@ -20,7 +26,202 @@ const USAGE_LEDGER_FILE: &str = "usage-ledger.json";
 /// Thread-safe JSON file store for registration results.
 struct CredentialStore {
   accounts: HashMap<String, RegistrationResult>,
+  account_paths: HashMap<String, PathBuf>,
+  stale_account_paths: HashMap<String, Vec<PathBuf>>,
   base_dir: PathBuf,
+  #[cfg(test)]
+  fail_account_writes: Vec<AtomicWriteFailureStage>,
+}
+
+/// Lifecycle mutations supported by the narrow 2FA backfill CAS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackfillPatchOperation {
+  Start,
+  FinalizeEnabled,
+  FinalizeFailed,
+  FinalizeCancelled,
+  FinalizeReconciliationRequired,
+}
+
+/// Backend policy state that must still hold when a backfill CAS acquires the store lock.
+#[derive(Debug, Clone)]
+pub(crate) struct BackfillPatchPrecondition {
+  operation: BackfillPatchOperation,
+  operation_id: String,
+  allow_free_trial_no: bool,
+  acknowledge_legacy_access: bool,
+}
+
+impl BackfillPatchPrecondition {
+  pub(crate) fn start(
+    operation_id: impl Into<String>,
+    allow_free_trial_no: bool,
+    acknowledge_legacy_access: bool,
+  ) -> Self {
+    Self {
+      operation: BackfillPatchOperation::Start,
+      operation_id: operation_id.into(),
+      allow_free_trial_no,
+      acknowledge_legacy_access,
+    }
+  }
+
+  pub(crate) fn finalize_enabled(
+    operation_id: impl Into<String>,
+    allow_free_trial_no: bool,
+    acknowledge_legacy_access: bool,
+  ) -> Self {
+    Self::terminal(
+      BackfillPatchOperation::FinalizeEnabled,
+      operation_id,
+      allow_free_trial_no,
+      acknowledge_legacy_access,
+    )
+  }
+
+  pub(crate) fn finalize_failed(
+    operation_id: impl Into<String>,
+    allow_free_trial_no: bool,
+    acknowledge_legacy_access: bool,
+  ) -> Self {
+    Self::terminal(
+      BackfillPatchOperation::FinalizeFailed,
+      operation_id,
+      allow_free_trial_no,
+      acknowledge_legacy_access,
+    )
+  }
+
+  pub(crate) fn finalize_cancelled(
+    operation_id: impl Into<String>,
+    allow_free_trial_no: bool,
+    acknowledge_legacy_access: bool,
+  ) -> Self {
+    Self::terminal(
+      BackfillPatchOperation::FinalizeCancelled,
+      operation_id,
+      allow_free_trial_no,
+      acknowledge_legacy_access,
+    )
+  }
+
+  pub(crate) fn finalize_reconciliation_required(
+    operation_id: impl Into<String>,
+    allow_free_trial_no: bool,
+    acknowledge_legacy_access: bool,
+  ) -> Self {
+    Self::terminal(
+      BackfillPatchOperation::FinalizeReconciliationRequired,
+      operation_id,
+      allow_free_trial_no,
+      acknowledge_legacy_access,
+    )
+  }
+
+  fn terminal(
+    operation: BackfillPatchOperation,
+    operation_id: impl Into<String>,
+    allow_free_trial_no: bool,
+    acknowledge_legacy_access: bool,
+  ) -> Self {
+    Self {
+      operation,
+      operation_id: operation_id.into(),
+      allow_free_trial_no,
+      acknowledge_legacy_access,
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn operation(&self) -> BackfillPatchOperation {
+    self.operation
+  }
+
+  #[cfg(test)]
+  pub(crate) fn operation_id(&self) -> &str {
+    &self.operation_id
+  }
+}
+
+/// Operation-specific payload for the narrow 2FA backfill CAS.
+#[derive(Debug, Clone)]
+pub(crate) struct TwoFactorBackfillPatch {
+  operation: BackfillPatchOperation,
+  totp_secret: Option<String>,
+  access_state: Option<TwoFactorBackfillAccessState>,
+}
+
+impl TwoFactorBackfillPatch {
+  pub(crate) fn start() -> Self {
+    Self {
+      operation: BackfillPatchOperation::Start,
+      totp_secret: None,
+      access_state: None,
+    }
+  }
+
+  pub(crate) fn finalize_enabled(totp_secret: impl Into<String>) -> Self {
+    Self {
+      operation: BackfillPatchOperation::FinalizeEnabled,
+      totp_secret: Some(totp_secret.into()),
+      access_state: None,
+    }
+  }
+
+  pub(crate) fn finalize_failed() -> Self {
+    Self::terminal(BackfillPatchOperation::FinalizeFailed)
+  }
+
+  pub(crate) fn finalize_failed_locked() -> Self {
+    Self {
+      operation: BackfillPatchOperation::FinalizeFailed,
+      totp_secret: None,
+      access_state: Some(TwoFactorBackfillAccessState::Locked),
+    }
+  }
+
+  pub(crate) fn finalize_cancelled() -> Self {
+    Self::terminal(BackfillPatchOperation::FinalizeCancelled)
+  }
+
+  pub(crate) fn finalize_reconciliation_required() -> Self {
+    Self::terminal(BackfillPatchOperation::FinalizeReconciliationRequired)
+  }
+
+  fn terminal(operation: BackfillPatchOperation) -> Self {
+    Self {
+      operation,
+      totp_secret: None,
+      access_state: None,
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn operation(&self) -> BackfillPatchOperation {
+    self.operation
+  }
+
+  #[cfg(test)]
+  pub(crate) fn totp_secret(&self) -> Option<&str> {
+    self.totp_secret.as_deref()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn access_state(&self) -> Option<TwoFactorBackfillAccessState> {
+    self.access_state
+  }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicWriteFailureStage {
+  Serialize,
+  Write,
+  Replace,
+  SyncDestinationDirectory,
+  RollbackDestination,
+  DeleteStale,
+  SyncStaleDirectory,
 }
 
 /// Thread-safe JSON file store for per-CDK stats.
@@ -84,35 +285,340 @@ impl Drop for CdkSlotReservation {
 }
 
 impl CredentialStore {
-  fn new() -> Self {
-    let base_dir = data_dir().join("registered_accounts");
-    let _ = fs::create_dir_all(&base_dir);
+  fn new() -> Result<Self, String> {
+    Self::with_base_dir(data_dir().join("registered_accounts"))
+  }
 
+  fn with_base_dir(base_dir: impl AsRef<Path>) -> Result<Self, String> {
+    let base_dir = base_dir.as_ref().to_path_buf();
+    fs::create_dir_all(&base_dir).map_err(|error| {
+      format!(
+        "Failed to create registered account directory {}: {error}",
+        base_dir.display()
+      )
+    })?;
+
+    let entries = fs::read_dir(&base_dir).map_err(|error| {
+      format!(
+        "Failed to read registered account directory {}: {error}",
+        base_dir.display()
+      )
+    })?;
     let mut accounts = HashMap::new();
-    if let Ok(entries) = fs::read_dir(&base_dir) {
-      for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-          if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(result) = serde_json::from_str::<RegistrationResult>(&content) {
-              let key = account_key(&result);
-              accounts.insert(key, result);
-            }
+    let mut account_paths = HashMap::new();
+    let mut stale_account_paths = HashMap::new();
+    let mut entries = entries
+      .map(|entry| {
+        entry.map_err(|error| {
+          format!(
+            "Failed to read an entry from registered account directory {}: {error}",
+            base_dir.display()
+          )
+        })
+      })
+      .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+      let path = entry.path();
+      if path.extension().is_some_and(|ext| ext == "json") {
+        if let Ok(content) = fs::read_to_string(&path) {
+          if let Ok(result) = serde_json::from_str::<RegistrationResult>(&content) {
+            insert_loaded_account(
+              &mut accounts,
+              &mut account_paths,
+              &mut stale_account_paths,
+              result,
+              path,
+            );
           }
         }
       }
     }
 
-    Self { accounts, base_dir }
+    Ok(Self {
+      accounts,
+      account_paths,
+      stale_account_paths,
+      base_dir,
+      #[cfg(test)]
+      fail_account_writes: Vec::new(),
+    })
   }
 
-  fn save(&mut self, result: &RegistrationResult) {
+  fn save(&mut self, result: &RegistrationResult) -> Result<(), String> {
     let key = account_key(result);
-    self.accounts.insert(key.clone(), result.clone());
+    let stale_key = self.find_stale_account_key(result, &key);
+    if let (Some(stale_key), Some(destination)) = (stale_key.as_deref(), self.accounts.get(&key)) {
+      let stale = self
+        .accounts
+        .get(stale_key)
+        .expect("stale key was selected from the account map");
+      if !records_match_for_key_migration(stale, destination) {
+        return Err(format!(
+          "Registered account migration collision from {stale_key} to {key}; destination belongs to a different record"
+        ));
+      }
+    }
 
-    let file_path = self.base_dir.join(format!("{key}.json"));
-    if let Ok(json) = serde_json::to_string_pretty(result) {
-      let _ = fs::write(&file_path, json);
+    let source_key = if self.accounts.contains_key(&key) {
+      Some(key.clone())
+    } else {
+      stale_key.clone()
+    };
+    let existing = source_key
+      .as_deref()
+      .and_then(|source_key| self.accounts.get(source_key));
+    let key_changed = source_key
+      .as_deref()
+      .is_some_and(|source_key| source_key != key);
+    let mut source_paths = source_key
+      .as_deref()
+      .map(|source_key| self.tracked_account_paths(source_key))
+      .unwrap_or_default();
+    if let Some(stale_key) = stale_key.as_deref() {
+      if source_key.as_deref() != Some(stale_key) {
+        source_paths.extend(self.tracked_account_paths(stale_key));
+      }
+    }
+    source_paths.sort();
+    source_paths.dedup();
+
+    let file_path = self.account_file_path_for_key(&key);
+    let previous_bytes = read_optional_account_file(&file_path)?;
+    if let Some(bytes) = previous_bytes.as_deref() {
+      let canonical_path_is_known_source = self.account_paths.get(&key) == Some(&file_path);
+      if !canonical_path_is_known_source {
+        let destination = serde_json::from_slice::<RegistrationResult>(bytes).map_err(|error| {
+          format!(
+            "Registered account migration collision at {}; destination is not a valid record: {error}",
+            file_path.display()
+          )
+        })?;
+        let compatible = existing.is_some_and(|existing| {
+          if key_changed {
+            records_match_for_key_migration(existing, &destination)
+          } else {
+            same_canonical_stored_record(existing, &destination)
+          }
+        }) || existing.is_none()
+          && same_canonical_stored_record(result, &destination);
+        if !compatible {
+          return Err(format!(
+            "Registered account migration collision at {}; destination belongs to a different record",
+            file_path.display()
+          ));
+        }
+      }
+    }
+
+    let mut stale_files = Vec::new();
+    for stale_path in source_paths {
+      if stale_path == file_path {
+        continue;
+      }
+      let Some(stale_bytes) = read_optional_account_file(&stale_path)? else {
+        continue;
+      };
+      let stale = serde_json::from_slice::<RegistrationResult>(&stale_bytes).map_err(|error| {
+        format!(
+          "Registered account migration collision at {}; source is not a valid record: {error}",
+          stale_path.display()
+        )
+      })?;
+      let compatible = existing.is_some_and(|existing| {
+        if key_changed {
+          records_match_for_key_migration(existing, &stale)
+        } else {
+          same_canonical_stored_record(existing, &stale)
+        }
+      }) || existing.is_none() && same_canonical_stored_record(result, &stale);
+      if !compatible {
+        return Err(format!(
+          "Registered account migration collision from {} to {key}; source belongs to a different record",
+          stale_path.display()
+        ));
+      }
+      stale_files.push((stale_path, stale_bytes));
+    }
+
+    self.persist_account(result, &file_path, previous_bytes.clone())?;
+
+    let cleanup_result = (|| {
+      for (stale_path, _) in &stale_files {
+        #[cfg(test)]
+        if self.take_failure(AtomicWriteFailureStage::DeleteStale) {
+          return Err("Injected registered account stale-file deletion failure".into());
+        }
+        remove_account_file(stale_path)?;
+      }
+      if !stale_files.is_empty() {
+        #[cfg(test)]
+        if self.take_failure(AtomicWriteFailureStage::SyncStaleDirectory) {
+          return Err("Injected registered account stale-directory sync failure".into());
+        }
+        sync_parent_directory(&self.base_dir, "registered account migration directory")?;
+      }
+      Ok::<(), String>(())
+    })();
+    if let Err(cleanup_error) = cleanup_result {
+      let mut rollback_errors = Vec::new();
+      for (stale_path, stale_bytes) in stale_files {
+        if let Err(error) = restore_account_file(&self.base_dir, &stale_path, Some(stale_bytes)) {
+          rollback_errors.push(format!("stale file: {error}"));
+        }
+      }
+      if let Err(error) = restore_account_file(&self.base_dir, &file_path, previous_bytes) {
+        rollback_errors.push(format!("canonical file: {error}"));
+      }
+      return if rollback_errors.is_empty() {
+        Err(cleanup_error)
+      } else {
+        Err(format!(
+          "{cleanup_error}; failed to roll back registered account key migration: {}",
+          rollback_errors.join("; ")
+        ))
+      };
+    }
+
+    self.accounts.insert(key.clone(), result.clone());
+    if let Some(source_key) = source_key {
+      if source_key != key {
+        self.accounts.remove(&source_key);
+        self.account_paths.remove(&source_key);
+        self.stale_account_paths.remove(&source_key);
+      }
+    }
+    if let Some(stale_key) = stale_key {
+      if stale_key != key {
+        self.accounts.remove(&stale_key);
+        self.account_paths.remove(&stale_key);
+        self.stale_account_paths.remove(&stale_key);
+      }
+    }
+    self.account_paths.insert(key.clone(), file_path);
+    self.stale_account_paths.remove(&key);
+    Ok(())
+  }
+
+  fn find_stale_account_key(&self, result: &RegistrationResult, key: &str) -> Option<String> {
+    let result_id = result.account_id.trim();
+    let result_email = result.email.trim();
+    if result_id.is_empty() {
+      return None;
+    }
+    self
+      .accounts
+      .iter()
+      .filter(|(existing_key, account)| {
+        existing_key.as_str() != key
+          && ((account.account_id.trim() == result_id && !account.account_id.trim().is_empty())
+            || (account.account_id.trim().is_empty()
+              && !result_email.is_empty()
+              && account.email.trim() == result_email))
+      })
+      .map(|(existing_key, _)| existing_key.clone())
+      .min()
+  }
+
+  fn tracked_account_paths(&self, key: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = self.account_paths.get(key) {
+      paths.push(path.clone());
+    }
+    if let Some(stale_paths) = self.stale_account_paths.get(key) {
+      paths.extend(stale_paths.iter().cloned());
+    }
+    let canonical_path = self.account_file_path_for_key(key);
+    if !paths.iter().any(|path| path == &canonical_path) {
+      paths.push(canonical_path);
+    }
+    paths
+  }
+
+  fn account_file_path_for_key(&self, key: &str) -> PathBuf {
+    self.base_dir.join(format!("{key}.json"))
+  }
+
+  fn persist_account(
+    &mut self,
+    result: &RegistrationResult,
+    file_path: &Path,
+    previous_bytes: Option<Vec<u8>>,
+  ) -> Result<(), String> {
+    #[cfg(test)]
+    if self.take_failure(AtomicWriteFailureStage::Serialize) {
+      return Err("Injected registered account serialization failure".into());
+    }
+    let json = serde_json::to_vec_pretty(result)
+      .map_err(|error| format!("Failed to serialize registered account: {error}"))?;
+    let mut temp_file = tempfile::NamedTempFile::new_in(&self.base_dir).map_err(|error| {
+      format!(
+        "Failed to create registered account temp file in {}: {error}",
+        self.base_dir.display()
+      )
+    })?;
+    #[cfg(test)]
+    if self.take_failure(AtomicWriteFailureStage::Write) {
+      return Err("Injected registered account write failure".into());
+    }
+    temp_file
+      .write_all(&json)
+      .map_err(|error| format!("Failed to write registered account temp file: {error}"))?;
+    temp_file
+      .as_file()
+      .sync_all()
+      .map_err(|error| format!("Failed to sync registered account temp file: {error}"))?;
+    #[cfg(test)]
+    if self.take_failure(AtomicWriteFailureStage::Replace) {
+      return Err("Injected registered account replacement failure".into());
+    }
+    persist_temp_file(temp_file, file_path, "registered account")?;
+    #[cfg(test)]
+    let sync_result = if self.take_failure(AtomicWriteFailureStage::SyncDestinationDirectory) {
+      Err("Injected registered account destination-directory sync failure".into())
+    } else {
+      sync_parent_directory(&self.base_dir, "registered account directory")
+    };
+    #[cfg(not(test))]
+    let sync_result = sync_parent_directory(&self.base_dir, "registered account directory");
+    if let Err(sync_error) = sync_result {
+      #[cfg(test)]
+      let rollback_result = if self.take_failure(AtomicWriteFailureStage::RollbackDestination) {
+        Err("Injected registered account destination rollback failure".into())
+      } else {
+        restore_account_file(&self.base_dir, file_path, previous_bytes)
+      };
+      #[cfg(not(test))]
+      let rollback_result = restore_account_file(&self.base_dir, file_path, previous_bytes);
+      return match rollback_result {
+        Ok(()) => Err(sync_error),
+        Err(rollback_error) => Err(format!(
+          "{sync_error}; failed to roll back registered account destination: {rollback_error}"
+        )),
+      };
+    }
+    Ok(())
+  }
+
+  #[cfg(test)]
+  fn fail_next_account_write(&mut self, stage: AtomicWriteFailureStage) {
+    self.fail_account_writes.push(stage);
+  }
+
+  #[cfg(test)]
+  fn fail_account_writes(&mut self, stages: &[AtomicWriteFailureStage]) {
+    self
+      .fail_account_writes
+      .extend(stages.iter().rev().copied());
+  }
+
+  #[cfg(test)]
+  fn take_failure(&mut self, stage: AtomicWriteFailureStage) -> bool {
+    if self.fail_account_writes.last() == Some(&stage) {
+      self.fail_account_writes.pop();
+      true
+    } else {
+      false
     }
   }
 
@@ -122,36 +628,75 @@ impl CredentialStore {
     results
   }
 
-  fn delete(&mut self, account_id: &str) -> bool {
-    // Support delete by account_id or email key.
-    let key = if self.accounts.contains_key(account_id) {
-      account_id.to_string()
-    } else {
-      self
-        .accounts
-        .iter()
-        .find(|(_, v)| v.account_id == account_id || v.email == account_id)
-        .map(|(k, _)| k.clone())
-        .unwrap_or_else(|| account_id.to_string())
+  fn delete(&mut self, account_id: &str) -> Result<bool, String> {
+    let Some(key) = self.lookup_account_key(account_id) else {
+      return Ok(false);
     };
-
-    let removed = self.accounts.remove(&key).is_some();
-    if removed {
-      let file_path = self.base_dir.join(format!("{key}.json"));
-      let _ = fs::remove_file(file_path);
+    let account = self
+      .accounts
+      .get(&key)
+      .expect("lookup_account_key returned a present account")
+      .clone();
+    let mut files = Vec::new();
+    for path in self.tracked_account_paths(&key) {
+      let Some(bytes) = read_optional_account_file(&path)? else {
+        continue;
+      };
+      let stored = serde_json::from_slice::<RegistrationResult>(&bytes).map_err(|error| {
+        format!(
+          "Registered account migration collision at {}; source is not a valid record: {error}",
+          path.display()
+        )
+      })?;
+      if !same_canonical_stored_record(&account, &stored) {
+        return Err(format!(
+          "Registered account migration collision at {}; source belongs to a different record",
+          path.display()
+        ));
+      }
+      files.push((path, bytes));
     }
-    removed
+
+    let mut removed: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for (path, bytes) in &files {
+      if let Err(error) = remove_account_file(path) {
+        for (removed_path, removed_bytes) in removed {
+          let _ = restore_account_file(&self.base_dir, &removed_path, Some(removed_bytes));
+        }
+        return Err(error);
+      }
+      removed.push((path.clone(), bytes.clone()));
+    }
+    if let Err(error) = sync_parent_directory(&self.base_dir, "registered account deletion") {
+      for (removed_path, removed_bytes) in removed {
+        let _ = restore_account_file(&self.base_dir, &removed_path, Some(removed_bytes));
+      }
+      return Err(error);
+    }
+    self.accounts.remove(&key);
+    self.account_paths.remove(&key);
+    self.stale_account_paths.remove(&key);
+    Ok(true)
   }
 
   fn get(&self, account_id: &str) -> Option<RegistrationResult> {
-    if let Some(v) = self.accounts.get(account_id) {
-      return Some(v.clone());
-    }
     self
+      .lookup_account_key(account_id)
+      .and_then(|key| self.accounts.get(&key).cloned())
+  }
+
+  fn lookup_account_key(&self, account_id: &str) -> Option<String> {
+    let requested_key = canonical_account_key(account_id, "")?;
+    if self.accounts.contains_key(&requested_key) {
+      return Some(requested_key);
+    }
+    let mut matches = self
       .accounts
-      .values()
-      .find(|v| v.account_id == account_id || v.email == account_id)
-      .cloned()
+      .iter()
+      .filter(|(_, account)| account.email.trim() == requested_key)
+      .map(|(key, _)| key.clone());
+    let key = matches.next()?;
+    matches.next().is_none().then_some(key)
   }
 
   fn update_status(
@@ -159,7 +704,7 @@ impl CredentialStore {
     account_ids: &[String],
     status: AccountInventoryStatus,
     note: Option<String>,
-  ) -> usize {
+  ) -> Result<usize, String> {
     let mut updated = 0usize;
     let now = Utc::now();
     for id in account_ids {
@@ -167,79 +712,591 @@ impl CredentialStore {
         continue;
       };
       account.status = status.clone();
-      if let Some(ref n) = note {
-        account.note = n.clone();
+      if let Some(ref note) = note {
+        account.note.clone_from(note);
       }
       match status {
-        AccountInventoryStatus::Exported => {
-          account.exported_at = Some(now);
-        }
-        AccountInventoryStatus::Sold => {
-          account.sold_at = Some(now);
-        }
-        AccountInventoryStatus::Available => {
-          // Keep history timestamps.
-        }
-        AccountInventoryStatus::Invalid | AccountInventoryStatus::Reserved => {}
+        AccountInventoryStatus::Exported => account.exported_at = Some(now),
+        AccountInventoryStatus::Sold => account.sold_at = Some(now),
+        AccountInventoryStatus::Available
+        | AccountInventoryStatus::Invalid
+        | AccountInventoryStatus::Reserved => {}
       }
-      self.save(&account);
+      account.record_revision = next_revision(account.record_revision)?;
+      self.save(&account)?;
       updated += 1;
     }
-    updated
+    Ok(updated)
   }
 
-  fn update_note(&mut self, account_id: &str, note: String) -> bool {
+  fn update_note(&mut self, account_id: &str, note: String) -> Result<bool, String> {
     let Some(mut account) = self.get(account_id) else {
-      return false;
+      return Ok(false);
     };
     account.note = note;
-    self.save(&account);
-    true
+    account.record_revision = next_revision(account.record_revision)?;
+    self.save(&account)?;
+    Ok(true)
+  }
+
+  fn compare_and_update(
+    &mut self,
+    account_key: &str,
+    expected_revision: u64,
+    precondition: BackfillPatchPrecondition,
+    patch: TwoFactorBackfillPatch,
+  ) -> Result<RegistrationResult, String> {
+    let current = self
+      .get(account_key)
+      .ok_or_else(|| format!("Registered account {account_key} not found"))?;
+    if current.record_revision != expected_revision {
+      return Err(format!(
+        "Registered account revision conflict for {account_key}: expected {expected_revision}, current {}",
+        current.record_revision
+      ));
+    }
+    validate_backfill_precondition(&current, &precondition, &patch)?;
+
+    let mut updated = current;
+    apply_backfill_patch(&mut updated, &precondition, patch)?;
+    updated.record_revision = next_revision(updated.record_revision)?;
+    self.save(&updated)?;
+    Ok(updated)
+  }
+
+  fn persist_inferred_email_provider(
+    &mut self,
+    account_key: &str,
+    expected_revision: u64,
+    provider: EmailProvider,
+  ) -> Result<RegistrationResult, String> {
+    let current = self
+      .get(account_key)
+      .ok_or_else(|| format!("Registered account {account_key} not found"))?;
+    if current.record_revision != expected_revision {
+      return Err(format!(
+        "Registered account revision conflict for {account_key}: expected {expected_revision}, current {}",
+        current.record_revision
+      ));
+    }
+    match (current.email_provider, current.email_provider_provenance) {
+      (None, None) => {
+        let mut updated = current;
+        updated.email_provider = Some(provider);
+        updated.email_provider_provenance = Some(EmailProviderProvenance::InferredFromCdk);
+        updated.record_revision = next_revision(updated.record_revision)?;
+        self.save(&updated)?;
+        Ok(updated)
+      }
+      (Some(existing_provider), Some(EmailProviderProvenance::InferredFromCdk))
+        if existing_provider == provider =>
+      {
+        Ok(current)
+      }
+      _ => Err(format!(
+        "Registered account provider conflict for {account_key}; refusing inferred provider overwrite"
+      )),
+    }
   }
 }
 
-fn account_key(result: &RegistrationResult) -> String {
-  if !result.account_id.is_empty() {
-    result.account_id.clone()
-  } else if !result.email.is_empty() {
-    result.email.clone()
-  } else {
-    format!("unknown-{}", Utc::now().timestamp_millis())
+fn same_stored_record(left: &RegistrationResult, right: &RegistrationResult) -> bool {
+  match (serde_json::to_vec(left), serde_json::to_vec(right)) {
+    (Ok(left), Ok(right)) => left == right,
+    _ => false,
   }
+}
+
+fn records_match_for_key_migration(left: &RegistrationResult, right: &RegistrationResult) -> bool {
+  same_stored_record(left, right) || same_canonical_stored_record(left, right)
+}
+
+fn same_canonical_stored_record(left: &RegistrationResult, right: &RegistrationResult) -> bool {
+  let mut left = left.clone();
+  let mut right = right.clone();
+  left.account_id = left.account_id.trim().to_string();
+  left.email = left.email.trim().to_string();
+  right.account_id = right.account_id.trim().to_string();
+  right.email = right.email.trim().to_string();
+  same_stored_record(&left, &right)
+}
+
+fn insert_loaded_account(
+  accounts: &mut HashMap<String, RegistrationResult>,
+  account_paths: &mut HashMap<String, PathBuf>,
+  stale_account_paths: &mut HashMap<String, Vec<PathBuf>>,
+  incoming: RegistrationResult,
+  path: PathBuf,
+) {
+  let incoming_key = account_key(&incoming);
+  let incoming_id = incoming.account_id.trim();
+  let incoming_email = incoming.email.trim();
+  let mut related_keys = accounts
+    .iter()
+    .filter(|(key, existing)| {
+      if key.as_str() == incoming_key {
+        return true;
+      }
+      let existing_id = existing.account_id.trim();
+      !incoming_email.is_empty()
+        && existing.email.trim() == incoming_email
+        && (incoming_id.is_empty() != existing_id.is_empty())
+    })
+    .map(|(key, _)| key.clone())
+    .collect::<Vec<_>>();
+  related_keys.sort();
+
+  let mut winner = incoming;
+  let mut winner_path = path.clone();
+  let mut all_paths = vec![path];
+  for related_key in &related_keys {
+    let existing = accounts
+      .get(related_key)
+      .expect("related key was selected from the account map");
+    let existing_path = account_paths
+      .get(related_key)
+      .expect("loaded account path must accompany its account");
+    if is_preferred_loaded_account(existing, existing_path, &winner, &winner_path) {
+      winner = existing.clone();
+      winner_path = existing_path.clone();
+    }
+    all_paths.push(existing_path.clone());
+    if let Some(paths) = stale_account_paths.get(related_key) {
+      all_paths.extend(paths.iter().cloned());
+    }
+  }
+
+  for related_key in related_keys {
+    accounts.remove(&related_key);
+    account_paths.remove(&related_key);
+    stale_account_paths.remove(&related_key);
+  }
+
+  let winner_key = account_key(&winner);
+  all_paths.sort();
+  all_paths.dedup();
+  all_paths.retain(|candidate| candidate != &winner_path);
+  accounts.insert(winner_key.clone(), winner);
+  account_paths.insert(winner_key.clone(), winner_path);
+  if all_paths.is_empty() {
+    stale_account_paths.remove(&winner_key);
+  } else {
+    stale_account_paths.insert(winner_key, all_paths);
+  }
+}
+
+fn is_preferred_loaded_account(
+  incoming: &RegistrationResult,
+  incoming_path: &Path,
+  existing: &RegistrationResult,
+  existing_path: &Path,
+) -> bool {
+  let incoming_has_account_id = !incoming.account_id.trim().is_empty();
+  let existing_has_account_id = !existing.account_id.trim().is_empty();
+  if incoming_has_account_id != existing_has_account_id {
+    return incoming_has_account_id;
+  }
+  match incoming.record_revision.cmp(&existing.record_revision) {
+    std::cmp::Ordering::Greater => return true,
+    std::cmp::Ordering::Less => return false,
+    std::cmp::Ordering::Equal => {}
+  }
+  let incoming_canonical_path = canonical_account_filename_matches(incoming, incoming_path);
+  let existing_canonical_path = canonical_account_filename_matches(existing, existing_path);
+  if incoming_canonical_path != existing_canonical_path {
+    return incoming_canonical_path;
+  }
+  incoming_path < existing_path
+}
+
+fn canonical_account_filename_matches(account: &RegistrationResult, path: &Path) -> bool {
+  path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .is_some_and(|name| name == format!("{}.json", account_key(account)))
+}
+
+fn read_optional_account_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+  match fs::read(path) {
+    Ok(bytes) => Ok(Some(bytes)),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+    Err(error) => Err(format!(
+      "Failed to read registered account file {} before replacement: {error}",
+      path.display()
+    )),
+  }
+}
+
+fn remove_account_file(path: &Path) -> Result<(), String> {
+  match fs::remove_file(path) {
+    Ok(()) => Ok(()),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(format!(
+      "Failed to delete stale registered account file {}: {error}",
+      path.display()
+    )),
+  }
+}
+
+fn restore_account_file(
+  base_dir: &Path,
+  file_path: &Path,
+  previous_bytes: Option<Vec<u8>>,
+) -> Result<(), String> {
+  if let Some(previous_bytes) = previous_bytes {
+    let mut temp_file = tempfile::NamedTempFile::new_in(base_dir).map_err(|error| {
+      format!(
+        "Failed to create registered account rollback temp file in {}: {error}",
+        base_dir.display()
+      )
+    })?;
+    temp_file
+      .write_all(&previous_bytes)
+      .map_err(|error| format!("Failed to write registered account rollback file: {error}"))?;
+    temp_file
+      .as_file()
+      .sync_all()
+      .map_err(|error| format!("Failed to sync registered account rollback file: {error}"))?;
+    persist_temp_file(temp_file, file_path, "registered account rollback")?;
+  } else {
+    remove_account_file(file_path)?;
+  }
+  sync_parent_directory(base_dir, "registered account rollback directory")
+}
+
+fn validate_owned_backfill_operation(
+  account: &RegistrationResult,
+  precondition: &BackfillPatchPrecondition,
+) -> Result<(), String> {
+  if account.two_factor_backfill_state != Some(TwoFactorBackfillState::InProgress)
+    || account.two_factor_backfill_outcome.is_some()
+  {
+    return Err("2FA backfill precondition failed: lifecycle is not in progress".into());
+  }
+  if account.two_factor_backfill_operation_id.as_deref() != Some(precondition.operation_id.as_str())
+  {
+    return Err("2FA backfill operation ownership conflict".into());
+  }
+  Ok(())
+}
+
+fn validate_backfill_precondition(
+  account: &RegistrationResult,
+  precondition: &BackfillPatchPrecondition,
+  patch: &TwoFactorBackfillPatch,
+) -> Result<(), String> {
+  if precondition.operation_id.trim().is_empty() {
+    return Err("2FA backfill precondition requires an operation ID".into());
+  }
+  if patch.operation != precondition.operation {
+    return Err("2FA backfill patch operation does not match its precondition".into());
+  }
+
+  if matches!(
+    precondition.operation,
+    BackfillPatchOperation::FinalizeFailed
+      | BackfillPatchOperation::FinalizeCancelled
+      | BackfillPatchOperation::FinalizeReconciliationRequired
+  ) {
+    validate_owned_backfill_operation(account, precondition)?;
+    if patch.totp_secret.is_some() {
+      return Err("Terminal 2FA backfill outcome cannot carry a TOTP secret".into());
+    }
+    if patch.access_state.is_some_and(|state| {
+      state != TwoFactorBackfillAccessState::Locked
+        || precondition.operation != BackfillPatchOperation::FinalizeFailed
+    }) {
+      return Err("Only failed 2FA backfill outcomes may mark an account locked".into());
+    }
+    return Ok(());
+  }
+
+  let invalid_free_trial_no = account.status == AccountInventoryStatus::Invalid
+    && account.registration_outcome_reason == Some(RegistrationOutcomeReason::FreeTrialNo);
+  let allowed_free_trial_no = invalid_free_trial_no && precondition.allow_free_trial_no;
+  if !account.success && !allowed_free_trial_no {
+    return Err("2FA backfill precondition failed: registration was unsuccessful".into());
+  }
+  if account.email.trim().is_empty()
+    || account.password.trim().is_empty()
+    || account.cdk.trim().is_empty()
+  {
+    return Err("2FA backfill precondition failed: account credentials are incomplete".into());
+  }
+  match account.status {
+    AccountInventoryStatus::Available => {}
+    AccountInventoryStatus::Invalid if allowed_free_trial_no => {}
+    _ => {
+      return Err("2FA backfill precondition failed: inventory status is not eligible".into());
+    }
+  }
+  if !matches!(
+    (account.email_provider, account.email_provider_provenance),
+    (Some(_), Some(_))
+  ) {
+    return Err("2FA backfill precondition failed: email provider provenance is missing".into());
+  }
+  if account.two_fa_enabled || !account.totp_secret.trim().is_empty() {
+    return Err("2FA backfill precondition failed: local 2FA state is inconsistent".into());
+  }
+  match account.two_factor_backfill_access_state {
+    Some(TwoFactorBackfillAccessState::Accessible) => {}
+    None if precondition.acknowledge_legacy_access => {}
+    Some(TwoFactorBackfillAccessState::Locked) => {
+      return Err("2FA backfill precondition failed: account access is locked".into());
+    }
+    None => {
+      return Err("2FA backfill precondition failed: legacy access was not acknowledged".into());
+    }
+  }
+  if account.two_factor_backfill_exclusion.is_some() {
+    return Err("2FA backfill precondition failed: account is explicitly excluded".into());
+  }
+
+  match precondition.operation {
+    BackfillPatchOperation::Start => match (
+      account.two_factor_backfill_state,
+      account.two_factor_backfill_outcome,
+      account.two_factor_backfill_operation_id.as_deref(),
+    ) {
+      (None, None, None) => {}
+      (
+        Some(TwoFactorBackfillState::Completed),
+        Some(TwoFactorBackfillOutcome::Failed | TwoFactorBackfillOutcome::Cancelled),
+        _,
+      ) => {}
+      _ => return Err("2FA backfill precondition failed: lifecycle is not startable".into()),
+    },
+    BackfillPatchOperation::FinalizeEnabled => {
+      validate_owned_backfill_operation(account, precondition)?;
+      if patch
+        .totp_secret
+        .as_deref()
+        .is_none_or(|secret| secret.trim().is_empty())
+      {
+        return Err("Enabling 2FA requires a non-empty TOTP secret".into());
+      }
+    }
+    BackfillPatchOperation::FinalizeFailed
+    | BackfillPatchOperation::FinalizeCancelled
+    | BackfillPatchOperation::FinalizeReconciliationRequired => {
+      unreachable!("non-enabled terminal operations are validated before eligibility policy")
+    }
+  }
+
+  Ok(())
+}
+
+fn next_revision(current: u64) -> Result<u64, String> {
+  current
+    .checked_add(1)
+    .ok_or_else(|| "Registered account record revision overflow".to_string())
+}
+
+fn apply_backfill_patch(
+  account: &mut RegistrationResult,
+  precondition: &BackfillPatchPrecondition,
+  patch: TwoFactorBackfillPatch,
+) -> Result<(), String> {
+  match patch.operation {
+    BackfillPatchOperation::Start => {
+      account.two_factor_backfill_state = Some(TwoFactorBackfillState::InProgress);
+      account.two_factor_backfill_operation_id = Some(precondition.operation_id.clone());
+      account.two_factor_backfill_outcome = None;
+    }
+    BackfillPatchOperation::FinalizeEnabled => {
+      let secret = patch
+        .totp_secret
+        .filter(|secret| !secret.trim().is_empty())
+        .ok_or_else(|| "Enabling 2FA requires a non-empty TOTP secret".to_string())?;
+      account.two_fa_enabled = true;
+      account.totp_secret = secret;
+      apply_terminal_backfill_outcome(
+        account,
+        &precondition.operation_id,
+        TwoFactorBackfillOutcome::Enabled,
+      );
+    }
+    BackfillPatchOperation::FinalizeFailed => {
+      if let Some(access_state) = patch.access_state {
+        account.two_factor_backfill_access_state = Some(access_state);
+      }
+      apply_terminal_backfill_outcome(
+        account,
+        &precondition.operation_id,
+        TwoFactorBackfillOutcome::Failed,
+      )
+    }
+    BackfillPatchOperation::FinalizeCancelled => apply_terminal_backfill_outcome(
+      account,
+      &precondition.operation_id,
+      TwoFactorBackfillOutcome::Cancelled,
+    ),
+    BackfillPatchOperation::FinalizeReconciliationRequired => apply_terminal_backfill_outcome(
+      account,
+      &precondition.operation_id,
+      TwoFactorBackfillOutcome::ReconciliationRequired,
+    ),
+  }
+  Ok(())
+}
+
+fn apply_terminal_backfill_outcome(
+  account: &mut RegistrationResult,
+  operation_id: &str,
+  outcome: TwoFactorBackfillOutcome,
+) {
+  account.two_factor_backfill_state = Some(TwoFactorBackfillState::Completed);
+  account.two_factor_backfill_operation_id = Some(operation_id.to_string());
+  account.two_factor_backfill_outcome = Some(outcome);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn persist_temp_file(
+  temp_file: tempfile::NamedTempFile,
+  destination: &Path,
+  description: &str,
+) -> Result<(), String> {
+  temp_file
+    .persist(destination)
+    .map(|_| ())
+    .map_err(|error| format!("Failed to replace {description}: {}", error.error))
+}
+
+#[cfg(windows)]
+pub(crate) fn persist_temp_file(
+  temp_file: tempfile::NamedTempFile,
+  destination: &Path,
+  description: &str,
+) -> Result<(), String> {
+  use std::os::windows::ffi::OsStrExt;
+  use windows::core::PCWSTR;
+  use windows::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+  };
+
+  let (file, temp_path) = temp_file
+    .keep()
+    .map_err(|error| format!("Failed to prepare {description} temp file: {}", error.error))?;
+  drop(file);
+  let source: Vec<u16> = temp_path
+    .as_os_str()
+    .encode_wide()
+    .chain(std::iter::once(0))
+    .collect();
+  let target: Vec<u16> = destination
+    .as_os_str()
+    .encode_wide()
+    .chain(std::iter::once(0))
+    .collect();
+  let result = unsafe {
+    MoveFileExW(
+      PCWSTR(source.as_ptr()),
+      PCWSTR(target.as_ptr()),
+      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    )
+  };
+  if let Err(error) = result {
+    let _ = fs::remove_file(&temp_path);
+    return Err(format!("Failed to replace {description}: {error}"));
+  }
+  Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn sync_parent_directory(directory: &Path, description: &str) -> Result<(), String> {
+  fs::File::open(directory)
+    .and_then(|file| file.sync_all())
+    .map_err(|error| {
+      format!(
+        "Failed to sync {description} {}: {error}",
+        directory.display()
+      )
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn sync_parent_directory(_directory: &Path, _description: &str) -> Result<(), String> {
+  Ok(())
+}
+
+fn canonical_account_key(account_id: &str, email: &str) -> Option<String> {
+  let account_id = account_id.trim();
+  if !account_id.is_empty() {
+    return Some(account_id.to_string());
+  }
+  let email = email.trim();
+  if !email.is_empty() {
+    return Some(email.to_string());
+  }
+  None
+}
+
+fn account_key(result: &RegistrationResult) -> String {
+  canonical_account_key(&result.account_id, &result.email)
+    .unwrap_or_else(|| format!("unknown-{}", Utc::now().timestamp_millis()))
 }
 
 // --- Public API ---
 
-pub fn save_registration_result(result: &RegistrationResult) {
-  STORE.lock().unwrap().save(result);
+fn credential_store() -> Result<&'static Mutex<CredentialStore>, String> {
+  STORE
+    .as_ref()
+    .map_err(|error| format!("Registered account store unavailable: {error}"))
 }
 
-pub fn list_registered_accounts() -> Vec<RegistrationResult> {
-  STORE.lock().unwrap().list_all()
+fn lock_credential_store() -> Result<std::sync::MutexGuard<'static, CredentialStore>, String> {
+  credential_store()?
+    .lock()
+    .map_err(|error| format!("Failed to lock registered account store: {error}"))
 }
 
-pub fn delete_registered_account(account_id: &str) -> bool {
-  STORE.lock().unwrap().delete(account_id)
+pub fn save_registration_result(result: &RegistrationResult) -> Result<(), String> {
+  lock_credential_store()?.save(result)
+}
+
+pub fn list_registered_accounts() -> Result<Vec<RegistrationResult>, String> {
+  Ok(lock_credential_store()?.list_all())
+}
+
+pub fn delete_registered_account(account_id: &str) -> Result<bool, String> {
+  lock_credential_store()?.delete(account_id)
 }
 
 #[allow(dead_code)]
-pub fn get_registered_account(account_id: &str) -> Option<RegistrationResult> {
-  STORE.lock().unwrap().get(account_id)
+pub fn get_registered_account(account_id: &str) -> Result<Option<RegistrationResult>, String> {
+  Ok(lock_credential_store()?.get(account_id))
 }
 
 pub fn update_registered_account_status(
   account_ids: &[String],
   status: AccountInventoryStatus,
   note: Option<String>,
-) -> usize {
-  STORE
-    .lock()
-    .unwrap()
-    .update_status(account_ids, status, note)
+) -> Result<usize, String> {
+  lock_credential_store()?.update_status(account_ids, status, note)
 }
 
-pub fn update_registered_account_note(account_id: &str, note: String) -> bool {
-  STORE.lock().unwrap().update_note(account_id, note)
+pub fn update_registered_account_note(account_id: &str, note: String) -> Result<bool, String> {
+  lock_credential_store()?.update_note(account_id, note)
+}
+
+#[allow(dead_code)]
+pub(crate) fn compare_and_update_registered_account(
+  account_key: &str,
+  expected_revision: u64,
+  precondition: BackfillPatchPrecondition,
+  patch: TwoFactorBackfillPatch,
+) -> Result<RegistrationResult, String> {
+  lock_credential_store()?.compare_and_update(account_key, expected_revision, precondition, patch)
+}
+
+#[allow(dead_code)]
+pub(crate) fn persist_inferred_email_provider(
+  account_key: &str,
+  expected_revision: u64,
+  provider: EmailProvider,
+) -> Result<RegistrationResult, String> {
+  lock_credential_store()?.persist_inferred_email_provider(account_key, expected_revision, provider)
 }
 
 // --- CDK inventory ---
@@ -735,8 +1792,1160 @@ pub fn put_cdk_inventory_record(record: &CdkInventoryRecord) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::auto_service::openai::register::types::{
+    EmailProviderProvenance, RegistrationOutcomeReason, TwoFactorBackfillAccessState,
+    TwoFactorBackfillExclusion, TwoFactorBackfillOutcome, TwoFactorBackfillState,
+  };
+  use crate::auto_service::openai::two_factor_backfill::{
+    evaluate_eligibility, TwoFactorBackfillPreviewRequest,
+  };
+  use crate::email::EmailProvider;
   use std::sync::Barrier;
   use tempfile::TempDir;
+
+  const ORIGINAL_PASSWORD: &str = "known-password";
+  const ORIGINAL_ACCESS_TOKEN: &str = "known-access-token";
+  const ORIGINAL_CDK: &str = "GMAIL-known-cdk";
+
+  fn registration_result(account_id: &str) -> RegistrationResult {
+    RegistrationResult {
+      success: true,
+      email: format!("{account_id}@example.com"),
+      password: ORIGINAL_PASSWORD.into(),
+      account_id: account_id.into(),
+      access_token: ORIGINAL_ACCESS_TOKEN.into(),
+      device_id: "device-1".into(),
+      error_message: "original-error".into(),
+      step_logs: vec!["original-log".into()],
+      created_at: Utc::now(),
+      two_fa_enabled: false,
+      totp_secret: String::new(),
+      free_trial_eligible: true,
+      plan_type: "trial".into(),
+      cdk: ORIGINAL_CDK.into(),
+      base_email: "base@example.com".into(),
+      phone_number: "+10000000000".into(),
+      status: AccountInventoryStatus::Available,
+      note: "original-note".into(),
+      exported_at: None,
+      sold_at: None,
+      email_provider: None,
+      email_provider_provenance: None,
+      registration_outcome_reason: Some(RegistrationOutcomeReason::Registered),
+      two_factor_backfill_access_state: Some(TwoFactorBackfillAccessState::Accessible),
+      two_factor_backfill_exclusion: None,
+      two_factor_backfill_state: None,
+      two_factor_backfill_operation_id: None,
+      two_factor_backfill_outcome: None,
+      record_revision: 7,
+    }
+  }
+
+  fn account_file(temp: &TempDir, account_id: &str) -> PathBuf {
+    temp.path().join(format!("{account_id}.json"))
+  }
+
+  fn backfill_ready_result(account_id: &str) -> RegistrationResult {
+    let mut account = registration_result(account_id);
+    account.email_provider = Some(EmailProvider::Gmail123452026);
+    account.email_provider_provenance = Some(EmailProviderProvenance::InferredFromCdk);
+    account
+  }
+
+  fn precondition_for(
+    operation: BackfillPatchOperation,
+    operation_id: &str,
+    allow_free_trial_no: bool,
+  ) -> BackfillPatchPrecondition {
+    match operation {
+      BackfillPatchOperation::Start => {
+        BackfillPatchPrecondition::start(operation_id, allow_free_trial_no, false)
+      }
+      BackfillPatchOperation::FinalizeEnabled => {
+        BackfillPatchPrecondition::finalize_enabled(operation_id, allow_free_trial_no, false)
+      }
+      BackfillPatchOperation::FinalizeFailed => {
+        BackfillPatchPrecondition::finalize_failed(operation_id, allow_free_trial_no, false)
+      }
+      BackfillPatchOperation::FinalizeCancelled => {
+        BackfillPatchPrecondition::finalize_cancelled(operation_id, allow_free_trial_no, false)
+      }
+      BackfillPatchOperation::FinalizeReconciliationRequired => {
+        BackfillPatchPrecondition::finalize_reconciliation_required(
+          operation_id,
+          allow_free_trial_no,
+          false,
+        )
+      }
+    }
+  }
+
+  fn patch_for(operation: BackfillPatchOperation) -> TwoFactorBackfillPatch {
+    match operation {
+      BackfillPatchOperation::Start => TwoFactorBackfillPatch::start(),
+      BackfillPatchOperation::FinalizeEnabled => {
+        TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP")
+      }
+      BackfillPatchOperation::FinalizeFailed => TwoFactorBackfillPatch::finalize_failed(),
+      BackfillPatchOperation::FinalizeCancelled => TwoFactorBackfillPatch::finalize_cancelled(),
+      BackfillPatchOperation::FinalizeReconciliationRequired => {
+        TwoFactorBackfillPatch::finalize_reconciliation_required()
+      }
+    }
+  }
+
+  fn account_for_operation(
+    operation: BackfillPatchOperation,
+    operation_id: &str,
+  ) -> RegistrationResult {
+    let mut account = backfill_ready_result("account-1");
+    if operation != BackfillPatchOperation::Start {
+      account.two_factor_backfill_state = Some(TwoFactorBackfillState::InProgress);
+      account.two_factor_backfill_operation_id = Some(operation_id.into());
+    }
+    account
+  }
+
+  fn assert_cas_rejection_preserves(
+    account: RegistrationResult,
+    precondition: BackfillPatchPrecondition,
+    patch: TwoFactorBackfillPatch,
+  ) -> String {
+    let temp = TempDir::new().unwrap();
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&account).unwrap();
+    let disk_before = fs::read(account_file(&temp, "account-1")).unwrap();
+    let memory_before = serde_json::to_value(store.get("account-1").unwrap()).unwrap();
+
+    let error = store
+      .compare_and_update("account-1", account.record_revision, precondition, patch)
+      .unwrap_err();
+
+    assert_eq!(
+      fs::read(account_file(&temp, "account-1")).unwrap(),
+      disk_before
+    );
+    assert_eq!(
+      serde_json::to_value(store.get("account-1").unwrap()).unwrap(),
+      memory_before
+    );
+    error
+  }
+
+  #[test]
+  fn atomic_account_save_survives_store_reload() {
+    let temp = TempDir::new().unwrap();
+    let account = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+
+    store.save(&account).unwrap();
+
+    let reloaded = CredentialStore::with_base_dir(temp.path()).unwrap();
+    let persisted = reloaded.get("account-1").unwrap();
+    assert_eq!(
+      serde_json::to_value(persisted).unwrap(),
+      serde_json::to_value(account).unwrap()
+    );
+  }
+
+  #[test]
+  fn trimmed_account_id_key_supports_preview_cas_migration_and_all_mutations() {
+    let temp = TempDir::new().unwrap();
+    let mut account = registration_result("\u{00a0} account-1 \u{2003}");
+    account.email = "\u{2009} account-1@example.com \u{00a0}".into();
+    let legacy_file = account_file(&temp, "\u{00a0} account-1 \u{2003}");
+    fs::write(&legacy_file, serde_json::to_vec_pretty(&account).unwrap()).unwrap();
+
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+
+    assert_eq!(store.list_all().len(), 1);
+    assert_eq!(
+      store.get("account-1").unwrap().account_id,
+      "\u{00a0} account-1 \u{2003}"
+    );
+    assert!(store.get(" id ").is_none());
+    assert!(store.get("\taccount-1\n").is_some());
+    assert!(store.get("\u{00a0}account-1\u{2003}").is_some());
+    assert!(legacy_file.exists());
+    assert!(!account_file(&temp, "account-1").exists());
+
+    let preview = evaluate_eligibility(
+      &TwoFactorBackfillPreviewRequest {
+        selected_account_keys: vec![" account-1 ".into()],
+        allow_free_trial_no: false,
+        acknowledge_legacy_access: false,
+      },
+      &store.list_all(),
+    );
+    assert_eq!(preview.accounts.len(), 1);
+    assert_eq!(preview.accounts[0].account_key, "account-1");
+    assert_eq!(
+      preview.accounts[0].account_id,
+      "\u{00a0} account-1 \u{2003}"
+    );
+    assert_eq!(
+      preview.accounts[0].email,
+      "\u{2009} account-1@example.com \u{00a0}"
+    );
+    assert!(preview.accounts[0].requires_provider_persistence);
+
+    let inferred = store
+      .persist_inferred_email_provider(
+        &preview.accounts[0].account_key,
+        preview.accounts[0].record_revision,
+        EmailProvider::Gmail123452026,
+      )
+      .unwrap();
+    assert!(!legacy_file.exists());
+    assert!(account_file(&temp, "account-1").exists());
+
+    let started = store
+      .compare_and_update(
+        &preview.accounts[0].account_key,
+        inferred.record_revision,
+        BackfillPatchPrecondition::start("operation-1", false, false),
+        TwoFactorBackfillPatch::start(),
+      )
+      .unwrap();
+    assert_eq!(
+      store
+        .update_status(
+          &[" account-1 ".into()],
+          AccountInventoryStatus::Available,
+          Some("status-updated".into()),
+        )
+        .unwrap(),
+      1
+    );
+    assert!(store
+      .update_note("\u{00a0}account-1\u{2003}", "note-updated".into())
+      .unwrap());
+
+    let reloaded = CredentialStore::with_base_dir(temp.path()).unwrap();
+    let persisted = reloaded.get("account-1").unwrap();
+    assert_eq!(persisted.record_revision, started.record_revision + 2);
+    assert_eq!(persisted.note, "note-updated");
+    assert_eq!(persisted.account_id, "\u{00a0} account-1 \u{2003}");
+    assert_eq!(
+      persisted.email_provider,
+      Some(EmailProvider::Gmail123452026)
+    );
+
+    let mut reloaded = reloaded;
+    assert!(reloaded.delete(" account-1 ").unwrap());
+    assert!(!account_file(&temp, "account-1").exists());
+    assert!(CredentialStore::with_base_dir(temp.path())
+      .unwrap()
+      .get("account-1")
+      .is_none());
+  }
+
+  #[test]
+  fn trimmed_email_fallback_key_supports_every_store_mutation_and_reload() {
+    let temp = TempDir::new().unwrap();
+    let mut account = registration_result("   ");
+    account.email = "  fallback@example.com  ".into();
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+
+    store.save(&account).unwrap();
+
+    assert_eq!(store.list_all().len(), 1);
+    assert_eq!(store.get("fallback@example.com").unwrap().account_id, "   ");
+    assert!(store.get("  fallback@example.com  ").is_some());
+    assert!(account_file(&temp, "fallback@example.com").exists());
+
+    let inferred = store
+      .persist_inferred_email_provider("fallback@example.com", 7, EmailProvider::Gmail123452026)
+      .unwrap();
+    let started = store
+      .compare_and_update(
+        "fallback@example.com",
+        inferred.record_revision,
+        BackfillPatchPrecondition::start("operation-1", false, false),
+        TwoFactorBackfillPatch::start(),
+      )
+      .unwrap();
+    assert_eq!(
+      store
+        .update_status(
+          &["fallback@example.com".into()],
+          AccountInventoryStatus::Available,
+          Some("status-updated".into()),
+        )
+        .unwrap(),
+      1
+    );
+
+    let reloaded = CredentialStore::with_base_dir(temp.path()).unwrap();
+    let persisted = reloaded.get("fallback@example.com").unwrap();
+    assert_eq!(persisted.record_revision, started.record_revision + 1);
+    assert_eq!(persisted.note, "status-updated");
+    assert_eq!(persisted.email, "  fallback@example.com  ");
+
+    let mut reloaded = reloaded;
+    assert!(reloaded.delete("fallback@example.com").unwrap());
+    assert!(!account_file(&temp, "fallback@example.com").exists());
+    assert!(CredentialStore::with_base_dir(temp.path())
+      .unwrap()
+      .get("fallback@example.com")
+      .is_none());
+  }
+
+  #[test]
+  fn first_mutation_migrates_legacy_untrimmed_filename_without_orphan() {
+    let temp = TempDir::new().unwrap();
+    let account = registration_result("  account-1  ");
+    let legacy_file = account_file(&temp, "  account-1  ");
+    fs::write(&legacy_file, serde_json::to_vec_pretty(&account).unwrap()).unwrap();
+
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    assert!(store.get("account-1").is_some());
+    assert!(legacy_file.exists());
+    assert!(!account_file(&temp, "account-1").exists());
+
+    store.update_note("account-1", "migrated".into()).unwrap();
+
+    assert!(!legacy_file.exists());
+    assert!(account_file(&temp, "account-1").exists());
+    let reloaded = CredentialStore::with_base_dir(temp.path()).unwrap();
+    assert_eq!(reloaded.accounts.len(), 1);
+    assert_eq!(reloaded.get("account-1").unwrap().note, "migrated");
+  }
+
+  #[test]
+  fn colliding_legacy_whitespace_records_load_deterministically_and_fail_closed_on_mutation() {
+    let temp = TempDir::new().unwrap();
+    let mut older = registration_result("  account-1  ");
+    older.record_revision = 7;
+    older.password = "older-password".into();
+    let mut newer = registration_result("\u{00a0}account-1\u{2003}");
+    newer.record_revision = 8;
+    newer.password = "newer-password".into();
+    let older_file = account_file(&temp, "  account-1  ");
+    let newer_file = account_file(&temp, "\u{00a0}account-1\u{2003}");
+    fs::write(&older_file, serde_json::to_vec_pretty(&older).unwrap()).unwrap();
+    fs::write(&newer_file, serde_json::to_vec_pretty(&newer).unwrap()).unwrap();
+    let older_before = fs::read(&older_file).unwrap();
+    let newer_before = fs::read(&newer_file).unwrap();
+
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+
+    assert_eq!(store.accounts.len(), 1);
+    assert_eq!(store.get("account-1").unwrap().password, "newer-password");
+    let error = store
+      .update_note(" account-1 ", "must-not-persist".into())
+      .unwrap_err();
+    assert!(error.contains("migration collision"));
+    assert_eq!(fs::read(&older_file).unwrap(), older_before);
+    assert_eq!(fs::read(&newer_file).unwrap(), newer_before);
+    assert!(!account_file(&temp, "account-1").exists());
+    assert_eq!(store.get("account-1").unwrap().password, "newer-password");
+    assert_eq!(store.get("account-1").unwrap().note, "original-note");
+  }
+
+  #[test]
+  fn legacy_untrimmed_filename_migration_refuses_destination_collision() {
+    let temp = TempDir::new().unwrap();
+    let account = registration_result("  account-1  ");
+    let legacy_file = account_file(&temp, "  account-1  ");
+    fs::write(&legacy_file, serde_json::to_vec_pretty(&account).unwrap()).unwrap();
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+
+    let mut collision = registration_result("account-1");
+    collision.email = "different@example.com".into();
+    let canonical_file = account_file(&temp, "account-1");
+    fs::write(
+      &canonical_file,
+      serde_json::to_vec_pretty(&collision).unwrap(),
+    )
+    .unwrap();
+    let legacy_before = fs::read(&legacy_file).unwrap();
+    let collision_before = fs::read(&canonical_file).unwrap();
+
+    let error = store
+      .update_note("account-1", "must-not-persist".into())
+      .unwrap_err();
+
+    assert!(error.contains("migration collision"));
+    assert_eq!(fs::read(&legacy_file).unwrap(), legacy_before);
+    assert_eq!(fs::read(&canonical_file).unwrap(), collision_before);
+    assert_eq!(store.get("account-1").unwrap().note, "original-note");
+  }
+
+  #[test]
+  fn account_save_failure_leaves_memory_and_disk_unchanged() {
+    for stage in [
+      AtomicWriteFailureStage::Serialize,
+      AtomicWriteFailureStage::Write,
+      AtomicWriteFailureStage::Replace,
+    ] {
+      let temp = TempDir::new().unwrap();
+      let original = registration_result("account-1");
+      let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+      store.save(&original).unwrap();
+      let disk_before = fs::read(account_file(&temp, "account-1")).unwrap();
+      let memory_before = serde_json::to_value(store.get("account-1").unwrap()).unwrap();
+      let mut changed = original.clone();
+      changed.note = format!("changed-at-{stage:?}");
+
+      store.fail_next_account_write(stage);
+      assert!(store.save(&changed).is_err(), "stage {stage:?}");
+
+      assert_eq!(
+        serde_json::to_value(store.get("account-1").unwrap()).unwrap(),
+        memory_before,
+        "memory changed at {stage:?}"
+      );
+      assert_eq!(
+        fs::read(account_file(&temp, "account-1")).unwrap(),
+        disk_before,
+        "disk changed at {stage:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn account_key_change_removes_only_the_stale_record_file() {
+    let temp = TempDir::new().unwrap();
+    let mut legacy = registration_result("");
+    legacy.email = "legacy@example.com".into();
+    let unrelated = registration_result("unrelated");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&legacy).unwrap();
+    store.save(&unrelated).unwrap();
+
+    let mut migrated = legacy;
+    migrated.account_id = "account-1".into();
+    store.save(&migrated).unwrap();
+
+    assert!(!temp.path().join("legacy@example.com.json").exists());
+    assert!(account_file(&temp, "account-1").exists());
+    assert!(account_file(&temp, "unrelated").exists());
+    assert!(CredentialStore::with_base_dir(temp.path())
+      .unwrap()
+      .get("unrelated")
+      .is_some());
+  }
+
+  #[test]
+  fn legacy_key_migration_collision_preserves_both_records() {
+    let temp = TempDir::new().unwrap();
+    let mut legacy = registration_result("");
+    legacy.email = "legacy@example.com".into();
+    let mut destination = registration_result("account-1");
+    destination.email = "destination@example.com".into();
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&legacy).unwrap();
+    store.save(&destination).unwrap();
+    let memory_before = serde_json::to_value(&store.accounts).unwrap();
+    let legacy_disk_before = fs::read(temp.path().join("legacy@example.com.json")).unwrap();
+    let destination_disk_before = fs::read(account_file(&temp, "account-1")).unwrap();
+
+    let mut incoming = legacy.clone();
+    incoming.account_id = "account-1".into();
+    let error = store.save(&incoming).unwrap_err();
+
+    assert!(error.contains("migration collision"));
+    assert_eq!(
+      fs::read(temp.path().join("legacy@example.com.json")).unwrap(),
+      legacy_disk_before
+    );
+    assert_eq!(
+      fs::read(account_file(&temp, "account-1")).unwrap(),
+      destination_disk_before
+    );
+    assert_eq!(
+      serde_json::to_value(&store.accounts).unwrap(),
+      memory_before
+    );
+  }
+
+  #[test]
+  fn post_replace_sync_failure_rolls_back_canonical_and_migrating_saves() {
+    let temp = TempDir::new().unwrap();
+    let original = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+    let disk_before = fs::read(account_file(&temp, "account-1")).unwrap();
+    let mut changed = original.clone();
+    changed.note = "must-not-survive".into();
+
+    store.fail_next_account_write(AtomicWriteFailureStage::SyncDestinationDirectory);
+    assert!(store.save(&changed).is_err());
+    assert_eq!(
+      fs::read(account_file(&temp, "account-1")).unwrap(),
+      disk_before
+    );
+    assert_eq!(store.get("account-1").unwrap().note, original.note);
+
+    let mut legacy = registration_result("");
+    legacy.email = "legacy@example.com".into();
+    store.save(&legacy).unwrap();
+    let legacy_disk_before = fs::read(temp.path().join("legacy@example.com.json")).unwrap();
+    let mut migrated = legacy.clone();
+    migrated.account_id = "account-2".into();
+
+    store.fail_next_account_write(AtomicWriteFailureStage::SyncDestinationDirectory);
+    assert!(store.save(&migrated).is_err());
+    assert_eq!(
+      fs::read(temp.path().join("legacy@example.com.json")).unwrap(),
+      legacy_disk_before
+    );
+    assert!(!account_file(&temp, "account-2").exists());
+    assert!(store.get("legacy@example.com").is_some());
+    assert!(store.get("account-2").is_none());
+  }
+
+  #[test]
+  fn post_replace_sync_and_rollback_failures_are_compounded() {
+    let temp = TempDir::new().unwrap();
+    let original = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+    let memory_before = serde_json::to_value(store.get("account-1").unwrap()).unwrap();
+    let mut changed = original;
+    changed.note = "must-not-reach-memory".into();
+
+    store.fail_account_writes(&[
+      AtomicWriteFailureStage::SyncDestinationDirectory,
+      AtomicWriteFailureStage::RollbackDestination,
+    ]);
+    let error = store.save(&changed).unwrap_err();
+
+    assert!(error.contains("destination-directory sync failure"));
+    assert!(error.contains("destination rollback failure"));
+    assert_eq!(
+      serde_json::to_value(store.get("account-1").unwrap()).unwrap(),
+      memory_before
+    );
+
+    let mut legacy = registration_result("");
+    legacy.email = "legacy@example.com".into();
+    store.save(&legacy).unwrap();
+    let legacy_memory_before =
+      serde_json::to_value(store.get("legacy@example.com").unwrap()).unwrap();
+    let mut migrated = legacy;
+    migrated.account_id = "account-2".into();
+    store.fail_account_writes(&[
+      AtomicWriteFailureStage::SyncDestinationDirectory,
+      AtomicWriteFailureStage::RollbackDestination,
+    ]);
+
+    let migration_error = store.save(&migrated).unwrap_err();
+
+    assert!(migration_error.contains("destination-directory sync failure"));
+    assert!(migration_error.contains("destination rollback failure"));
+    assert_eq!(
+      serde_json::to_value(store.get("legacy@example.com").unwrap()).unwrap(),
+      legacy_memory_before
+    );
+    assert!(store.get("account-2").is_none());
+  }
+
+  #[test]
+  fn failed_stable_key_cleanup_rolls_back_new_file_and_memory() {
+    for stage in [
+      AtomicWriteFailureStage::DeleteStale,
+      AtomicWriteFailureStage::SyncStaleDirectory,
+    ] {
+      let temp = TempDir::new().unwrap();
+      let mut legacy = registration_result("");
+      legacy.email = "legacy@example.com".into();
+      let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+      store.save(&legacy).unwrap();
+
+      let mut migrated = legacy.clone();
+      migrated.account_id = "account-1".into();
+      store.fail_next_account_write(stage);
+      assert!(store.save(&migrated).is_err(), "stage {stage:?}");
+
+      let legacy_file = temp.path().join("legacy@example.com.json");
+      assert!(legacy_file.exists(), "stage {stage:?}");
+      assert!(
+        !account_file(&temp, "account-1").exists(),
+        "stage {stage:?}"
+      );
+      assert_eq!(
+        serde_json::from_slice::<RegistrationResult>(&fs::read(legacy_file).unwrap())
+          .unwrap()
+          .account_id,
+        "",
+        "stage {stage:?}"
+      );
+      assert_eq!(
+        store.get("legacy@example.com").unwrap().account_id,
+        "",
+        "stage {stage:?}"
+      );
+      assert!(store.get("account-1").is_none(), "stage {stage:?}");
+    }
+  }
+
+  #[test]
+  fn reload_prefers_canonical_account_id_when_legacy_file_also_exists() {
+    let temp = TempDir::new().unwrap();
+    let mut legacy = registration_result("");
+    legacy.email = "legacy@example.com".into();
+    let mut migrated = legacy.clone();
+    migrated.account_id = "account-1".into();
+    migrated.record_revision = 8;
+    fs::write(
+      temp.path().join("legacy@example.com.json"),
+      serde_json::to_vec_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+      account_file(&temp, "account-1"),
+      serde_json::to_vec_pretty(&migrated).unwrap(),
+    )
+    .unwrap();
+
+    let reloaded = CredentialStore::with_base_dir(temp.path()).unwrap();
+
+    assert_eq!(reloaded.accounts.len(), 1);
+    assert_eq!(reloaded.get("account-1").unwrap().record_revision, 8);
+    assert_eq!(
+      reloaded.get("legacy@example.com").unwrap().account_id,
+      "account-1"
+    );
+  }
+
+  #[test]
+  fn stable_key_change_never_deletes_a_distinct_account_with_the_same_email() {
+    let temp = TempDir::new().unwrap();
+    let mut first = registration_result("account-1");
+    first.email = "shared@example.com".into();
+    let mut second = registration_result("account-2");
+    second.email = "shared@example.com".into();
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&first).unwrap();
+    store.save(&second).unwrap();
+
+    second.note = "updated".into();
+    store.save(&second).unwrap();
+
+    assert!(account_file(&temp, "account-1").exists());
+    assert!(account_file(&temp, "account-2").exists());
+    assert!(store.get("account-1").is_some());
+    assert_eq!(store.get("account-2").unwrap().note, "updated");
+  }
+
+  #[test]
+  fn status_and_note_updates_increment_revision_and_preserve_credentials() {
+    let temp = TempDir::new().unwrap();
+    let original = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+
+    assert_eq!(
+      store
+        .update_status(
+          &["account-1".into()],
+          AccountInventoryStatus::Exported,
+          Some("exported-note".into()),
+        )
+        .unwrap(),
+      1
+    );
+    let status_updated = store.get("account-1").unwrap();
+    assert_eq!(status_updated.record_revision, 8);
+    assert_eq!(status_updated.status, AccountInventoryStatus::Exported);
+    assert_eq!(status_updated.note, "exported-note");
+    assert!(status_updated.exported_at.is_some());
+    assert_eq!(status_updated.password, ORIGINAL_PASSWORD);
+    assert_eq!(status_updated.access_token, ORIGINAL_ACCESS_TOKEN);
+    assert_eq!(status_updated.cdk, ORIGINAL_CDK);
+
+    assert!(store
+      .update_note("account-1", "second-note".into())
+      .unwrap());
+    let note_updated = store.get("account-1").unwrap();
+    assert_eq!(note_updated.record_revision, 9);
+    assert_eq!(note_updated.note, "second-note");
+    assert_eq!(note_updated.status, AccountInventoryStatus::Exported);
+    assert_eq!(note_updated.exported_at, status_updated.exported_at);
+    assert_eq!(note_updated.password, ORIGINAL_PASSWORD);
+    assert_eq!(note_updated.error_message, "original-error");
+    assert_eq!(note_updated.step_logs, vec!["original-log"]);
+
+    let reloaded = CredentialStore::with_base_dir(temp.path()).unwrap();
+    assert_eq!(reloaded.get("account-1").unwrap().record_revision, 9);
+  }
+
+  #[test]
+  fn failed_status_or_note_update_returns_error_without_counting_or_mutating() {
+    let temp = TempDir::new().unwrap();
+    let original = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+    let disk_before = fs::read(account_file(&temp, "account-1")).unwrap();
+
+    store.fail_next_account_write(AtomicWriteFailureStage::Replace);
+    assert!(store
+      .update_status(&["account-1".into()], AccountInventoryStatus::Sold, None,)
+      .is_err());
+    assert_eq!(store.get("account-1").unwrap().record_revision, 7);
+    assert_eq!(
+      fs::read(account_file(&temp, "account-1")).unwrap(),
+      disk_before
+    );
+
+    store.fail_next_account_write(AtomicWriteFailureStage::Write);
+    assert!(store.update_note("account-1", "not-saved".into()).is_err());
+    assert_eq!(store.get("account-1").unwrap().note, "original-note");
+  }
+
+  #[test]
+  fn cas_patch_changes_only_the_allowed_fields() {
+    let temp = TempDir::new().unwrap();
+    let operation_id = "operation-1";
+    let original = account_for_operation(BackfillPatchOperation::FinalizeEnabled, operation_id);
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+
+    let updated = store
+      .compare_and_update(
+        "account-1",
+        7,
+        BackfillPatchPrecondition::finalize_enabled(operation_id, false, false),
+        TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP"),
+      )
+      .unwrap();
+
+    assert_eq!(updated.record_revision, 8);
+    assert_eq!(updated.email_provider, original.email_provider);
+    assert_eq!(
+      updated.email_provider_provenance,
+      original.email_provider_provenance
+    );
+    assert!(updated.two_fa_enabled);
+    assert_eq!(updated.totp_secret, "JBSWY3DPEHPK3PXP");
+    assert_eq!(
+      updated.two_factor_backfill_state,
+      Some(TwoFactorBackfillState::Completed)
+    );
+    assert_eq!(
+      updated.two_factor_backfill_outcome,
+      Some(TwoFactorBackfillOutcome::Enabled)
+    );
+
+    let mut original_json = serde_json::to_value(original).unwrap();
+    let mut updated_json = serde_json::to_value(updated).unwrap();
+    for field in [
+      "twoFactorBackfillState",
+      "twoFactorBackfillOperationId",
+      "twoFactorBackfillOutcome",
+      "twoFaEnabled",
+      "totpSecret",
+      "recordRevision",
+    ] {
+      original_json.as_object_mut().unwrap().remove(field);
+      updated_json.as_object_mut().unwrap().remove(field);
+    }
+    assert_eq!(updated_json, original_json);
+  }
+
+  #[test]
+  fn locked_finalize_marks_access_locked_and_preserves_account_fields() {
+    let temp = TempDir::new().unwrap();
+    let operation_id = "operation-locked";
+    let original = account_for_operation(BackfillPatchOperation::FinalizeFailed, operation_id);
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+
+    let updated = store
+      .compare_and_update(
+        "account-1",
+        original.record_revision,
+        BackfillPatchPrecondition::finalize_failed(operation_id, false, false),
+        TwoFactorBackfillPatch::finalize_failed_locked(),
+      )
+      .unwrap();
+
+    assert_eq!(
+      updated.two_factor_backfill_access_state,
+      Some(TwoFactorBackfillAccessState::Locked)
+    );
+    assert_eq!(
+      updated.two_factor_backfill_state,
+      Some(TwoFactorBackfillState::Completed)
+    );
+    assert_eq!(
+      updated.two_factor_backfill_outcome,
+      Some(TwoFactorBackfillOutcome::Failed)
+    );
+    assert_eq!(updated.record_revision, original.record_revision + 1);
+    assert_eq!(updated.password, original.password);
+    assert_eq!(updated.cdk, original.cdk);
+    assert_eq!(updated.status, original.status);
+    assert_eq!(updated.note, original.note);
+
+    let reloaded = CredentialStore::with_base_dir(temp.path()).unwrap();
+    assert_eq!(
+      reloaded
+        .get("account-1")
+        .unwrap()
+        .two_factor_backfill_access_state,
+      Some(TwoFactorBackfillAccessState::Locked)
+    );
+  }
+
+  #[test]
+  fn terminal_cas_variants_preserve_fields_after_owned_account_becomes_ineligible() {
+    let operation_id = "operation-1";
+    for (operation, expected_outcome) in [
+      (
+        BackfillPatchOperation::FinalizeFailed,
+        TwoFactorBackfillOutcome::Failed,
+      ),
+      (
+        BackfillPatchOperation::FinalizeCancelled,
+        TwoFactorBackfillOutcome::Cancelled,
+      ),
+      (
+        BackfillPatchOperation::FinalizeReconciliationRequired,
+        TwoFactorBackfillOutcome::ReconciliationRequired,
+      ),
+    ] {
+      let temp = TempDir::new().unwrap();
+      let mut original = account_for_operation(operation, operation_id);
+      original.success = false;
+      original.status = AccountInventoryStatus::Sold;
+      original.email.clear();
+      original.password.clear();
+      original.cdk.clear();
+      original.email_provider = None;
+      original.email_provider_provenance = None;
+      original.two_factor_backfill_access_state = Some(TwoFactorBackfillAccessState::Locked);
+      original.two_factor_backfill_exclusion = Some(TwoFactorBackfillExclusion::ManualReview);
+      let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+      store.save(&original).unwrap();
+
+      let updated = store
+        .compare_and_update(
+          "account-1",
+          original.record_revision,
+          precondition_for(operation, operation_id, false),
+          patch_for(operation),
+        )
+        .unwrap();
+
+      assert_eq!(
+        updated.two_factor_backfill_state,
+        Some(TwoFactorBackfillState::Completed)
+      );
+      assert_eq!(updated.two_factor_backfill_outcome, Some(expected_outcome));
+      assert_eq!(updated.record_revision, original.record_revision + 1);
+      let mut original_json = serde_json::to_value(original).unwrap();
+      let mut updated_json = serde_json::to_value(updated).unwrap();
+      for field in [
+        "twoFactorBackfillState",
+        "twoFactorBackfillOperationId",
+        "twoFactorBackfillOutcome",
+        "recordRevision",
+      ] {
+        original_json.as_object_mut().unwrap().remove(field);
+        updated_json.as_object_mut().unwrap().remove(field);
+      }
+      assert_eq!(updated_json, original_json, "operation={operation:?}");
+    }
+  }
+
+  #[test]
+  fn cas_rejects_provider_conflicts_and_existing_two_factor_credentials() {
+    let temp = TempDir::new().unwrap();
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    let mut configured = registration_result("account-1");
+    configured.email_provider = Some(EmailProvider::Gmail123452026);
+    configured.email_provider_provenance = Some(EmailProviderProvenance::RegistrationConfig);
+    store.save(&configured).unwrap();
+
+    let provider_error = store
+      .persist_inferred_email_provider("account-1", 7, EmailProvider::SmsIosmq)
+      .unwrap_err();
+    assert!(provider_error.contains("provider conflict"));
+
+    let mut enabled = configured;
+    enabled.two_fa_enabled = true;
+    enabled.totp_secret = "existing-secret".into();
+    enabled.record_revision = 8;
+    enabled.two_factor_backfill_state = Some(TwoFactorBackfillState::InProgress);
+    enabled.two_factor_backfill_operation_id = Some("operation-1".into());
+    store.save(&enabled).unwrap();
+    let disk_before = fs::read(account_file(&temp, "account-1")).unwrap();
+
+    assert!(store
+      .compare_and_update(
+        "account-1",
+        8,
+        BackfillPatchPrecondition::finalize_enabled("operation-1", false, false),
+        TwoFactorBackfillPatch::finalize_enabled("replacement-secret"),
+      )
+      .unwrap_err()
+      .contains("local 2FA state"));
+    assert_eq!(
+      fs::read(account_file(&temp, "account-1")).unwrap(),
+      disk_before
+    );
+    assert_eq!(
+      store.get("account-1").unwrap().totp_secret,
+      "existing-secret"
+    );
+  }
+
+  #[test]
+  fn stale_or_concurrently_invalidated_cas_is_rejected() {
+    let temp = TempDir::new().unwrap();
+    let original = backfill_ready_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+
+    assert!(store
+      .compare_and_update(
+        "account-1",
+        6,
+        BackfillPatchPrecondition::start("operation-1", false, false),
+        TwoFactorBackfillPatch::start(),
+      )
+      .unwrap_err()
+      .contains("revision conflict"));
+
+    store
+      .update_note("account-1", "concurrent-note".into())
+      .unwrap();
+    assert!(store
+      .compare_and_update(
+        "account-1",
+        7,
+        BackfillPatchPrecondition::start("operation-1", false, false),
+        TwoFactorBackfillPatch::start(),
+      )
+      .unwrap_err()
+      .contains("revision conflict"));
+    let current = store.get("account-1").unwrap();
+    assert_eq!(current.note, "concurrent-note");
+    assert_eq!(current.record_revision, 8);
+  }
+
+  #[test]
+  fn cas_revalidates_every_policy_gate_for_start_and_finalize_under_lock() {
+    let operation_id = "operation-1";
+
+    for operation in [
+      BackfillPatchOperation::Start,
+      BackfillPatchOperation::FinalizeEnabled,
+    ] {
+      let valid = account_for_operation(operation, operation_id);
+      let mut cases = Vec::new();
+
+      let mut unsuccessful = valid.clone();
+      unsuccessful.success = false;
+      cases.push(unsuccessful);
+
+      for status in [
+        AccountInventoryStatus::Sold,
+        AccountInventoryStatus::Exported,
+        AccountInventoryStatus::Reserved,
+      ] {
+        let mut account = valid.clone();
+        account.status = status;
+        cases.push(account);
+      }
+
+      let mut invalid_unknown = valid.clone();
+      invalid_unknown.status = AccountInventoryStatus::Invalid;
+      invalid_unknown.registration_outcome_reason = None;
+      cases.push(invalid_unknown);
+
+      let mut locked = valid.clone();
+      locked.two_factor_backfill_access_state = Some(TwoFactorBackfillAccessState::Locked);
+      cases.push(locked);
+
+      let mut excluded = valid.clone();
+      excluded.two_factor_backfill_exclusion = Some(TwoFactorBackfillExclusion::ManualReview);
+      cases.push(excluded);
+
+      let mut missing_provider = valid.clone();
+      missing_provider.email_provider = None;
+      missing_provider.email_provider_provenance = None;
+      cases.push(missing_provider);
+
+      let mut provider_missing_only = valid.clone();
+      provider_missing_only.email_provider = None;
+      cases.push(provider_missing_only);
+
+      let mut missing_provenance = valid.clone();
+      missing_provenance.email_provider_provenance = None;
+      cases.push(missing_provenance);
+
+      let mut missing_email = valid.clone();
+      missing_email.email = "  ".into();
+      cases.push(missing_email);
+
+      let mut missing_password = valid.clone();
+      missing_password.password = "  ".into();
+      cases.push(missing_password);
+
+      let mut missing_cdk = valid.clone();
+      missing_cdk.cdk = "  ".into();
+      cases.push(missing_cdk);
+
+      let mut enabled = valid.clone();
+      enabled.two_fa_enabled = true;
+      cases.push(enabled);
+
+      let mut secret_without_flag = valid.clone();
+      secret_without_flag.totp_secret = "existing-secret".into();
+      cases.push(secret_without_flag);
+
+      for current in cases {
+        let error = assert_cas_rejection_preserves(
+          current,
+          precondition_for(operation, operation_id, false),
+          patch_for(operation),
+        );
+        assert!(error.contains("precondition"), "{operation:?}: {error}");
+      }
+    }
+  }
+
+  #[test]
+  fn cas_rejects_lifecycle_mismatches_and_operation_bypass_without_mutation() {
+    let operation_id = "operation-1";
+
+    let mut already_in_progress = backfill_ready_result("account-1");
+    already_in_progress.two_factor_backfill_state = Some(TwoFactorBackfillState::InProgress);
+    already_in_progress.two_factor_backfill_operation_id = Some(operation_id.into());
+    assert!(assert_cas_rejection_preserves(
+      already_in_progress,
+      BackfillPatchPrecondition::start(operation_id, false, false),
+      TwoFactorBackfillPatch::start(),
+    )
+    .contains("lifecycle"));
+
+    let not_started = backfill_ready_result("account-1");
+    assert!(assert_cas_rejection_preserves(
+      not_started,
+      BackfillPatchPrecondition::finalize_enabled(operation_id, false, false),
+      TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP"),
+    )
+    .contains("lifecycle"));
+
+    let mut wrong_owner =
+      account_for_operation(BackfillPatchOperation::FinalizeEnabled, operation_id);
+    wrong_owner.two_factor_backfill_operation_id = Some("other-operation".into());
+    assert!(assert_cas_rejection_preserves(
+      wrong_owner,
+      BackfillPatchPrecondition::finalize_enabled(operation_id, false, false),
+      TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP"),
+    )
+    .contains("operation ownership"));
+
+    for (precondition, patch) in [
+      (
+        BackfillPatchPrecondition::start(operation_id, false, false),
+        TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP"),
+      ),
+      (
+        BackfillPatchPrecondition::finalize_enabled(operation_id, false, false),
+        TwoFactorBackfillPatch::start(),
+      ),
+    ] {
+      let account = account_for_operation(precondition.operation, operation_id);
+      assert!(
+        assert_cas_rejection_preserves(account, precondition, patch).contains("does not match")
+      );
+    }
+  }
+
+  #[test]
+  fn free_trial_no_override_must_be_explicit_for_start_and_finalize() {
+    let operation_id = "operation-1";
+    let mut account = backfill_ready_result("account-1");
+    account.success = false;
+    account.status = AccountInventoryStatus::Invalid;
+    account.registration_outcome_reason = Some(RegistrationOutcomeReason::FreeTrialNo);
+
+    assert!(assert_cas_rejection_preserves(
+      account.clone(),
+      BackfillPatchPrecondition::start(operation_id, false, false),
+      TwoFactorBackfillPatch::start(),
+    )
+    .contains("unsuccessful"));
+
+    let temp = TempDir::new().unwrap();
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&account).unwrap();
+    let started = store
+      .compare_and_update(
+        "account-1",
+        7,
+        BackfillPatchPrecondition::start(operation_id, true, false),
+        TwoFactorBackfillPatch::start(),
+      )
+      .unwrap();
+    assert_eq!(
+      started.two_factor_backfill_state,
+      Some(TwoFactorBackfillState::InProgress)
+    );
+
+    assert!(assert_cas_rejection_preserves(
+      started.clone(),
+      BackfillPatchPrecondition::finalize_enabled(operation_id, false, false),
+      TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP"),
+    )
+    .contains("unsuccessful"));
+
+    let finalized = store
+      .compare_and_update(
+        "account-1",
+        started.record_revision,
+        BackfillPatchPrecondition::finalize_enabled(operation_id, true, false),
+        TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP"),
+      )
+      .unwrap();
+    assert!(finalized.two_fa_enabled);
+    assert_eq!(
+      finalized.two_factor_backfill_outcome,
+      Some(TwoFactorBackfillOutcome::Enabled)
+    );
+  }
+
+  #[test]
+  fn provider_inference_is_one_time_idempotent_and_rejects_conflicts() {
+    let temp = TempDir::new().unwrap();
+    let original = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+
+    let inferred = store
+      .persist_inferred_email_provider("account-1", 7, EmailProvider::Gmail123452026)
+      .unwrap();
+    assert_eq!(inferred.record_revision, 8);
+    assert_eq!(
+      inferred.email_provider_provenance,
+      Some(EmailProviderProvenance::InferredFromCdk)
+    );
+
+    let idempotent = store
+      .persist_inferred_email_provider("account-1", 8, EmailProvider::Gmail123452026)
+      .unwrap();
+    assert_eq!(idempotent.record_revision, 8);
+
+    assert!(store
+      .persist_inferred_email_provider("account-1", 8, EmailProvider::SmsIosmq)
+      .unwrap_err()
+      .contains("provider conflict"));
+
+    let mut configured = registration_result("account-2");
+    configured.email_provider = Some(EmailProvider::Gmail123452026);
+    configured.email_provider_provenance = Some(EmailProviderProvenance::RegistrationConfig);
+    store.save(&configured).unwrap();
+    assert!(store
+      .persist_inferred_email_provider("account-2", 7, EmailProvider::Gmail123452026,)
+      .unwrap_err()
+      .contains("provider conflict"));
+  }
 
   fn test_store(temp: &TempDir) -> Arc<Mutex<CdkStore>> {
     Arc::new(Mutex::new(CdkStore::with_base_dir(temp.path())))

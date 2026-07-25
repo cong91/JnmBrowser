@@ -34,6 +34,7 @@ struct LiveArgs {
   sms_network: Option<String>,
   sms_country: String,
   proxy_id: Option<String>,
+  vpn_id: Option<String>,
 }
 
 fn parse_args() -> LiveArgs {
@@ -48,6 +49,7 @@ fn parse_args() -> LiveArgs {
   let mut sms_network = std::env::var("AUTO_LOGIN_SMS_NETWORK").ok();
   let mut sms_country = std::env::var("AUTO_LOGIN_SMS_COUNTRY").unwrap_or_else(|_| "vn".into());
   let mut proxy_id = std::env::var("AUTO_LOGIN_PROXY_ID").ok();
+  let mut vpn_id = std::env::var("AUTO_LOGIN_VPN_ID").ok();
 
   let mut args = std::env::args().skip(1);
   while let Some(arg) = args.next() {
@@ -68,6 +70,7 @@ fn parse_args() -> LiveArgs {
       "--sms-network" => sms_network = args.next(),
       "--sms-country" => sms_country = args.next().unwrap_or(sms_country),
       "--proxy-id" => proxy_id = args.next(),
+      "--vpn-id" => vpn_id = args.next(),
       other if other.starts_with("--credential=") => {
         credential = other.trim_start_matches("--credential=").to_string();
       }
@@ -86,10 +89,14 @@ fn parse_args() -> LiveArgs {
       other if other.starts_with("--proxy-id=") => {
         proxy_id = Some(other.trim_start_matches("--proxy-id=").to_string());
       }
+      other if other.starts_with("--vpn-id=") => {
+        vpn_id = Some(other.trim_start_matches("--vpn-id=").to_string());
+      }
       "--help" | "-h" => {
         eprintln!(
           "Usage: auto-login-live --credential 'email|pass|totp' [--browser chromium] \
-           [--sms-token TOKEN] [--sms-service-id 1234] [--sms-network VINAPHONE] [--max-retries 1]"
+           [--sms-token TOKEN] [--sms-service-id 1234] [--sms-network VINAPHONE] \
+           [--vpn-id ID] [--proxy-id ID] [--max-retries 1]"
         );
         std::process::exit(0);
       }
@@ -115,6 +122,7 @@ fn parse_args() -> LiveArgs {
     sms_network,
     sms_country,
     proxy_id,
+    vpn_id,
   }
 }
 
@@ -138,6 +146,13 @@ fn main() {
         let result = tokio::task::spawn_blocking(move || {
           let rt = tokio::runtime::Runtime::new().expect("runtime");
           rt.block_on(async move {
+            let network_mode = if args.vpn_id.is_some() {
+              LoginNetworkMode::Vpn
+            } else if args.proxy_id.is_some() {
+              LoginNetworkMode::Proxy
+            } else {
+              LoginNetworkMode::None
+            };
             let config = LoginConfig {
               credentials_text: args.credential.clone(),
               credentials: vec![cred],
@@ -156,13 +171,13 @@ fn main() {
               sms_network: args.sms_network.clone(),
               sms_country: Some(args.sms_country.clone()),
               proxy_id: args.proxy_id.clone(),
-              vpn_id: None,
-              rotate_every_n: 0,
-              network_mode: if args.proxy_id.is_some() {
-                LoginNetworkMode::Proxy
+              vpn_id: args.vpn_id.clone(),
+              rotate_every_n: if matches!(network_mode, LoginNetworkMode::Vpn) {
+                1
               } else {
-                LoginNetworkMode::None
+                0
               },
+              network_mode,
             };
             if let Err(e) = config.validate() {
               eprintln!("config error: {e}");

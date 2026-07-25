@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -157,11 +158,24 @@ impl EmailService for Gmail123452026Service {
     cdk: &str,
     timeout_secs: u64,
   ) -> Result<String, EmailServiceError> {
+    let cancel_flag = AtomicBool::new(false);
+    self.poll_verification_code_with_cancel(cdk, timeout_secs, &cancel_flag)
+  }
+
+  fn poll_verification_code_with_cancel(
+    &self,
+    cdk: &str,
+    timeout_secs: u64,
+    cancel_flag: &AtomicBool,
+  ) -> Result<String, EmailServiceError> {
     let url = format!("{API_BASE}/mailbox/code");
     let body = serde_json::json!({ "cdk": cdk, "locktime": 5 });
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
     loop {
+      if cancel_flag.load(Ordering::SeqCst) {
+        return Err(EmailServiceError::Cancelled);
+      }
       if Instant::now() >= deadline {
         return Err(EmailServiceError::Timeout(format!(
           "verification code not received within {timeout_secs}s"
@@ -187,6 +201,9 @@ impl EmailService for Gmail123452026Service {
 
       match result {
         Ok(resp) => {
+          if cancel_flag.load(Ordering::SeqCst) {
+            return Err(EmailServiceError::Cancelled);
+          }
           let text = Self::block_on(async move { resp.text().await }).unwrap_or_default();
           let data: Result<VerificationCodeResponse, _> = serde_json::from_str(&text);
 
@@ -238,7 +255,15 @@ impl EmailService for Gmail123452026Service {
         }
       }
 
-      std::thread::sleep(poll_timeout);
+      let sleep_deadline = Instant::now() + poll_timeout;
+      while Instant::now() < sleep_deadline {
+        if cancel_flag.load(Ordering::SeqCst) {
+          return Err(EmailServiceError::Cancelled);
+        }
+        std::thread::sleep(
+          Duration::from_millis(100).min(sleep_deadline.saturating_duration_since(Instant::now())),
+        );
+      }
     }
   }
 

@@ -68,6 +68,7 @@ fn parse_args() -> LiveArgs {
   let mut max_retries = 1u32;
   let mut accounts_per_cdk = 1u32;
   let mut concurrency = 1u32;
+  let mut concurrency_explicit = false;
   let mut network_mode = NetworkMode::None;
   let mut rotate_every_n = 0u32;
   let mut nord_group = std::env::var("AUTO_REG_NORD_GROUP").ok();
@@ -88,6 +89,7 @@ fn parse_args() -> LiveArgs {
   }
   if let Ok(n) = std::env::var("AUTO_REG_CONCURRENCY") {
     concurrency = n.parse().unwrap_or(1);
+    concurrency_explicit = true;
   }
 
   let mut args = std::env::args().skip(1);
@@ -117,6 +119,7 @@ fn parse_args() -> LiveArgs {
           .next()
           .and_then(|v| v.parse().ok())
           .unwrap_or(concurrency);
+        concurrency_explicit = true;
       }
       "--network" => {
         network_mode = parse_network_mode(&args.next().unwrap_or_default());
@@ -164,6 +167,7 @@ fn parse_args() -> LiveArgs {
           .trim_start_matches("--concurrency=")
           .parse()
           .unwrap_or(concurrency);
+        concurrency_explicit = true;
       }
       other if other.starts_with("--nord-group=") => {
         nord_group = Some(other.trim_start_matches("--nord-group=").to_string());
@@ -195,12 +199,7 @@ fn parse_args() -> LiveArgs {
     std::process::exit(2);
   }
 
-  // Default concurrency to CDK count when user runs multi-CDK without flag
-  // (still clamp 1..=8; engine also clamps).
-  if concurrency <= 1 && cdks.len() > 1 {
-    concurrency = cdks.len().min(8) as u32;
-  }
-  concurrency = concurrency.clamp(1, 8);
+  concurrency = resolve_concurrency(concurrency, concurrency_explicit, cdks.len());
 
   LiveArgs {
     cdks,
@@ -218,12 +217,20 @@ fn parse_args() -> LiveArgs {
   }
 }
 
+fn resolve_concurrency(requested: u32, explicit: bool, cdk_count: usize) -> u32 {
+  if explicit {
+    requested.clamp(1, 8)
+  } else {
+    cdk_count.clamp(1, 8) as u32
+  }
+}
+
 fn main() {
   env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
   let args = parse_args();
   eprintln!("=== LIVE AUTO-REGISTER ===");
-  eprintln!("cdks={:?}", args.cdks);
+  eprintln!("cdk_count={}", args.cdks.len());
   eprintln!("browser={}", args.browser);
   eprintln!("profile_id={:?}", args.profile_id);
   eprintln!("max_retries={}", args.max_retries);
@@ -289,17 +296,15 @@ fn main() {
 
         eprintln!("=== RESULT ===");
         eprintln!("success={}", result.success);
-        eprintln!("email={}", result.email);
-        eprintln!("password={}", result.password);
         eprintln!("account_id={}", result.account_id);
         eprintln!("two_fa_enabled={}", result.two_fa_enabled);
-        eprintln!("totp_secret={}", result.totp_secret);
-        eprintln!("access_token_len={}", result.access_token.len());
-        eprintln!("error={}", result.error_message);
-        eprintln!("--- logs ---");
-        for line in &result.step_logs {
-          eprintln!("{line}");
-        }
+        eprintln!("has_totp_secret={}", !result.totp_secret.trim().is_empty());
+        eprintln!(
+          "has_access_token={}",
+          !result.access_token.trim().is_empty()
+        );
+        eprintln!("has_error={}", !result.error_message.trim().is_empty());
+        eprintln!("step_log_count={}", result.step_logs.len());
 
         // Batch multi-CDK: account_id may be "batch:N" and success means any/all
         // depending on engine aggregation — exit 0 only if success flag true.
@@ -309,4 +314,22 @@ fn main() {
     })
     .run(tauri::generate_context!())
     .expect("error while running auto-reg-live");
+}
+
+#[cfg(test)]
+mod tests {
+  use super::resolve_concurrency;
+
+  #[test]
+  fn explicit_concurrency_is_preserved_and_clamped() {
+    assert_eq!(resolve_concurrency(1, true, 3), 1);
+    assert_eq!(resolve_concurrency(6, true, 3), 6);
+    assert_eq!(resolve_concurrency(12, true, 3), 8);
+  }
+
+  #[test]
+  fn omitted_concurrency_defaults_to_cdk_count() {
+    assert_eq!(resolve_concurrency(1, false, 3), 3);
+    assert_eq!(resolve_concurrency(1, false, 0), 1);
+  }
 }

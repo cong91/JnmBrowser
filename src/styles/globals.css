@@ -178,7 +178,7 @@
 
 /* Prefer a plain utility over long Tailwind arbitrary variants for scrollbar
    hiding — complex [-ms-...] / [&::-webkit-...] classes have corrupted the
-   Turbopack/PostCSS transform when workspace root was mis-detected. */
+   Turbopack/PostCSS transform when workspace root was misdetected. */
 .scrollbar-none {
   scrollbar-width: none;
   -ms-overflow-style: none;

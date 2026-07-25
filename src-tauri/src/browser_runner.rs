@@ -8,9 +8,441 @@ use crate::platform_browser;
 use crate::profile::{BrowserProfile, ProfileManager};
 use crate::proxy_manager::PROXY_MANAGER;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
+
+lazy_static::lazy_static! {
+  static ref PRE_LAUNCH_LOCKS: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>> =
+    Mutex::new(HashMap::new());
+}
+
+async fn acquire_pre_launch_lock(key: String) -> tokio::sync::OwnedMutexGuard<()> {
+  let lock = {
+    let mut locks = PRE_LAUNCH_LOCKS
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+      lock
+    } else {
+      let lock = Arc::new(tokio::sync::Mutex::new(()));
+      locks.insert(key, Arc::downgrade(&lock));
+      lock
+    }
+  };
+
+  lock.lock_owned().await
+}
+
+#[derive(Debug)]
+enum LaunchKernel {
+  Camoufox {
+    instance_id: String,
+    process_id: Option<u32>,
+  },
+  Chromium {
+    instance_id: String,
+    process_id: Option<u32>,
+  },
+}
+
+impl LaunchKernel {
+  fn process_id(&self) -> Option<u32> {
+    match self {
+      Self::Camoufox { process_id, .. } | Self::Chromium { process_id, .. } => *process_id,
+    }
+  }
+}
+
+#[derive(Debug, Default)]
+struct PreLaunchResources {
+  launch_locks: Vec<tokio::sync::OwnedMutexGuard<()>>,
+  vpn_id: Option<String>,
+  vpn_config_existed: bool,
+  vpn_worker_id: Option<String>,
+  preexisting_vpn_worker_ids: HashSet<String>,
+  proxy_pid: Option<u32>,
+  profile_id: Option<String>,
+  preexisting_proxy_ids: HashSet<String>,
+  ephemeral_profile_id: Option<String>,
+  ephemeral_dir: Option<PathBuf>,
+  browser: Option<LaunchKernel>,
+  browser_profile_path: Option<PathBuf>,
+  preexisting_browser_process_ids: HashSet<u32>,
+}
+
+impl PreLaunchResources {
+  fn is_empty(&self) -> bool {
+    self.launch_locks.is_empty()
+      && self.vpn_id.is_none()
+      && self.vpn_worker_id.is_none()
+      && self.preexisting_vpn_worker_ids.is_empty()
+      && self.proxy_pid.is_none()
+      && self.profile_id.is_none()
+      && self.preexisting_proxy_ids.is_empty()
+      && self.ephemeral_profile_id.is_none()
+      && self.ephemeral_dir.is_none()
+      && self.browser.is_none()
+      && self.browser_profile_path.is_none()
+      && self.preexisting_browser_process_ids.is_empty()
+  }
+}
+
+trait LaunchRollbackDispatcher {
+  fn dispatch(&self, resources: PreLaunchResources);
+}
+
+struct PreLaunchTransaction<D: LaunchRollbackDispatcher> {
+  dispatcher: D,
+  resources: PreLaunchResources,
+  committed: bool,
+}
+
+impl<D: LaunchRollbackDispatcher> PreLaunchTransaction<D> {
+  fn new(dispatcher: D) -> Self {
+    Self {
+      dispatcher,
+      resources: PreLaunchResources::default(),
+      committed: false,
+    }
+  }
+
+  fn own_launch_lock(&mut self, launch_lock: tokio::sync::OwnedMutexGuard<()>) {
+    self.resources.launch_locks.push(launch_lock);
+  }
+
+  fn begin_vpn_worker_start(&mut self, vpn_id: String) {
+    let vpn_config_existed = std::env::temp_dir()
+      .join(format!("donut_vpn_{vpn_id}.conf"))
+      .exists();
+    let preexisting_vpn_worker_ids = crate::vpn_worker_storage::list_vpn_worker_configs()
+      .into_iter()
+      .map(|worker| worker.id)
+      .collect();
+    self.resources.vpn_config_existed = vpn_config_existed;
+    self.resources.preexisting_vpn_worker_ids = preexisting_vpn_worker_ids;
+    self.resources.vpn_id = Some(vpn_id);
+  }
+
+  fn own_vpn_worker(&mut self, worker_id: String) {
+    if !self
+      .resources
+      .preexisting_vpn_worker_ids
+      .contains(&worker_id)
+    {
+      self.resources.vpn_worker_id = Some(worker_id);
+    }
+  }
+
+  fn begin_proxy_start(&mut self, temp_pid: u32, profile_id: String) {
+    let preexisting_proxy_ids = crate::proxy_storage::list_proxy_configs()
+      .into_iter()
+      .map(|proxy| proxy.id)
+      .collect();
+    self.resources.preexisting_proxy_ids = preexisting_proxy_ids;
+    self.resources.proxy_pid = Some(temp_pid);
+    self.resources.profile_id = Some(profile_id);
+  }
+
+  fn own_proxy_mapping(&mut self, temp_pid: u32) {
+    self.resources.proxy_pid = Some(temp_pid);
+  }
+
+  fn begin_ephemeral_profile(&mut self, profile_id: String) {
+    self.resources.ephemeral_profile_id = Some(profile_id);
+  }
+
+  fn own_ephemeral_profile(&mut self, profile_id: String, dir: PathBuf) {
+    self.resources.ephemeral_profile_id = Some(profile_id);
+    self.resources.ephemeral_dir = Some(dir);
+  }
+
+  fn begin_browser_launch(&mut self, profile_path: PathBuf) {
+    let preexisting_browser_process_ids = browser_process_ids_for_profile(&profile_path);
+    self.resources.preexisting_browser_process_ids = preexisting_browser_process_ids;
+    self.resources.browser_profile_path = Some(profile_path);
+  }
+
+  fn own_browser(&mut self, browser: LaunchKernel) {
+    self.resources.browser = Some(browser);
+  }
+
+  fn transfer_proxy_mapping<F>(&mut self, process_id: u32, transfer: F) -> Result<(), String>
+  where
+    F: FnOnce(u32, u32) -> Result<(), String>,
+  {
+    let temp_pid = self
+      .resources
+      .proxy_pid
+      .ok_or_else(|| "No pre-launch proxy mapping to transfer".to_string())?;
+    transfer(temp_pid, process_id)?;
+    self.resources.proxy_pid = Some(process_id);
+    Ok(())
+  }
+
+  fn commit(mut self) {
+    self.resources.launch_locks.clear();
+    self.committed = true;
+  }
+}
+
+impl<D: LaunchRollbackDispatcher> Drop for PreLaunchTransaction<D> {
+  fn drop(&mut self) {
+    if self.committed || self.resources.is_empty() {
+      return;
+    }
+
+    self
+      .dispatcher
+      .dispatch(std::mem::take(&mut self.resources));
+  }
+}
+
+#[derive(Clone)]
+struct BrowserLaunchRollbackDispatcher {
+  app_handle: tauri::AppHandle,
+}
+
+impl LaunchRollbackDispatcher for BrowserLaunchRollbackDispatcher {
+  fn dispatch(&self, resources: PreLaunchResources) {
+    let app_handle = self.app_handle.clone();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+      handle.spawn(rollback_pre_launch_resources(app_handle, resources));
+      return;
+    }
+
+    if let Err(error) = std::thread::Builder::new()
+      .name("browser-launch-rollback".to_string())
+      .spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+          .enable_all()
+          .build()
+        {
+          Ok(runtime) => runtime,
+          Err(error) => {
+            log::error!("Failed to create browser launch rollback runtime: {error}");
+            return;
+          }
+        };
+        runtime.block_on(rollback_pre_launch_resources(app_handle, resources));
+      })
+    {
+      log::error!("Failed to spawn browser launch rollback thread: {error}");
+    }
+  }
+}
+
+async fn force_stop_uncommitted_process(process_id: u32) {
+  if process_id == 0 || !crate::proxy_storage::is_process_running(process_id) {
+    return;
+  }
+
+  #[cfg(target_os = "macos")]
+  let force_kill_result =
+    platform_browser::macos::kill_browser_process_impl(process_id, None).await;
+  #[cfg(target_os = "windows")]
+  let force_kill_result = platform_browser::windows::kill_browser_process_impl(process_id).await;
+  #[cfg(target_os = "linux")]
+  let force_kill_result =
+    platform_browser::linux::kill_browser_process_impl(process_id, None).await;
+
+  if let Err(error) = force_kill_result {
+    log::error!("Failed to force-stop uncommitted browser PID {process_id}: {error}");
+  }
+}
+
+async fn rollback_pre_launch_resources(
+  app_handle: tauri::AppHandle,
+  resources: PreLaunchResources,
+) {
+  if let Some(browser) = resources.browser {
+    let process_id = browser.process_id();
+    match browser {
+      LaunchKernel::Camoufox { instance_id, .. } => {
+        if let Err(error) = CamoufoxManager::instance()
+          .stop_camoufox(&app_handle, &instance_id)
+          .await
+        {
+          log::warn!("Failed to stop uncommitted Camoufox launch {instance_id}: {error}");
+        }
+      }
+      LaunchKernel::Chromium { instance_id, .. } => {
+        if let Err(error) = ChromiumManager::instance()
+          .stop_chromium(&instance_id)
+          .await
+        {
+          log::warn!("Failed to stop uncommitted Chromium launch {instance_id}: {error}");
+        }
+      }
+    }
+
+    if let Some(process_id) = process_id {
+      force_stop_uncommitted_process(process_id).await;
+    }
+  }
+
+  if let Some(profile_path) = resources.browser_profile_path {
+    let new_process_ids = browser_process_ids_for_profile(&profile_path)
+      .difference(&resources.preexisting_browser_process_ids)
+      .copied()
+      .collect::<Vec<_>>();
+    for process_id in new_process_ids {
+      force_stop_uncommitted_process(process_id).await;
+    }
+  }
+
+  if let Some(proxy_pid) = resources.proxy_pid {
+    if let Err(error) = PROXY_MANAGER
+      .stop_proxy(app_handle.clone(), proxy_pid)
+      .await
+    {
+      log::warn!("Failed to stop uncommitted local proxy for PID {proxy_pid}: {error}");
+    }
+  }
+
+  if let Some(profile_id) = resources.profile_id {
+    let new_proxy_ids = crate::proxy_storage::list_proxy_configs()
+      .into_iter()
+      .filter(|proxy| {
+        proxy.profile_id.as_deref() == Some(profile_id.as_str())
+          && !resources.preexisting_proxy_ids.contains(&proxy.id)
+      })
+      .map(|proxy| proxy.id)
+      .collect::<Vec<_>>();
+    for proxy_id in new_proxy_ids {
+      if let Err(error) = crate::proxy_runner::stop_proxy_process(&proxy_id).await {
+        log::warn!("Failed to stop untracked local proxy {proxy_id}: {error}");
+      }
+      for process_id in process_ids_with_command_arg(&proxy_id) {
+        force_stop_uncommitted_process(process_id).await;
+      }
+      crate::proxy_storage::delete_proxy_config(&proxy_id);
+    }
+
+    let remaining_proxy_configs = crate::proxy_storage::list_proxy_configs();
+    for proxy in remaining_proxy_configs.into_iter().filter(|proxy| {
+      proxy.profile_id.as_deref() == Some(profile_id.as_str())
+        && !resources.preexisting_proxy_ids.contains(&proxy.id)
+    }) {
+      if let Some(process_id) = proxy.pid {
+        force_stop_uncommitted_process(process_id).await;
+      }
+      crate::proxy_storage::delete_proxy_config(&proxy.id);
+    }
+  }
+
+  if let Some(worker_id) = resources.vpn_worker_id.as_deref() {
+    if let Err(error) = crate::vpn_worker_runner::stop_vpn_worker(worker_id).await {
+      log::warn!("Failed to stop uncommitted VPN worker {worker_id}: {error}");
+    }
+    for process_id in process_ids_with_command_arg(worker_id) {
+      force_stop_uncommitted_process(process_id).await;
+    }
+    crate::vpn_worker_storage::delete_vpn_worker_config(worker_id);
+  }
+
+  let new_vpn_worker_ids = crate::vpn_worker_storage::list_vpn_worker_configs()
+    .into_iter()
+    .filter(|worker| {
+      resources.vpn_id.as_deref() == Some(worker.vpn_id.as_str())
+        && !resources.preexisting_vpn_worker_ids.contains(&worker.id)
+        && resources.vpn_worker_id.as_deref() != Some(worker.id.as_str())
+    })
+    .map(|worker| worker.id)
+    .collect::<Vec<_>>();
+  for worker_id in new_vpn_worker_ids {
+    if let Err(error) = crate::vpn_worker_runner::stop_vpn_worker(&worker_id).await {
+      log::warn!("Failed to stop untracked VPN worker {worker_id}: {error}");
+    }
+    for process_id in process_ids_with_command_arg(&worker_id) {
+      force_stop_uncommitted_process(process_id).await;
+    }
+    crate::vpn_worker_storage::delete_vpn_worker_config(&worker_id);
+  }
+
+  if let (Some(profile_id), Some(ephemeral_dir)) = (
+    resources.ephemeral_profile_id.as_deref(),
+    resources.ephemeral_dir,
+  ) {
+    match crate::ephemeral_dirs::remove_ephemeral_dir(profile_id) {
+      Ok(true) => {}
+      Ok(false) if ephemeral_dir.exists() => {
+        if let Err(error) = std::fs::remove_dir_all(&ephemeral_dir) {
+          log::warn!(
+            "Failed to remove uncommitted ephemeral dir {}: {error}",
+            ephemeral_dir.display()
+          );
+        }
+      }
+      Ok(false) => {}
+      Err(error) => {
+        log::warn!("Failed to remove uncommitted ephemeral dir for profile {profile_id}: {error}");
+      }
+    }
+  }
+
+  if !resources.vpn_config_existed {
+    if let Some(vpn_id) = resources.vpn_id {
+      let config_file_path = std::env::temp_dir().join(format!("donut_vpn_{vpn_id}.conf"));
+      if let Err(error) = std::fs::remove_file(&config_file_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+          log::warn!(
+            "Failed to remove uncommitted VPN config {}: {error}",
+            config_file_path.display()
+          );
+        }
+      }
+    }
+  }
+}
+
+fn process_ids_with_command_arg(argument: &str) -> Vec<u32> {
+  let system = System::new_all();
+  system
+    .processes()
+    .iter()
+    .filter(|(_, process)| {
+      process
+        .cmd()
+        .iter()
+        .any(|value| value.to_string_lossy() == argument)
+    })
+    .map(|(pid, _)| pid.as_u32())
+    .collect()
+}
+
+fn remove_ephemeral_profile_dir(
+  profile_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  crate::ephemeral_dirs::remove_ephemeral_dir(profile_id)
+    .map(|_| ())
+    .map_err(|error| format!("Failed to clean up ephemeral profile directory: {error}").into())
+}
+
+fn browser_process_ids_for_profile(profile_path: &Path) -> HashSet<u32> {
+  let profile_path = profile_path
+    .canonicalize()
+    .unwrap_or_else(|_| profile_path.to_path_buf());
+  let profile_path = profile_path.to_string_lossy();
+  let system = System::new_all();
+
+  system
+    .processes()
+    .iter()
+    .filter_map(|(pid, process)| {
+      let matches_profile = process.cmd().iter().any(|argument| {
+        let argument = argument.to_string_lossy();
+        argument == profile_path
+          || argument.strip_prefix("--user-data-dir=") == Some(profile_path.as_ref())
+      });
+      matches_profile.then(|| pid.as_u32())
+    })
+    .collect()
+}
+
 pub struct BrowserRunner {
   pub profile_manager: &'static ProfileManager,
   pub downloaded_browsers_registry: &'static DownloadedBrowsersRegistry,
@@ -200,6 +632,12 @@ impl BrowserRunner {
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
     // Handle Camoufox profiles using CamoufoxManager
     if profile.browser == "camoufox" {
+      let profile_launch_lock = acquire_pre_launch_lock(format!("profile:{}", profile.id)).await;
+      let mut launch_transaction = PreLaunchTransaction::new(BrowserLaunchRollbackDispatcher {
+        app_handle: app_handle.clone(),
+      });
+      launch_transaction.own_launch_lock(profile_launch_lock);
+
       // Get or create camoufox config
       let mut camoufox_config = profile.camoufox_config.clone().unwrap_or_else(|| {
         log::info!(
@@ -218,8 +656,12 @@ impl BrowserRunner {
       // If profile has a VPN instead of proxy, start VPN worker and use it as upstream
       if upstream_proxy.is_none() {
         if let Some(ref vpn_id) = profile.vpn_id {
+          let vpn_launch_lock = acquire_pre_launch_lock(format!("vpn:{vpn_id}")).await;
+          launch_transaction.own_launch_lock(vpn_launch_lock);
+          launch_transaction.begin_vpn_worker_start(vpn_id.clone());
           match crate::vpn_worker_runner::start_vpn_worker(vpn_id).await {
             Ok(vpn_worker) => {
+              launch_transaction.own_vpn_worker(vpn_worker.id.clone());
               if let Some(port) = vpn_worker.local_port {
                 upstream_proxy = Some(ProxySettings {
                   proxy_type: "socks5".to_string(),
@@ -253,6 +695,7 @@ impl BrowserRunner {
       let blocklist_file = Self::resolve_blocklist_file(profile).await?;
       // Unique temp PID per concurrent launch — shared 0 races under multi-CDK.
       let temp_pid = PROXY_MANAGER.allocate_temp_browser_pid();
+      launch_transaction.begin_proxy_start(temp_pid, profile_id_str.clone());
       let local_proxy = PROXY_MANAGER
         .start_proxy(
           app_handle.clone(),
@@ -268,6 +711,7 @@ impl BrowserRunner {
           log::error!("{}", error_msg);
           error_msg
         })?;
+      launch_transaction.own_proxy_mapping(temp_pid);
 
       // Format proxy URL for camoufox - always use HTTP for the local proxy
       let proxy_url = format!("http://{}:{}", local_proxy.host, local_proxy.port);
@@ -335,8 +779,10 @@ impl BrowserRunner {
 
       // Create ephemeral dir for ephemeral profiles
       let override_profile_path = if profile.ephemeral {
+        launch_transaction.begin_ephemeral_profile(profile.id.to_string());
         let dir = crate::ephemeral_dirs::create_ephemeral_dir(&profile.id.to_string())
           .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        launch_transaction.own_ephemeral_profile(profile.id.to_string(), dir.clone());
         Some(dir)
       } else {
         None
@@ -369,6 +815,10 @@ impl BrowserRunner {
 
       // Launch Camoufox browser
       log::info!("Launching Camoufox for profile: {}", profile.name);
+      let launch_profile_path = override_profile_path.clone().unwrap_or_else(|| {
+        updated_profile.get_profile_data_path(&self.profile_manager.get_profiles_dir())
+      });
+      launch_transaction.begin_browser_launch(launch_profile_path.clone());
       let camoufox_result = self
         .camoufox_manager
         .launch_camoufox_profile(
@@ -380,27 +830,38 @@ impl BrowserRunner {
           headless,
         )
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-          format!("Failed to launch Camoufox: {e}").into()
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+          format!("Failed to launch Camoufox: {error}").into()
         })?;
 
-      let process_id = camoufox_result.processId;
-      log::info!("Camoufox launched successfully with PID: {:?}", process_id);
+      launch_transaction.own_browser(LaunchKernel::Camoufox {
+        instance_id: camoufox_result.id.clone(),
+        process_id: camoufox_result.processId,
+      });
+      let process_id =
+        camoufox_result
+          .processId
+          .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+            "Camoufox launch completed without a process ID".into()
+          })?;
+      if process_id == 0 {
+        return Err("Camoufox launch completed with invalid process ID 0".into());
+      }
+      log::info!("Camoufox launched successfully with PID: {process_id}");
 
       // Update profile with the process info from camoufox result
-      updated_profile.process_id = process_id;
+      updated_profile.process_id = Some(process_id);
       updated_profile.last_launch = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
 
-      // Update the proxy manager with the correct PID
-      if let Some(process_id) = process_id {
-        if let Err(e) = PROXY_MANAGER.update_proxy_pid(temp_pid, process_id) {
-          log::warn!("Warning: Failed to update proxy PID mapping: {e}");
-        } else {
-          log::info!(
-            "Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}"
-          );
-        }
-      }
+      // Transfer the proxy mapping before normal cleanup takes ownership.
+      launch_transaction
+        .transfer_proxy_mapping(process_id, |temp_pid, actual_pid| {
+          PROXY_MANAGER.update_proxy_pid(temp_pid, actual_pid)
+        })
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+          format!("Failed to transfer Camoufox proxy PID mapping: {error}").into()
+        })?;
+      log::info!("Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}");
 
       // Save the updated profile (includes new fingerprint if randomize is enabled)
       log::info!(
@@ -414,6 +875,7 @@ impl BrowserRunner {
           .unwrap_or(0)
       );
       self.save_process_info(&updated_profile)?;
+      launch_transaction.commit();
       // Ensure tag suggestions include any tags from this profile
       let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
         let _ = tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
@@ -466,6 +928,12 @@ impl BrowserRunner {
 
     // Handle Chromium profiles using ChromiumManager
     if crate::browser::is_chromium_browser_name(&profile.browser) {
+      let profile_launch_lock = acquire_pre_launch_lock(format!("profile:{}", profile.id)).await;
+      let mut launch_transaction = PreLaunchTransaction::new(BrowserLaunchRollbackDispatcher {
+        app_handle: app_handle.clone(),
+      });
+      launch_transaction.own_launch_lock(profile_launch_lock);
+
       // Get or create Chromium config
       let mut chromium_config = profile.chromium_config.clone().unwrap_or_else(|| {
         log::info!(
@@ -484,8 +952,12 @@ impl BrowserRunner {
       // If profile has a VPN instead of proxy, start VPN worker and use it as upstream
       if upstream_proxy.is_none() {
         if let Some(ref vpn_id) = profile.vpn_id {
+          let vpn_launch_lock = acquire_pre_launch_lock(format!("vpn:{vpn_id}")).await;
+          launch_transaction.own_launch_lock(vpn_launch_lock);
+          launch_transaction.begin_vpn_worker_start(vpn_id.clone());
           match crate::vpn_worker_runner::start_vpn_worker(vpn_id).await {
             Ok(vpn_worker) => {
+              launch_transaction.own_vpn_worker(vpn_worker.id.clone());
               if let Some(port) = vpn_worker.local_port {
                 upstream_proxy = Some(ProxySettings {
                   proxy_type: "socks5".to_string(),
@@ -519,6 +991,7 @@ impl BrowserRunner {
       let blocklist_file = Self::resolve_blocklist_file(profile).await?;
       // Unique temp PID per concurrent launch — shared 0 races under multi-CDK.
       let temp_pid = PROXY_MANAGER.allocate_temp_browser_pid();
+      launch_transaction.begin_proxy_start(temp_pid, profile_id_str.clone());
       let local_proxy = PROXY_MANAGER
         .start_proxy(
           app_handle.clone(),
@@ -534,6 +1007,7 @@ impl BrowserRunner {
           log::error!("{}", error_msg);
           error_msg
         })?;
+      launch_transaction.own_proxy_mapping(temp_pid);
 
       // Format proxy URL for Chromium - always use HTTP for the local proxy
       let proxy_url = format!("http://{}:{}", local_proxy.host, local_proxy.port);
@@ -603,8 +1077,10 @@ impl BrowserRunner {
 
       // Create ephemeral dir for ephemeral profiles
       if profile.ephemeral {
-        crate::ephemeral_dirs::create_ephemeral_dir(&profile.id.to_string())
+        launch_transaction.begin_ephemeral_profile(profile.id.to_string());
+        let dir = crate::ephemeral_dirs::create_ephemeral_dir(&profile.id.to_string())
           .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        launch_transaction.own_ephemeral_profile(profile.id.to_string(), dir);
       }
 
       // Launch Chromium browser
@@ -640,6 +1116,7 @@ impl BrowserRunner {
       // Get proxy URL from config
       let proxy_url = chromium_config.proxy.as_deref();
 
+      launch_transaction.begin_browser_launch(profile_data_path.clone());
       let chromium_result = self
         .chromium_manager
         .launch_chromium(
@@ -655,24 +1132,39 @@ impl BrowserRunner {
           headless,
         )
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-          format!("Failed to launch Chromium: {e}").into()
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+          format!("Failed to launch Chromium: {error}").into()
         })?;
 
       // Get the process ID from launch result
-      let process_id = chromium_result.processId.unwrap_or(0);
+      launch_transaction.own_browser(LaunchKernel::Chromium {
+        instance_id: chromium_result.id.clone(),
+        process_id: chromium_result.processId,
+      });
+      let process_id =
+        chromium_result
+          .processId
+          .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+            "Chromium launch completed without a process ID".into()
+          })?;
+      if process_id == 0 {
+        return Err("Chromium launch completed with invalid process ID 0".into());
+      }
       log::info!("Chromium launched successfully with PID: {process_id}");
 
       // Update profile with the process info
       updated_profile.process_id = Some(process_id);
       updated_profile.last_launch = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
 
-      // Update the proxy manager with the correct PID
-      if let Err(e) = PROXY_MANAGER.update_proxy_pid(temp_pid, process_id) {
-        log::warn!("Warning: Failed to update proxy PID mapping: {e}");
-      } else {
-        log::info!("Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}");
-      }
+      // Transfer the proxy mapping before normal cleanup takes ownership.
+      launch_transaction
+        .transfer_proxy_mapping(process_id, |temp_pid, actual_pid| {
+          PROXY_MANAGER.update_proxy_pid(temp_pid, actual_pid)
+        })
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+          format!("Failed to transfer Chromium proxy PID mapping: {error}").into()
+        })?;
+      log::info!("Updated proxy PID mapping from temp ({temp_pid}) to actual PID: {process_id}");
 
       // Save the updated profile
       log::info!(
@@ -686,6 +1178,7 @@ impl BrowserRunner {
           .unwrap_or(0)
       );
       self.save_process_info(&updated_profile)?;
+      launch_transaction.commit();
       let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
         let _ = tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
       });
@@ -844,57 +1337,16 @@ impl BrowserRunner {
     remote_debugging_port: Option<u16>,
     headless: bool,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
-    // Always start a local proxy for API launches
-    let upstream_proxy = self
-      .resolve_launch_proxy(profile)
-      .await
-      .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-
-    // Unique temp PID so concurrent debugging launches do not share map key 1.
-    let temp_pid = PROXY_MANAGER.allocate_temp_browser_pid();
-    let profile_id_str = profile.id.to_string();
-
-    // Start local proxy - if this fails, DO NOT launch browser
-    let blocklist_file = Self::resolve_blocklist_file(profile)
-      .await
-      .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-    let internal_proxy = PROXY_MANAGER
-      .start_proxy(
-        app_handle.clone(),
-        upstream_proxy.as_ref(),
-        temp_pid,
-        Some(&profile_id_str),
-        profile.proxy_bypass_rules.clone(),
-        blocklist_file,
-      )
-      .await
-      .map_err(|e| {
-        let error_msg = format!("Failed to start local proxy: {e}");
-        log::error!("{}", error_msg);
-        error_msg
-      })?;
-
-    let internal_proxy_settings = Some(internal_proxy.clone());
-
-    let result = self
+    self
       .launch_browser_internal(
-        app_handle.clone(),
+        app_handle,
         profile,
         url,
-        internal_proxy_settings.as_ref(),
+        None,
         remote_debugging_port,
         headless,
       )
-      .await;
-
-    // Update proxy with correct PID if launch succeeded
-    if let Ok(ref updated_profile) = result {
-      if let Some(actual_pid) = updated_profile.process_id {
-        let _ = PROXY_MANAGER.update_proxy_pid(temp_pid, actual_pid);
-      }
-    }
-
-    result
+      .await
   }
 
   pub async fn launch_or_open_url(
@@ -1491,7 +1943,7 @@ impl BrowserRunner {
       }
 
       if profile.ephemeral {
-        crate::ephemeral_dirs::remove_ephemeral_dir(&profile.id.to_string());
+        remove_ephemeral_profile_dir(&profile.id.to_string())?;
       }
 
       log::info!(
@@ -1847,7 +2299,7 @@ impl BrowserRunner {
       }
 
       if profile.ephemeral {
-        crate::ephemeral_dirs::remove_ephemeral_dir(&profile.id.to_string());
+        remove_ephemeral_profile_dir(&profile.id.to_string())?;
       }
 
       log::info!(
@@ -2367,7 +2819,9 @@ pub async fn launch_browser_profile(
 
   // Always start a local proxy before launching (non-Camoufox/Chromium handled here; they have their own flow)
   // This ensures all traffic goes through the local proxy for monitoring and future features
-  if profile.browser != "camoufox" && !crate::browser::is_chromium_browser_name(&profile.browser) {
+  if profile_for_launch.browser != "camoufox"
+    && !crate::browser::is_chromium_browser_name(&profile_for_launch.browser)
+  {
     // Determine upstream proxy if configured; otherwise use DIRECT (no upstream)
     // Refresh cloud proxy credentials and inject profile-specific sid
     let mut upstream_proxy = BrowserRunner::instance()
@@ -2676,8 +3130,268 @@ pub async fn open_url_with_profile(
 
 #[cfg(test)]
 mod tests {
-  use super::BrowserRunner;
+  use super::{
+    acquire_pre_launch_lock, remove_ephemeral_profile_dir, BrowserRunner, LaunchKernel,
+    LaunchRollbackDispatcher, PreLaunchResources, PreLaunchTransaction,
+  };
+  use crate::ephemeral_dirs::{
+    create_ephemeral_dir, get_ephemeral_dir, inject_ephemeral_delete_failure,
+  };
+  use std::collections::HashSet;
+  use std::path::PathBuf;
+  use std::sync::{Arc, Mutex};
+  use std::time::Duration;
   use tempfile::tempdir;
+
+  #[derive(Default)]
+  struct FakeLaunchState {
+    vpn_workers: HashSet<String>,
+    proxy_mappings: HashSet<u32>,
+    ephemeral_profiles: HashSet<String>,
+    browser_processes: HashSet<u32>,
+    rollback_count: usize,
+  }
+
+  #[derive(Clone)]
+  struct FakeRollbackDispatcher {
+    state: Arc<Mutex<FakeLaunchState>>,
+  }
+
+  impl LaunchRollbackDispatcher for FakeRollbackDispatcher {
+    fn dispatch(&self, resources: PreLaunchResources) {
+      let mut state = self.state.lock().unwrap();
+      state.rollback_count += 1;
+      if let Some(worker_id) = resources.vpn_worker_id.as_deref() {
+        state.vpn_workers.remove(worker_id);
+      }
+      if let Some(proxy_pid) = resources.proxy_pid {
+        state.proxy_mappings.remove(&proxy_pid);
+      }
+      if let Some(profile_id) = resources.ephemeral_profile_id.as_deref() {
+        state.ephemeral_profiles.remove(profile_id);
+      }
+      if let Some(browser) = resources.browser {
+        if let Some(process_id) = browser.process_id() {
+          state.browser_processes.remove(&process_id);
+        }
+      }
+    }
+  }
+
+  struct LaunchGuardHarness {
+    state: Arc<Mutex<FakeLaunchState>>,
+    guard: PreLaunchTransaction<FakeRollbackDispatcher>,
+  }
+
+  impl LaunchGuardHarness {
+    fn new() -> Self {
+      let state = Arc::new(Mutex::new(FakeLaunchState::default()));
+      let guard = PreLaunchTransaction::new(FakeRollbackDispatcher {
+        state: state.clone(),
+      });
+      Self { state, guard }
+    }
+
+    fn acquire_vpn_worker(&mut self) {
+      let worker_id = "vpn-worker".to_string();
+      self
+        .state
+        .lock()
+        .unwrap()
+        .vpn_workers
+        .insert(worker_id.clone());
+      self.guard.own_vpn_worker(worker_id);
+    }
+
+    fn acquire_local_proxy(&mut self, temp_pid: u32) {
+      self.state.lock().unwrap().proxy_mappings.insert(temp_pid);
+      self.guard.own_proxy_mapping(temp_pid);
+    }
+
+    fn acquire_ephemeral_dir(&mut self) {
+      let profile_id = "ephemeral-profile".to_string();
+      let ephemeral_dir = PathBuf::from(&profile_id);
+      self
+        .state
+        .lock()
+        .unwrap()
+        .ephemeral_profiles
+        .insert(profile_id.clone());
+      self.guard.own_ephemeral_profile(profile_id, ephemeral_dir);
+    }
+
+    fn acquire_browser(&mut self, kernel: LaunchKernel, process_id: u32) {
+      self
+        .state
+        .lock()
+        .unwrap()
+        .browser_processes
+        .insert(process_id);
+      self.guard.own_browser(kernel);
+    }
+
+    fn assert_rolled_back(self) {
+      let state = self.state.clone();
+      drop(self.guard);
+      let state = state.lock().unwrap();
+      assert!(state.vpn_workers.is_empty());
+      assert!(state.proxy_mappings.is_empty());
+      assert!(state.ephemeral_profiles.is_empty());
+      assert!(state.browser_processes.is_empty());
+      assert_eq!(state.rollback_count, 1);
+    }
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn kill_cleanup_propagates_ephemeral_delete_failure() {
+    let profile_id = uuid::Uuid::new_v4().to_string();
+    let dir = create_ephemeral_dir(&profile_id).unwrap();
+
+    inject_ephemeral_delete_failure();
+    let error = remove_ephemeral_profile_dir(&profile_id)
+      .unwrap_err()
+      .to_string();
+
+    assert!(error.contains("Injected failure at EphemeralDelete"));
+    assert!(error.contains(&dir.display().to_string()));
+    assert_eq!(get_ephemeral_dir(&profile_id), Some(dir.clone()));
+    assert!(dir.is_dir());
+
+    remove_ephemeral_profile_dir(&profile_id).unwrap();
+    assert!(get_ephemeral_dir(&profile_id).is_none());
+    assert!(!dir.exists());
+  }
+
+  #[test]
+  fn pre_launch_failure_after_vpn_worker_rolls_back_everything_owned() {
+    let mut harness = LaunchGuardHarness::new();
+    harness.acquire_vpn_worker();
+    harness.assert_rolled_back();
+  }
+
+  #[test]
+  fn reused_vpn_worker_is_not_owned_or_stopped_on_rollback() {
+    let harness = LaunchGuardHarness::new();
+    let state = harness.state.clone();
+    let mut guard = harness.guard;
+    let worker_id = "reused-vpn-worker".to_string();
+
+    state.lock().unwrap().vpn_workers.insert(worker_id.clone());
+    guard
+      .resources
+      .preexisting_vpn_worker_ids
+      .insert(worker_id.clone());
+    guard.own_vpn_worker(worker_id.clone());
+    drop(guard);
+
+    let state = state.lock().unwrap();
+    assert_eq!(state.rollback_count, 1);
+    assert_eq!(state.vpn_workers, HashSet::from([worker_id]));
+  }
+
+  #[test]
+  fn pre_launch_failure_after_local_proxy_rolls_back_worker_and_mapping() {
+    let mut harness = LaunchGuardHarness::new();
+    harness.acquire_vpn_worker();
+    harness.acquire_local_proxy(2_000_000_001);
+    harness.assert_rolled_back();
+  }
+
+  #[test]
+  fn pre_launch_failure_after_ephemeral_dir_rolls_back_all_resources() {
+    let mut harness = LaunchGuardHarness::new();
+    harness.acquire_vpn_worker();
+    harness.acquire_local_proxy(2_000_000_002);
+    harness.acquire_ephemeral_dir();
+    harness.assert_rolled_back();
+  }
+
+  #[test]
+  fn pre_launch_failure_after_fingerprint_generation_rolls_back_acquired_resources() {
+    let mut harness = LaunchGuardHarness::new();
+    harness.acquire_vpn_worker();
+    harness.acquire_local_proxy(2_000_000_003);
+    harness.assert_rolled_back();
+  }
+
+  #[test]
+  fn pre_launch_failure_after_browser_launch_rolls_back_both_kernels() {
+    for kernel in [
+      LaunchKernel::Camoufox {
+        instance_id: "camoufox-test".to_string(),
+        process_id: Some(41001),
+      },
+      LaunchKernel::Chromium {
+        instance_id: "chromium-test".to_string(),
+        process_id: Some(41002),
+      },
+    ] {
+      let process_id = kernel.process_id().unwrap();
+      let mut harness = LaunchGuardHarness::new();
+      harness.acquire_vpn_worker();
+      harness.acquire_local_proxy(2_000_000_003 + process_id);
+      harness.acquire_ephemeral_dir();
+      harness.acquire_browser(kernel, process_id);
+      harness.assert_rolled_back();
+    }
+  }
+
+  #[tokio::test]
+  async fn pre_launch_lock_serializes_matching_keys() {
+    let key = format!("test:{}", uuid::Uuid::new_v4());
+    let first = acquire_pre_launch_lock(key.clone()).await;
+    let blocked = tokio::time::timeout(
+      Duration::from_millis(25),
+      acquire_pre_launch_lock(key.clone()),
+    )
+    .await;
+    assert!(blocked.is_err());
+
+    drop(first);
+    let second = tokio::time::timeout(Duration::from_secs(1), acquire_pre_launch_lock(key)).await;
+    assert!(second.is_ok());
+  }
+
+  #[test]
+  fn successful_launch_disarms_guard_and_leaves_normal_cleanup_ownership() {
+    let harness = LaunchGuardHarness::new();
+    let state = harness.state.clone();
+    let mut guard = harness.guard;
+    let temp_pid = 2_000_000_010;
+    let actual_pid = 42001;
+
+    {
+      let mut state = state.lock().unwrap();
+      state.proxy_mappings.insert(temp_pid);
+      state.browser_processes.insert(actual_pid);
+    }
+    guard.own_proxy_mapping(temp_pid);
+    guard.own_browser(LaunchKernel::Chromium {
+      instance_id: "chromium-success".to_string(),
+      process_id: Some(actual_pid),
+    });
+    guard
+      .transfer_proxy_mapping(actual_pid, |old_pid, new_pid| {
+        let mut state = state.lock().unwrap();
+        assert!(state.proxy_mappings.remove(&old_pid));
+        state.proxy_mappings.insert(new_pid);
+        Ok(())
+      })
+      .unwrap();
+    guard.commit();
+
+    let mut state = state.lock().unwrap();
+    assert_eq!(state.rollback_count, 0);
+    assert_eq!(state.proxy_mappings, HashSet::from([actual_pid]));
+    assert_eq!(state.browser_processes, HashSet::from([actual_pid]));
+
+    // Existing normal cleanup owns these resources after commit.
+    state.proxy_mappings.remove(&actual_pid);
+    state.browser_processes.remove(&actual_pid);
+    assert!(state.proxy_mappings.is_empty());
+    assert!(state.browser_processes.is_empty());
+  }
 
   #[test]
   fn test_resolve_chromium_runtime_version_prefers_exact_fingerprint_version() {

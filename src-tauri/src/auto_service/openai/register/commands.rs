@@ -1,3 +1,5 @@
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -10,18 +12,67 @@ use super::task;
 use super::types::{
   AccountInventoryStatus, CdkInventoryRecord, RegistrationConfig, RegistrationResult,
 };
+use crate::auto_service::openai::two_factor_backfill::commands::{
+  start_two_factor_backfill_task, TwoFactorBackfillStartRequest,
+};
 use crate::email::build_email_service;
 use crate::settings_manager::SettingsManager;
 use crate::sms::viotp::ViotpService;
 use crate::sms::SmsService;
 
-/// Start a new auto-registration task. Returns the task_id.
+/// The existing-account repair operation shares the Auto Registration command
+/// boundary but keeps its own backfill engine, journal and redacted events.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingAccountAutoRegistrationRequest {
+  pub operation: ExistingAccountAutoRegistrationOperation,
+  #[serde(flatten)]
+  pub request: TwoFactorBackfillStartRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExistingAccountAutoRegistrationOperation {
+  ExistingAccount,
+}
+
+#[derive(Debug)]
+pub enum AutoRegistrationRequest {
+  ExistingAccount(ExistingAccountAutoRegistrationRequest),
+  NewAccount(Box<RegistrationConfig>),
+}
+
+impl<'de> Deserialize<'de> for AutoRegistrationRequest {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.get("operation").is_some() {
+      serde_json::from_value::<ExistingAccountAutoRegistrationRequest>(value)
+        .map(Self::ExistingAccount)
+        .map_err(D::Error::custom)
+    } else {
+      serde_json::from_value::<RegistrationConfig>(value)
+        .map(|config| Self::NewAccount(Box::new(config)))
+        .map_err(D::Error::custom)
+    }
+  }
+}
+
+/// Start a new auto-registration task or an existing-account 2FA repair task.
 #[tauri::command]
 pub async fn start_auto_registration(
   app_handle: tauri::AppHandle,
-  config: RegistrationConfig,
+  config: AutoRegistrationRequest,
 ) -> Result<String, String> {
-  let mut config = config;
+  let mut config = match config {
+    AutoRegistrationRequest::ExistingAccount(existing) => {
+      return start_two_factor_backfill_task(app_handle, existing.request);
+    }
+    AutoRegistrationRequest::NewAccount(config) => *config,
+  };
+
   config.validate_cdks()?;
   config.normalize_network();
   config.validate_network()?;
@@ -87,13 +138,13 @@ pub fn cancel_registration(task_id: String) -> Result<(), String> {
 /// List all stored registered accounts.
 #[tauri::command]
 pub fn list_registered_accounts_cmd() -> Result<Vec<RegistrationResult>, String> {
-  Ok(list_registered_accounts())
+  list_registered_accounts()
 }
 
 /// Delete a stored registered account.
 #[tauri::command]
 pub fn delete_registered_account_cmd(account_id: String) -> Result<(), String> {
-  if delete_registered_account(&account_id) {
+  if delete_registered_account(&account_id)? {
     Ok(())
   } else {
     Err(format!("Account {account_id} not found"))
@@ -108,14 +159,14 @@ pub fn update_registered_account_status_cmd(
   note: Option<String>,
 ) -> Result<u32, String> {
   let status = parse_status(&status)?;
-  let n = update_registered_account_status(&account_ids, status, note);
-  Ok(n as u32)
+  let updated = update_registered_account_status(&account_ids, status, note)?;
+  u32::try_from(updated).map_err(|_| "Updated account count exceeds u32".to_string())
 }
 
 /// Update free-form note for a stored account.
 #[tauri::command]
 pub fn update_registered_account_note_cmd(account_id: String, note: String) -> Result<(), String> {
-  if update_registered_account_note(&account_id, note) {
+  if update_registered_account_note(&account_id, note)? {
     Ok(())
   } else {
     Err(format!("Account {account_id} not found"))
@@ -146,5 +197,55 @@ fn parse_status(status: &str) -> Result<AccountInventoryStatus, String> {
     "invalid" | "dead" => Ok(AccountInventoryStatus::Invalid),
     "reserved" => Ok(AccountInventoryStatus::Reserved),
     other => Err(format!("Unknown inventory status: {other}")),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn existing_account_request_deserializes_without_registration_cdks() {
+    let request: AutoRegistrationRequest = serde_json::from_value(serde_json::json!({
+      "operation": "existingAccount",
+      "selectedAccountKeys": ["account-1"],
+      "browser": "chromium",
+      "network": {"kind": "none"},
+      "mode": "canary",
+      "allowFreeTrialNo": false,
+      "acknowledgeLegacyAccess": false
+    }))
+    .unwrap();
+
+    let AutoRegistrationRequest::ExistingAccount(request) = request else {
+      panic!("existing-account operation must not deserialize as new registration");
+    };
+    assert_eq!(request.request.selected_account_keys, vec!["account-1"]);
+  }
+
+  #[test]
+  fn normal_registration_request_still_deserializes_as_new_account() {
+    let request: AutoRegistrationRequest = serde_json::from_value(serde_json::json!({
+      "cdks": ["GMAIL-TEST"],
+      "browserType": "chromium"
+    }))
+    .unwrap();
+
+    let AutoRegistrationRequest::NewAccount(request) = request else {
+      panic!("legacy registration payload must remain new-account mode");
+    };
+    assert_eq!(request.cdks, vec!["GMAIL-TEST"]);
+  }
+
+  #[test]
+  fn operation_tag_requires_a_valid_existing_account_payload() {
+    let error = serde_json::from_value::<AutoRegistrationRequest>(serde_json::json!({
+      "operation": "existingAccount",
+      "selectedAccountKeys": [],
+      "browser": "chromium"
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("missing field") || error.contains("network"));
   }
 }

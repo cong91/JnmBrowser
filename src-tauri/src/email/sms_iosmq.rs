@@ -8,6 +8,7 @@
 //! Code `2004` ("卡密使用中") means the card is already redeemed — look up instead.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -74,24 +75,32 @@ impl SmsIosmqService {
       .expect("Failed to build reqwest Client")
   }
 
-  fn map_biz_error(code: i64, msg: &str) -> EmailServiceError {
+  fn map_biz_error(code: i64, _msg: &str) -> EmailServiceError {
     match code {
-      1001 => EmailServiceError::Internal(format!("bad request: {msg}")),
-      1002 => EmailServiceError::Internal(format!("not found: {msg}")),
-      2001 => EmailServiceError::CdkInvalid(format!("card not found: {msg}")),
-      2002 => EmailServiceError::CdkInvalid(format!("quota exhausted: {msg}")),
-      2003 => EmailServiceError::CdkExpired(format!("card expired: {msg}")),
+      1001 => EmailServiceError::Internal("bad request".into()),
+      1002 => EmailServiceError::Internal("not found".into()),
+      2001 => EmailServiceError::CdkInvalid("card not found".into()),
+      2002 => EmailServiceError::CdkInvalid("quota exhausted".into()),
+      2003 => EmailServiceError::CdkExpired("card expired".into()),
       // 2004 = already in use — handled specially by redeem.
-      2004 => EmailServiceError::Internal(format!("card already in use: {msg}")),
-      2005 => EmailServiceError::CdkInvalid(format!("card status invalid: {msg}")),
-      _ => EmailServiceError::Internal(format!("iosmq code {code}: {msg}")),
+      2004 => EmailServiceError::Internal("card already in use".into()),
+      2005 => EmailServiceError::CdkInvalid("card status invalid".into()),
+      _ => EmailServiceError::Internal(format!("iosmq error code {code}")),
     }
   }
 
   fn parse_json(text: &str) -> Result<serde_json::Value, EmailServiceError> {
-    serde_json::from_str(text).map_err(|e| {
-      EmailServiceError::Internal(format!("failed to parse iosmq response: {e} — {text}"))
-    })
+    serde_json::from_str(text)
+      .map_err(|e| EmailServiceError::Internal(format!("failed to parse iosmq response: {e}")))
+  }
+
+  fn request_error(method: &str, error: &reqwest::Error) -> EmailServiceError {
+    let detail = if error.is_timeout() {
+      "request timed out"
+    } else {
+      "request failed"
+    };
+    EmailServiceError::Network(format!("{method} {detail}"))
   }
 
   fn biz_code(data: &serde_json::Value) -> i64 {
@@ -238,15 +247,13 @@ impl SmsIosmqService {
         .send()
         .await
     })
-    .map_err(|e| EmailServiceError::Network(format!("GET {url} failed: {e}")))?;
+    .map_err(|e| Self::request_error("GET", &e))?;
 
     let status = response.status();
     let text = Self::block_on(async move { response.text().await })
       .map_err(|e| EmailServiceError::Network(format!("failed to read GET body: {e}")))?;
     if !status.is_success() {
-      return Err(EmailServiceError::Network(format!(
-        "GET HTTP {status}: {text}"
-      )));
+      return Err(EmailServiceError::Network(format!("GET HTTP {status}")));
     }
     Self::parse_json(&text)
   }
@@ -266,7 +273,7 @@ impl SmsIosmqService {
         .send()
         .await
     })
-    .map_err(|e| EmailServiceError::Network(format!("POST {url} failed: {e}")))?;
+    .map_err(|e| Self::request_error("POST", &e))?;
 
     let status = response.status();
     let text = Self::block_on(async move { response.text().await })
@@ -274,9 +281,7 @@ impl SmsIosmqService {
     // Business errors often still return HTTP 200 with code != 0.
     // Non-2xx is still a hard network/server failure.
     if !status.is_success() {
-      return Err(EmailServiceError::Network(format!(
-        "POST HTTP {status}: {text}"
-      )));
+      return Err(EmailServiceError::Network(format!("POST HTTP {status}")));
     }
     Self::parse_json(&text)
   }
@@ -364,6 +369,16 @@ impl EmailService for SmsIosmqService {
     cdk: &str,
     timeout_secs: u64,
   ) -> Result<String, EmailServiceError> {
+    let cancel_flag = AtomicBool::new(false);
+    self.poll_verification_code_with_cancel(cdk, timeout_secs, &cancel_flag)
+  }
+
+  fn poll_verification_code_with_cancel(
+    &self,
+    cdk: &str,
+    timeout_secs: u64,
+    cancel_flag: &AtomicBool,
+  ) -> Result<String, EmailServiceError> {
     let code = cdk.trim();
     if code.is_empty() {
       return Err(EmailServiceError::CdkInvalid("empty MAIL card code".into()));
@@ -371,14 +386,20 @@ impl EmailService for SmsIosmqService {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
     loop {
+      if cancel_flag.load(Ordering::SeqCst) {
+        return Err(EmailServiceError::Cancelled);
+      }
       if Instant::now() >= deadline {
         return Err(EmailServiceError::Timeout(format!(
-          "iosmq OTP not received within {timeout_secs}s for {code}"
+          "iosmq OTP not received within {timeout_secs}s"
         )));
       }
 
       match self.lookup_order(code) {
         Ok(data) => {
+          if cancel_flag.load(Ordering::SeqCst) {
+            return Err(EmailServiceError::Cancelled);
+          }
           // Keep mailbox cache fresh if present.
           if let Ok(info) = Self::extract_email_info(&data) {
             self.remember(code, &info.email);
@@ -398,7 +419,15 @@ impl EmailService for SmsIosmqService {
 
       let remaining = deadline.saturating_duration_since(Instant::now());
       let sleep_for = std::cmp::min(self.poll_interval, remaining);
-      std::thread::sleep(sleep_for);
+      let sleep_deadline = Instant::now() + sleep_for;
+      while Instant::now() < sleep_deadline {
+        if cancel_flag.load(Ordering::SeqCst) {
+          return Err(EmailServiceError::Cancelled);
+        }
+        std::thread::sleep(
+          Duration::from_millis(100).min(sleep_deadline.saturating_duration_since(Instant::now())),
+        );
+      }
     }
   }
 
@@ -450,6 +479,18 @@ mod tests {
   use std::sync::Arc;
   use wiremock::matchers::{body_json, method, path, query_param};
   use wiremock::{Mock, MockServer, ResponseTemplate};
+
+  #[test]
+  fn provider_errors_never_embed_cards_or_raw_responses() {
+    let card = "MAIL-K4L5-EUW5-PHBV-A6KW";
+    let business = SmsIosmqService::map_biz_error(2001, card).to_string();
+    assert!(!business.contains(card), "error={business}");
+
+    let raw = format!(r#"{{"message":"{card}""#);
+    let parse = SmsIosmqService::parse_json(&raw).unwrap_err().to_string();
+    assert!(!parse.contains(card), "error={parse}");
+    assert!(!parse.contains(&raw), "error={parse}");
+  }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn redeem_contract_falls_back_to_lookup_for_active_card() {

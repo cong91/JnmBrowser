@@ -1,8 +1,8 @@
-use chrono::Utc;
+use chrono::{Datelike, NaiveDate, Utc};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::SinkExt;
 use rand::prelude::IndexedRandom;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
@@ -12,18 +12,109 @@ use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
-use super::sentinel::build_sentinel_token;
 use super::store::{
   cdk_remaining_capacity, get_cdk_inventory, put_cdk_inventory_record, reserve_cdk_slots_per,
   save_registration_result, CdkSlotReservation, MAX_ACCOUNTS_PER_CDK,
 };
 use super::types::{
-  should_rotate, CdkInventoryRecord, NetworkMode, RegistrationConfig, RegistrationProgress,
-  RegistrationResult, RegistrationStep,
+  should_rotate, CdkInventoryRecord, EmailProviderProvenance, NetworkMode, RegistrationConfig,
+  RegistrationOutcomeReason, RegistrationProgress, RegistrationResult, RegistrationStep,
+  TwoFactorBackfillAccessState,
 };
-use crate::auto_service::common::totp::{generate_totp_now, normalize_secret};
-use crate::email::EmailService;
-use crate::sms::{NumberRequest, SmsService};
+use crate::auto_service::openai::chatgpt_auth::ChatGptBrowser;
+use crate::auto_service::openai::chatgpt_two_factor::{
+  enable_authenticator_two_factor, BrowserTwoFactorAdapter,
+};
+use crate::email::{EmailService, EmailServiceError};
+use crate::sms::{NumberRequest, SmsService, SmsServiceError};
+
+/// Diagnostic helper used only during live About You debugging.
+/// Captures a PNG screenshot of the current page via the CDP
+/// `Page.captureScreenshot` command + the form HTML / input state, and
+/// writes them under `<app_data>/debug/about-you-<suffix>.{png,html}`. No
+/// secret material is written — only what is visible in the viewport plus
+/// the form's outerHTML. If any step fails the helper returns silently; the
+/// caller already has the primary error message.
+async fn snapshot_about_you_page(session: &mut BrowserSession, suffix: &str) {
+  use base64::Engine as _;
+  let dir = crate::app_dirs::data_dir().join("debug");
+  let _ = std::fs::create_dir_all(&dir);
+  let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+
+  // Screenshot via CDP.
+  let snap_params = serde_json::json!({ "format": "png", "captureBeyondViewport": true });
+  if let Ok(snap) = session
+    .send_cmd("Page.captureScreenshot", snap_params)
+    .await
+  {
+    if let Some(b64) = snap.get("data").and_then(|v| v.as_str()) {
+      if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+        let _ = std::fs::write(dir.join(format!("about-you-{}-{}.png", ts, suffix)), bytes);
+      }
+    }
+  }
+
+  // Form HTML + inputs state.
+  let form_html_js = r#"(function(){
+    const form = document.querySelector('form');
+    const inputs = Array.from(document.querySelectorAll('input, select, textarea'))
+      .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .map((el) => ({
+        tag: el.tagName,
+        name: el.name || '',
+        type: el.type || '',
+        value: String(el.value || ''),
+        disabled: el.disabled,
+        aria: el.getAttribute('aria-invalid'),
+        placeholder: el.placeholder || '',
+      }));
+    const btns = Array.from(document.querySelectorAll('button'))
+      .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .map((el) => ({
+        text: (el.innerText || '').trim().slice(0, 60),
+        type: el.type || '',
+        disabled: el.disabled,
+        ariaDisabled: el.getAttribute('aria-disabled') || '',
+      }));
+    const errs = Array.from(document.querySelectorAll('[role="alert"], [class*="error" i], [data-error]'))
+      .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .map((el) => (el.innerText || '').trim().slice(0, 160))
+      .filter((s) => s.length > 0);
+    return {
+      formHTML: form ? form.outerHTML.slice(0, 8000) : '<no form>',
+      url: window.location.href,
+      title: document.title,
+      inputs,
+      buttons: btns,
+      errors: errs,
+      active: document.activeElement
+        ? (document.activeElement.tagName + '#' + (document.activeElement.id || '') + ' name=' + (document.activeElement.getAttribute('name') || ''))
+        : 'none',
+    };
+  })()"#;
+  if let Ok(info) = session.evaluate(form_html_js, false).await {
+    let value = info.get("value").cloned().unwrap_or_default();
+    let json_text = serde_json::to_string_pretty(&value).unwrap_or_default();
+    let _ = std::fs::write(
+      dir.join(format!("about-you-{}-{}.html", ts, suffix)),
+      format!(
+        "<!-- About You diagnostic {} -->\n<pre>{}</pre>\n\n<!-- form HTML -->\n{}",
+        suffix,
+        json_text,
+        value
+          .get("formHTML")
+          .and_then(|v| v.as_str())
+          .unwrap_or("<none>")
+      ),
+    );
+    eprintln!(
+      "snapshot_about_you_page wrote html to {}",
+      dir
+        .join(format!("about-you-{}-{}.html", ts, suffix))
+        .display()
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // CDP connection wrapper
@@ -31,9 +122,11 @@ use crate::sms::{NumberRequest, SmsService};
 
 type CdpWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-struct CdpConnection {
+pub(crate) struct CdpConnection {
   ws: CdpWs,
   next_id: u64,
+  /// Tracked mouse cursor position across the session (x, y in viewport coords).
+  cursor_pos: (f64, f64),
 }
 
 impl CdpConnection {
@@ -41,7 +134,11 @@ impl CdpConnection {
     let (ws, _) = connect_async(ws_url)
       .await
       .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
-    let mut conn = Self { ws, next_id: 1 };
+    let mut conn = Self {
+      ws,
+      next_id: 1,
+      cursor_pos: (0.0, 0.0),
+    };
     conn.prepare_for_background_automation().await?;
     Ok(conn)
   }
@@ -68,6 +165,10 @@ impl CdpConnection {
           .and_then(|v| v.as_str())
           .unwrap_or("");
         if state == "minimized" || state.is_empty() {
+          let (win_w, win_h) = {
+            let mut rng = rand::rng();
+            (rng.random_range(1280..1440), rng.random_range(800..1000))
+          };
           let _ = self
             .send_cmd(
               "Browser.setWindowBounds",
@@ -75,8 +176,8 @@ impl CdpConnection {
                 "windowId": window_id,
                 "bounds": {
                   "windowState": "normal",
-                  "width": 1280,
-                  "height": 900,
+                  "width": win_w,
+                  "height": win_h,
                 }
               }),
             )
@@ -234,13 +335,14 @@ impl CdpConnection {
         }),
       )
       .await?;
+    self.cursor_pos = (x, y);
     Ok(())
   }
 
   async fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String> {
     // Instant click at point (prefer humanized path via BrowserSession::human_click).
     let _ = self.mouse_move(x, y).await;
-    sleep(std::time::Duration::from_millis(25)).await;
+    sleep(crate::browser_actions::jitter_ms(20, 40)).await;
     self
       .send_cmd(
         "Input.dispatchMouseEvent",
@@ -253,7 +355,7 @@ impl CdpConnection {
         }),
       )
       .await?;
-    sleep(std::time::Duration::from_millis(35)).await;
+    sleep(crate::browser_actions::jitter_ms(30, 55)).await;
     self
       .send_cmd(
         "Input.dispatchMouseEvent",
@@ -282,6 +384,8 @@ impl CdpConnection {
         }),
       )
       .await?;
+    // Human-like key hold time: 50–150ms between keyDown and keyUp.
+    sleep(crate::browser_actions::jitter_ms(50, 150)).await;
     self
       .send_cmd(
         "Input.dispatchKeyEvent",
@@ -307,6 +411,8 @@ impl CdpConnection {
         }),
       )
       .await?;
+    // Human-like key hold time: 50–150ms between keyDown and keyUp.
+    sleep(crate::browser_actions::jitter_ms(50, 150)).await;
     self
       .send_cmd(
         "Input.dispatchKeyEvent",
@@ -328,16 +434,31 @@ impl CdpConnection {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::large_enum_variant)]
-enum BrowserSession {
+pub(crate) enum BrowserSession {
   Cdp(CdpConnection),
   Camoufox {
     page: playwright::api::Page,
-    #[allow(dead_code)]
-    profile_path: String,
+    cursor_pos: (f64, f64),
   },
 }
 
 impl BrowserSession {
+  /// Forward a CDP command. Only meaningful for the Chromium kernel; for the
+  /// Camoufox kernel this returns an error (diagnostics that rely on CDP
+  /// commands are silently skipped in that path).
+  async fn send_cmd(
+    &mut self,
+    method: &str,
+    params: serde_json::Value,
+  ) -> Result<serde_json::Value, String> {
+    match self {
+      Self::Cdp(cdp) => cdp.send_cmd(method, params).await,
+      Self::Camoufox { .. } => Err(format!(
+        "Camoufox kernel does not support CDP command {method}"
+      )),
+    }
+  }
+
   async fn navigate(&mut self, url: &str, timeout_secs: u64) -> Result<(), String> {
     match self {
       Self::Cdp(cdp) => cdp.navigate(url, timeout_secs).await,
@@ -447,16 +568,162 @@ impl BrowserSession {
     match self {
       Self::Cdp(cdp) => cdp.set_cookie(name, value, domain).await,
       Self::Camoufox { page, .. } => {
-        // Prefer document.cookie (works cross-domain cookie jar via page origin).
-        let js = format!(
-          "document.cookie = '{name}={value}; domain={domain}; path=/; SameSite=None; Secure'"
-        );
-        let _: serde_json::Value = page
-          .eval(&js)
+        let mut cookie = playwright::api::Cookie::with_domain_path(name, value, domain, "/");
+        cookie.secure = Some(true);
+        cookie.same_site = Some(playwright::api::SameSite::None);
+        page
+          .context()
+          .add_cookies(&[cookie])
           .await
-          .map_err(|e| format!("Camoufox set_cookie failed: {e}"))?;
-        Ok(())
+          .map_err(|e| format!("Camoufox set_cookie failed: {e}"))
       }
+    }
+  }
+
+  pub(crate) async fn prepare_existing_account_login(
+    &mut self,
+    device_id: &str,
+    login_email: &str,
+  ) -> Result<(), String> {
+    if login_email.trim().is_empty() {
+      return Err("existing-account login email is empty".into());
+    }
+    self.clear_all_site_data().await?;
+    for domain in [
+      "chatgpt.com",
+      ".chatgpt.com",
+      "auth.openai.com",
+      ".auth.openai.com",
+    ] {
+      self.set_cookie("oai-did", device_id, domain).await?;
+    }
+
+    // Step 1: Establish session on chatgpt.com homepage first for Cloudflare clearance.
+    self.navigate("https://chatgpt.com/", 25).await?;
+    sleep(std::time::Duration::from_millis(2000)).await;
+    let _ = self.evaluate("window.scrollBy(0, 200)", false).await;
+    sleep(std::time::Duration::from_millis(800)).await;
+
+    // Step 2: Navigate to dedicated login page (same origin, session preserved).
+    self.navigate("https://chatgpt.com/auth/login", 30).await?;
+    sleep(std::time::Duration::from_millis(1500)).await;
+
+    // Find and focus the email input in the login form.
+    let focus_js = r#"(function(){
+      const selectors = 'input[type="email"], input[name="email"], input[id="email"], input[autocomplete*="email"]';
+      const nodes = Array.from(document.querySelectorAll(selectors));
+      for (const el of nodes) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        el.scrollIntoView({ block: 'center' });
+        el.focus();
+        el.click();
+        try { if (el.select) el.select(); } catch (_) {}
+        const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+        const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) desc.set.call(el, '');
+        else el.value = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      }
+      return false;
+    })()"#;
+    let mut focused = false;
+    for _ in 0..15 {
+      sleep(std::time::Duration::from_millis(400)).await;
+      if let Ok(res) = self.evaluate(focus_js, false).await {
+        if res.get("value").and_then(|v| v.as_bool()) == Some(true) {
+          focused = true;
+          break;
+        }
+      }
+    }
+    if !focused {
+      return Err(
+        "prepare_existing_account_login: email input not found on auth/login page".into(),
+      );
+    }
+
+    // Type email character by character (human-like).
+    for ch in login_email.chars() {
+      self.key_char(ch).await?;
+      sleep(std::time::Duration::from_millis(35)).await;
+    }
+    let _ = self
+      .evaluate(
+        r#"(function(){
+          const el = document.activeElement;
+          if (!el) return false;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()"#,
+        false,
+      )
+      .await;
+    sleep(std::time::Duration::from_millis(350)).await;
+
+    // Click "Continue" button.
+    let continue_js = r#"(function(){
+      const els = Array.from(document.querySelectorAll('button, [role="button"]'));
+      for (const el of els) {
+        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+        if (text === 'continue') {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            el.scrollIntoView({ block: 'center' });
+            return { x: r.left + r.width/2, y: r.top + r.height/2 };
+          }
+        }
+      }
+      // Fallback: form submit button
+      const submitBtn = document.querySelector('button[type="submit"], form button');
+      if (submitBtn) {
+        const r = submitBtn.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          submitBtn.scrollIntoView({ block: 'center' });
+          return { x: r.left + r.width/2, y: r.top + r.height/2 };
+        }
+      }
+      return null;
+    })()"#;
+    let mut continued = false;
+    if let Ok(res) = self.evaluate(continue_js, false).await {
+      if let (Some(x), Some(y)) = (
+        res
+          .get("value")
+          .and_then(|v| v.get("x"))
+          .and_then(|n| n.as_f64()),
+        res
+          .get("value")
+          .and_then(|v| v.get("y"))
+          .and_then(|n| n.as_f64()),
+      ) {
+        self.mouse_click(x, y).await?;
+        continued = true;
+      }
+    }
+    if !continued {
+      return Err("Could not click Continue on auth/login page".into());
+    }
+    sleep(std::time::Duration::from_millis(1500)).await;
+
+    // Wait for navigation to auth.openai.com.
+    for _ in 0..20 {
+      sleep(std::time::Duration::from_millis(500)).await;
+      let cur = self.current_url().await.unwrap_or_default();
+      if cur.contains("auth.openai.com") {
+        return Ok(());
+      }
+    }
+
+    let cur = self.current_url().await.unwrap_or_default();
+    if cur.contains("auth.openai.com") {
+      Ok(())
+    } else {
+      Err(format!(
+        "prepare_existing_account_login: did not reach auth.openai.com (url={cur})"
+      ))
     }
   }
 
@@ -526,12 +793,15 @@ impl BrowserSession {
   async fn mouse_move(&mut self, x: f64, y: f64) -> Result<(), String> {
     match self {
       Self::Cdp(cdp) => cdp.mouse_move(x, y).await,
-      Self::Camoufox { page, .. } => {
+      Self::Camoufox {
+        page, cursor_pos, ..
+      } => {
         page
           .mouse
           .r#move(x, y, Some(1))
           .await
           .map_err(|e| format!("Camoufox mouse move failed: {e}"))?;
+        *cursor_pos = (x, y);
         Ok(())
       }
     }
@@ -540,20 +810,42 @@ impl BrowserSession {
   async fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String> {
     match self {
       Self::Cdp(cdp) => cdp.mouse_click(x, y).await,
-      Self::Camoufox { page, .. } => {
+      Self::Camoufox {
+        page, cursor_pos, ..
+      } => {
         page
           .mouse
           .click_builder(x, y)
           .click()
           .await
           .map_err(|e| format!("Camoufox mouse click failed: {e}"))?;
+        *cursor_pos = (x, y);
         Ok(())
       }
     }
   }
 
+  /// Get current tracked cursor position.
+  fn cursor_pos(&self) -> (f64, f64) {
+    match self {
+      Self::Cdp(cdp) => cdp.cursor_pos,
+      Self::Camoufox { cursor_pos, .. } => *cursor_pos,
+    }
+  }
+
   /// Humanized move along a curved path then left-click (service-agnostic).
+  /// Automatically uses tracked cursor position as starting point.
   async fn human_click(
+    &mut self,
+    to: (f64, f64),
+    profile: &crate::browser_actions::HumanProfile,
+  ) -> Result<(), String> {
+    let from = self.cursor_pos();
+    self.human_click_from(from, to, profile).await
+  }
+
+  /// Humanized move along a curved path then left-click with explicit start position.
+  async fn human_click_from(
     &mut self,
     from: (f64, f64),
     to: (f64, f64),
@@ -672,6 +964,68 @@ impl BrowserSession {
   }
 }
 
+#[async_trait::async_trait]
+impl ChatGptBrowser for BrowserSession {
+  async fn navigate(&mut self, url: &str, timeout_secs: u64) -> Result<(), String> {
+    BrowserSession::navigate(self, url, timeout_secs).await
+  }
+
+  async fn evaluate(
+    &mut self,
+    expression: &str,
+    await_promise: bool,
+  ) -> Result<serde_json::Value, String> {
+    BrowserSession::evaluate(self, expression, await_promise).await
+  }
+
+  async fn current_url(&mut self) -> Result<String, String> {
+    BrowserSession::current_url(self).await
+  }
+
+  async fn type_text(&mut self, selector: &str, value: &str) -> Result<(), String> {
+    if self
+      .human_type(
+        selector,
+        value,
+        &crate::browser_actions::HumanProfile::form_fill(),
+      )
+      .await
+      .is_ok()
+    {
+      return Ok(());
+    }
+
+    let script = format!(
+      r#"(function(){{
+        const element = document.querySelector({selector});
+        if (!element) return false;
+        element.focus();
+        const prototype = window.HTMLInputElement && window.HTMLInputElement.prototype;
+        const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, 'value');
+        if (descriptor && descriptor.set) descriptor.set.call(element, {value});
+        else element.value = {value};
+        element.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        element.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        return true;
+      }})()"#,
+      selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+      value = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+    );
+    let result = BrowserSession::evaluate(self, &script, false).await?;
+    if result.get("value").and_then(serde_json::Value::as_bool) == Some(true) {
+      Ok(())
+    } else {
+      Err("browser input is unavailable".into())
+    }
+  }
+
+  async fn click_point(&mut self, x: f64, y: f64) -> Result<(), String> {
+    self
+      .human_click((x, y), &crate::browser_actions::HumanProfile::careful())
+      .await
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CDP target discovery
 // ---------------------------------------------------------------------------
@@ -701,6 +1055,68 @@ async fn get_page_ws_url(port: u16) -> Result<String, String> {
   Err("No page target with webSocketDebuggerUrl found".into())
 }
 
+/// Attach the automation backend owned by an already-launched worker profile.
+/// Chromium is resolved only by PID or the exact effective profile path;
+/// Camoufox reuses the active Playwright page held by CamoufoxManager.
+pub(crate) async fn attach_browser_session(
+  profile: &crate::profile::BrowserProfile,
+) -> Result<BrowserSession, String> {
+  let profile_path = crate::ephemeral_dirs::get_effective_profile_path(
+    profile,
+    &crate::profile::ProfileManager::instance().get_profiles_dir(),
+  );
+  let profile_path_str = profile_path.to_string_lossy().to_string();
+
+  if profile.browser == "camoufox" {
+    let mut last_error = String::new();
+    for attempt in 0..15 {
+      if attempt > 0 {
+        sleep(std::time::Duration::from_millis(500)).await;
+      }
+      match crate::camoufox_manager::CamoufoxManager::instance()
+        .get_active_page(&profile_path_str)
+        .await
+      {
+        Ok(page) => {
+          return Ok(BrowserSession::Camoufox {
+            page,
+            cursor_pos: (0.0, 0.0),
+          });
+        }
+        Err(error) => last_error = error.to_string(),
+      }
+    }
+    return Err(format!(
+      "Failed to attach Camoufox Playwright page for {profile_path_str}: {last_error}"
+    ));
+  }
+
+  let manager = crate::chromium_manager::ChromiumManager::instance();
+  for attempt in 0..20 {
+    if attempt > 0 {
+      sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let cdp_port = if let Some(pid) = profile.process_id {
+      manager.get_cdp_port_by_pid(pid).await
+    } else {
+      None
+    }
+    .or(manager.get_cdp_port(&profile_path_str).await);
+
+    if let Some(port) = cdp_port {
+      let ws_url = get_page_ws_url(port).await?;
+      return CdpConnection::connect(&ws_url)
+        .await
+        .map(BrowserSession::Cdp);
+    }
+  }
+
+  Err(format!(
+    "Failed to get CDP port for browser={} path={} pid={:?}",
+    profile.browser, profile_path_str, profile.process_id
+  ))
+}
+
 // ---------------------------------------------------------------------------
 // User info generation
 // ---------------------------------------------------------------------------
@@ -713,26 +1129,172 @@ const FIRST_NAMES: &[&str] = &[
   "David",
   "William",
   "Richard",
+  "Joseph",
+  "Thomas",
+  "Charles",
+  "Christopher",
+  "Daniel",
+  "Matthew",
+  "Anthony",
+  "Mark",
+  "Donald",
+  "Steven",
+  "Paul",
+  "Andrew",
+  "Joshua",
+  "Kenneth",
+  "Kevin",
+  "Brian",
+  "George",
+  "Timothy",
+  "Ronald",
+  "Edward",
+  "Jason",
+  "Jeffrey",
+  "Ryan",
+  "Jacob",
+  "Gary",
+  "Nicholas",
+  "Eric",
+  "Jonathan",
+  "Stephen",
+  "Larry",
+  "Justin",
+  "Scott",
+  "Brandon",
   "Mary",
+  "Patricia",
   "Jennifer",
   "Linda",
+  "Barbara",
   "Elizabeth",
   "Susan",
   "Jessica",
   "Sarah",
+  "Karen",
+  "Lisa",
+  "Nancy",
+  "Betty",
+  "Margaret",
+  "Sandra",
+  "Ashley",
+  "Dorothy",
+  "Kimberly",
   "Emily",
+  "Donna",
+  "Michelle",
+  "Carol",
+  "Amanda",
+  "Melissa",
+  "Deborah",
+  "Stephanie",
+  "Rebecca",
+  "Sharon",
+  "Laura",
+  "Cynthia",
+  "Kathleen",
+  "Amy",
+  "Angela",
+  "Shirley",
+  "Anna",
+  "Brenda",
+  "Pamela",
   "Emma",
+  "Nicole",
+  "Helen",
+  "Samantha",
+  "Katherine",
+  "Christine",
+  "Debra",
+  "Rachel",
+  "Carolyn",
+  "Janet",
+  "Catherine",
+  "Maria",
+  "Heather",
+  "Diane",
+  "Ruth",
+  "Julie",
   "Olivia",
-  "Sophia",
-  "Liam",
-  "Noah",
-  "Oliver",
-  "Ethan",
+  "Joyce",
+  "Virginia",
+  "Victoria",
+  "Kelly",
+  "Lauren",
+  "Christina",
+  "Joan",
+  "Evelyn",
+  "Judith",
+  "Megan",
+  "Andrea",
+  "Cheryl",
+  "Hannah",
+  "Jacqueline",
+  "Martha",
+  "Gloria",
+  "Teresa",
+  "Ann",
+  "Sara",
+  "Madison",
+  "Frances",
+  "Kathryn",
+  "Janice",
+  "Jean",
+  "Abigail",
+  "Alice",
 ];
 
 const LAST_NAMES: &[&str] = &[
-  "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Wilson",
-  "Anderson", "Thomas", "Taylor", "Moore", "Martin",
+  "Smith",
+  "Johnson",
+  "Williams",
+  "Brown",
+  "Jones",
+  "Garcia",
+  "Miller",
+  "Davis",
+  "Rodriguez",
+  "Martinez",
+  "Hernandez",
+  "Lopez",
+  "Gonzalez",
+  "Wilson",
+  "Anderson",
+  "Thomas",
+  "Taylor",
+  "Moore",
+  "Jackson",
+  "Martin",
+  "Lee",
+  "Perez",
+  "Thompson",
+  "White",
+  "Harris",
+  "Sanchez",
+  "Clark",
+  "Ramirez",
+  "Lewis",
+  "Robinson",
+  "Walker",
+  "Young",
+  "Allen",
+  "King",
+  "Wright",
+  "Scott",
+  "Torres",
+  "Nguyen",
+  "Hill",
+  "Flores",
+  "Green",
+  "Adams",
+  "Nelson",
+  "Baker",
+  "Hall",
+  "Rivera",
+  "Campbell",
+  "Mitchell",
+  "Carter",
+  "Roberts",
 ];
 
 fn random_name() -> (String, String) {
@@ -748,6 +1310,173 @@ fn random_birthday() -> String {
   let month = 1 + (rng.next_u32() % 12);
   let day = 1 + (rng.next_u32() % 28);
   format!("{year:04}-{month:02}-{day:02}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AboutYouBirthMode {
+  Age,
+  SingleDate,
+  SplitDate,
+}
+
+fn resolve_about_you_birth_mode(
+  has_age: bool,
+  has_single_date: bool,
+  has_split_date: bool,
+) -> Option<AboutYouBirthMode> {
+  if has_age {
+    Some(AboutYouBirthMode::Age)
+  } else if has_single_date {
+    Some(AboutYouBirthMode::SingleDate)
+  } else if has_split_date {
+    Some(AboutYouBirthMode::SplitDate)
+  } else {
+    None
+  }
+}
+
+fn birthdate_parts(birthdate: &str) -> Result<(String, String, String, String), String> {
+  let date = NaiveDate::parse_from_str(birthdate, "%Y-%m-%d")
+    .map_err(|_| "generated birthdate is invalid".to_string())?;
+  let year = date.year().to_string();
+  let month = format!("{:02}", date.month());
+  let day = format!("{:02}", date.day());
+  let age = Utc::now()
+    .date_naive()
+    .years_since(date)
+    .ok_or_else(|| "generated birthdate is in the future".to_string())?
+    .to_string();
+  Ok((year, month, day, age))
+}
+
+#[cfg(test)]
+mod about_you_tests {
+  use super::{birthdate_parts, resolve_about_you_birth_mode, AboutYouBirthMode};
+  use chrono::{Datelike, Utc};
+
+  #[test]
+  fn birth_mode_prefers_age_then_single_then_split_date() {
+    assert_eq!(
+      resolve_about_you_birth_mode(true, true, true),
+      Some(AboutYouBirthMode::Age)
+    );
+    assert_eq!(
+      resolve_about_you_birth_mode(false, true, true),
+      Some(AboutYouBirthMode::SingleDate)
+    );
+    assert_eq!(
+      resolve_about_you_birth_mode(false, false, true),
+      Some(AboutYouBirthMode::SplitDate)
+    );
+    assert_eq!(resolve_about_you_birth_mode(false, false, false), None);
+  }
+
+  #[test]
+  fn birthdate_parts_produces_age_for_live_age_form() {
+    let (year, month, day, age) = birthdate_parts("2000-01-01").expect("valid birthdate");
+
+    assert_eq!(year, "2000");
+    assert_eq!(month, "01");
+    assert_eq!(day, "01");
+    assert_eq!(age, (Utc::now().year() - 2000).to_string());
+  }
+
+  #[test]
+  fn birthdate_parts_rejects_invalid_and_future_dates() {
+    assert!(birthdate_parts("2000-02-30").is_err());
+    assert!(birthdate_parts("2999-01-01").is_err());
+  }
+}
+
+#[cfg(test)]
+mod safe_error_tests {
+  //! The error envelope used to collapse every provider failure to a static
+  //! `&'static str`, so a 400 "CDK use limit reached" and a DNS NXDOMAIN
+  //! looked identical in `cdk_inventory.lastError`. Now the safe string keeps
+  //! HTTP status / short message while redacting secrets.
+
+  use super::{safe_email_service_error, safe_provider_detail};
+  use crate::email::EmailServiceError;
+
+  #[test]
+  fn network_error_keeps_http_status_and_provider_message() {
+    let inner = "redeem HTTP 400 Bad Request: {\"message\":\"CDK use limit reached\",\"error\":\"Bad Request\",\"statusCode\":400}";
+    let safe = safe_email_service_error(&EmailServiceError::Network(inner.into()));
+    assert!(
+      safe.contains("provider network request failed"),
+      "prefix preserved: {safe}"
+    );
+    assert!(safe.contains("HTTP 400"), "HTTP status preserved: {safe}");
+    assert!(
+      safe.contains("CDK use limit reached"),
+      "provider message preserved: {safe}"
+    );
+  }
+
+  #[test]
+  fn network_error_strips_emails_and_cdk_strings() {
+    let email = "someone@example.com";
+    let cdk = "GMAIL-7BE8-AEVK-ACR8-FQ86";
+    let inner = format!("redeem HTTP 400 Bad Request: {{\"message\":\"{cdk} used by {email}\"}}");
+    let safe = safe_email_service_error(&EmailServiceError::Network(inner));
+    assert!(!safe.contains(email), "email must be redacted: {safe}");
+    assert!(!safe.contains(cdk), "raw CDK must be redacted: {safe}");
+    assert!(safe.contains("[email]"), "email marker present: {safe}");
+    assert!(safe.contains("[cdk]"), "cdk marker present: {safe}");
+  }
+
+  #[test]
+  fn network_error_strips_mail_cards_from_raw_and_encoded_urls() {
+    for detail in [
+      "GET https://sms.iosmq.xyz/api/v1/order/lookup?code=MAIL-K4L5-EUW5-PHBV-A6KW&poll=true failed",
+      "GET https://sms.iosmq.xyz/api/v1/order/lookup?code=MAIL%2DK4L5%2DEUW5%2DPHBV%2DA6KW&poll=true failed",
+    ] {
+      let safe = safe_email_service_error(&EmailServiceError::Network(detail.into()));
+      assert!(!safe.contains("MAIL-K4L5-EUW5-PHBV-A6KW"), "safe={safe}");
+      assert!(
+        !safe.contains("MAIL%2DK4L5%2DEUW5%2DPHBV%2DA6KW"),
+        "safe={safe}"
+      );
+      assert!(safe.contains("[cdk]"), "safe={safe}");
+    }
+  }
+
+  #[test]
+  fn network_error_redacts_opaque_token_values() {
+    let token = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK";
+    let inner = format!("{{\"token\":\"{token}\",\"sessionId\":\"{token}\"}}");
+    let safe = safe_provider_detail(&inner);
+    assert!(
+      !safe.contains(token),
+      "opaque token must be redacted: {safe}"
+    );
+    assert!(
+      safe.contains("[redacted]"),
+      "redaction marker present: {safe}"
+    );
+  }
+
+  #[test]
+  fn network_error_truncates_giant_payloads() {
+    let huge = "x".repeat(2000);
+    let safe = safe_provider_detail(&huge);
+    assert!(
+      safe.chars().count() <= 220,
+      "truncated to <=220 chars, got {}: {safe}",
+      safe.chars().count()
+    );
+    assert!(safe.ends_with("..."), "ellipsis sentinel: {safe}");
+  }
+
+  #[test]
+  fn cdik_invalid_and_timeout_preserve_classified_detail() {
+    let invalid =
+      safe_email_service_error(&EmailServiceError::CdkInvalid("status: revoked".into()));
+    assert!(invalid.contains("provider card is invalid: status: revoked"));
+    let timeout =
+      safe_email_service_error(&EmailServiceError::Timeout("no code within 150s".into()));
+    assert!(timeout.contains("provider request timed out: no code within 150s"));
+  }
 }
 
 fn random_password() -> String {
@@ -830,12 +1559,91 @@ fn detect_page_type(url: &str) -> PageType {
   }
 }
 
-fn compact_json(v: &serde_json::Value) -> String {
-  let s = v.to_string();
-  if s.len() <= 400 {
-    s
+/// Strip values that may appear in provider error bodies (emails, tokens,
+/// CDK strings, raw JSON values) so the resulting string is safe to persist in
+/// `cdk_inventory.lastError` and logs. HTTP status + short `message` field are
+/// kept because they never carry secrets and are what the operator needs to
+/// tell "CDK use limit reached" (HTTP 400) apart from DNS / timeout / 5xx.
+fn safe_provider_detail(raw: &str) -> String {
+  // Pair of (compiled, replacement) applied left-to-right.
+  let patterns: &[(&str, &str)] = &[
+    // Email addresses inside provider payloads.
+    (
+      r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+      "[email]",
+    ),
+    // GMAIL/MAIL cards in raw or URL-encoded query strings.
+    (r"(?i)GMAIL-[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}", "[cdk]"),
+    (
+      r"(?i)MAIL(?:-|%2D)[A-Z0-9]{4}(?:(?:-|%2D)[A-Z0-9]{4}){2,3}",
+      "[cdk]",
+    ),
+    // `"token":"..."`, `"sessionId":"..."`, opaque JSON secrets.
+    (
+      r#"(?i)"(token|sessionId|apiKey|access_token|refresh_token)"\s*:\s*"[^"]+""#,
+      r#""$1":"[redacted]""#,
+    ),
+    // Long opaque base64-ish blobs (>=32 chars).
+    (r#"(?i)"[A-Za-z0-9+/=_\-]{32,}""#, "\"[redacted]\""),
+  ];
+  let mut cleaned = raw.to_string();
+  for (pattern, replacement) in patterns {
+    if let Ok(re) = regex_lite::Regex::new(pattern) {
+      cleaned = re.replace_all(&cleaned, *replacement).to_string();
+    }
+  }
+  // Bound the final string so a giant HTML error page can't flood the record.
+  if cleaned.chars().count() > 220 {
+    let truncated: String = cleaned.chars().take(217).collect();
+    format!("{truncated}...")
   } else {
-    format!("{}…", &s[..400])
+    cleaned
+  }
+}
+
+fn safe_email_service_error(error: &EmailServiceError) -> String {
+  match error {
+    EmailServiceError::CdkInvalid(d) => {
+      format!("provider card is invalid: {}", safe_provider_detail(d))
+    }
+    EmailServiceError::CdkExpired(d) => {
+      format!("provider card is expired: {}", safe_provider_detail(d))
+    }
+    EmailServiceError::Timeout(d) => {
+      format!("provider request timed out: {}", safe_provider_detail(d))
+    }
+    EmailServiceError::Cancelled => "provider polling cancelled".to_string(),
+    EmailServiceError::Network(d) => format!(
+      "provider network request failed: {}",
+      safe_provider_detail(d)
+    ),
+    EmailServiceError::EmailInvalid(d) => {
+      format!("provider email is invalid: {}", safe_provider_detail(d))
+    }
+    EmailServiceError::Internal(d) => {
+      format!("provider operation failed: {}", safe_provider_detail(d))
+    }
+  }
+}
+
+fn safe_sms_service_error(error: &SmsServiceError) -> String {
+  match error {
+    SmsServiceError::Auth(_) => "provider authentication failed".to_string(),
+    SmsServiceError::InsufficientBalance(_) => "provider balance is insufficient".to_string(),
+    SmsServiceError::NoNumbersAvailable(_) => "provider has no numbers available".to_string(),
+    SmsServiceError::ServiceUnavailable(_) => "provider service is unavailable".to_string(),
+    SmsServiceError::LimitExceeded(d) => {
+      format!("provider limit was exceeded: {}", safe_provider_detail(d))
+    }
+    SmsServiceError::Timeout(d) => {
+      format!("provider request timed out: {}", safe_provider_detail(d))
+    }
+    SmsServiceError::Network(d) => format!(
+      "provider network request failed: {}",
+      safe_provider_detail(d)
+    ),
+    SmsServiceError::InvalidRequest(_) => "provider rejected the request".to_string(),
+    SmsServiceError::Internal(_) => "provider operation failed".to_string(),
   }
 }
 
@@ -890,7 +1698,7 @@ fn evaluate_subscription_json(v: &serde_json::Value) -> Option<(bool, String, St
 }
 
 fn evaluate_account_node(
-  account_id: &str,
+  _account_id: &str,
   account_node: &serde_json::Value,
 ) -> Option<(bool, String, String)> {
   let plan = account_node
@@ -918,7 +1726,7 @@ fn evaluate_account_node(
   } else {
     plan.clone()
   };
-  let mut reasons: Vec<String> = vec![format!("account_id={account_id}"), format!("plan={plan}")];
+  let mut reasons: Vec<String> = vec![format!("plan={plan}")];
 
   // PRIMARY: promo campaigns (verified live on a fresh free signup).
   if let Some(promo_obj) = promo.as_ref().and_then(|p| p.as_object()) {
@@ -1275,7 +2083,7 @@ impl RegistrationEngine {
 
     // Drop old tunnel so the next profile launch starts a worker on the new conf.
     let _ = crate::vpn_worker_runner::stop_vpn_worker_by_vpn_id(vpn_id).await;
-    sleep(std::time::Duration::from_secs(1)).await;
+    self.human_pause(800, 1200).await;
 
     match crate::vpn_worker_runner::start_vpn_worker(vpn_id).await {
       Ok(worker) => {
@@ -1397,7 +2205,7 @@ impl RegistrationEngine {
       let remaining = cdk_remaining_capacity(cdk);
       if remaining == 0 {
         self.log(&format!(
-          "CDK {cdk} is at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK} used+reserved); skipping — free slots only after Delete (full stats+quota reset) or when failed claims release usage"
+          "CDK entry is at max capacity ({MAX_ACCOUNTS_PER_CDK}/{MAX_ACCOUNTS_PER_CDK} used+reserved); skipping - free slots only after Delete (full stats+quota reset) or when failed claims release usage"
         ));
         per_cdk_target.push(0);
         continue;
@@ -1405,7 +2213,7 @@ impl RegistrationEngine {
       let target = accounts_per.min(remaining);
       if target < accounts_per {
         self.log(&format!(
-          "CDK {cdk}: retrying — capping request {accounts_per} → {target} ({} of {MAX_ACCOUNTS_PER_CDK} slots already used)",
+          "CDK entry retrying - capping request {accounts_per} -> {target} ({} of {MAX_ACCOUNTS_PER_CDK} slots already used)",
           MAX_ACCOUNTS_PER_CDK - remaining
         ));
       }
@@ -1435,8 +2243,8 @@ impl RegistrationEngine {
       .collect();
     let mut reserved_iter = match reserve_cdk_slots_per(&targets, &self.task_id) {
       Ok(reservations) => reservations.into_iter(),
-      Err(error) => {
-        let msg = format!("CDK/card quota validation failed: {error}");
+      Err(_error) => {
+        let msg = "CDK/card quota validation failed".to_string();
         self.log(&msg);
         self.emit(
           &app_handle,
@@ -1475,8 +2283,8 @@ impl RegistrationEngine {
 
     // Concurrency policy:
     // - Nord CLI: always 1 (system-wide).
-    // - VPN: concurrency = nord_max_sessions (policy max 6) — NOT limited by CDK count.
-    //   Peer pool size follows Nord session budget; CDKs drain in waves until done.
+    // - VPN: user-selected concurrency capped by the detected Nord session budget.
+    //   Peer pool size follows effective concurrency; CDKs drain in waves until done.
     let mut concurrency = self.config.concurrency.clamp(1, 8);
     if uses_nord_cli && concurrency > 1 {
       self.log(&format!(
@@ -1505,14 +2313,11 @@ impl RegistrationEngine {
           }
         }
       }
-      // Concurrency is system-calculated from Nord session budget (Access Token path).
-      // User does not set it — only selects the VPN config created with the token.
-      let nord_budget = self.config.nord_max_sessions.clamp(1, 6);
-      self.config.concurrency = nord_budget;
-      self.config.nord_max_sessions = nord_budget;
-      concurrency = nord_budget;
+      let requested_concurrency = self.config.concurrency;
+      concurrency = self.config.effective_vpn_concurrency();
       self.log(&format!(
-        "VPN concurrency auto-calculated from Nord session budget: {concurrency} (CDK count={total_cdks} does not limit concurrency)"
+        "VPN concurrency selected by operator: requested={requested_concurrency}, session budget={}, effective={concurrency} (CDK count={total_cdks} does not limit concurrency)",
+        self.config.nord_max_sessions
       ));
 
       if let Some(base) = self.config.effective_vpn_id() {
@@ -1573,7 +2378,7 @@ impl RegistrationEngine {
         Ok(()) => {
           nord_connected_by_us = true;
           self.log("NordVPN CLI connected (backup mode)");
-          sleep(std::time::Duration::from_secs(3)).await;
+          self.human_pause(2500, 3500).await;
           if let Ok(ip) = crate::ip_utils::fetch_public_ip(None).await {
             self.log(&format!("Egress IP after Nord CLI connect: {ip}"));
           }
@@ -1695,6 +2500,15 @@ impl RegistrationEngine {
         note: String::new(),
         exported_at: None,
         sold_at: None,
+        email_provider: Some(self.config.email_provider),
+        email_provider_provenance: Some(EmailProviderProvenance::RegistrationConfig),
+        registration_outcome_reason: Some(RegistrationOutcomeReason::BatchSummary),
+        two_factor_backfill_access_state: Some(TwoFactorBackfillAccessState::Accessible),
+        two_factor_backfill_exclusion: None,
+        two_factor_backfill_state: None,
+        two_factor_backfill_outcome: None,
+        two_factor_backfill_operation_id: None,
+        record_revision: 1,
       };
     }
 
@@ -1829,6 +2643,15 @@ impl RegistrationEngine {
       note: String::new(),
       exported_at: None,
       sold_at: None,
+      email_provider: Some(self.config.email_provider),
+      email_provider_provenance: Some(EmailProviderProvenance::RegistrationConfig),
+      registration_outcome_reason: Some(RegistrationOutcomeReason::BatchSummary),
+      two_factor_backfill_access_state: Some(TwoFactorBackfillAccessState::Accessible),
+      two_factor_backfill_exclusion: None,
+      two_factor_backfill_state: None,
+      two_factor_backfill_outcome: None,
+      two_factor_backfill_operation_id: None,
+      record_revision: 1,
     }
   }
 
@@ -1867,7 +2690,7 @@ impl RegistrationEngine {
     cdk_record.updated_at = Utc::now();
     put_cdk_inventory_record(&cdk_record);
 
-    self.log(&format!("=== CDK {}/{total_cdks}: {cdk} ===", cdk_idx + 1));
+    self.log(&format!("=== CDK {}/{total_cdks} ===", cdk_idx + 1));
     self.emit(
       app_handle,
       RegistrationStep::RedeemingCdk,
@@ -1881,16 +2704,20 @@ impl RegistrationEngine {
     let base_email = match email_service.redeem_cdk(cdk) {
       Ok(info) => {
         let email = info.email.clone();
-        self.log(&format!("CDK → {email}"));
+        self.log("CDK redeemed");
         cdk_record.base_email = email.clone();
         put_cdk_inventory_record(&cdk_record);
         email
       }
       Err(e) => {
-        let msg = format!("CDK redeem failed: {e}");
+        let msg = format!("CDK redeem failed: {}", safe_email_service_error(&e));
         self.log(&msg);
         cdk_record.last_error = msg.clone();
         cdk_record.status = "failed".into();
+        // Record the *actual* remaining capacity so the dashboard does not
+        // mislead the operator with a stale default of 0 when redeem failed
+        // before any alias was claimed (e.g. provider HTTP 400 / 5xx).
+        cdk_record.remaining = cdk_remaining_capacity(cdk);
         cdk_record.updated_at = Utc::now();
         put_cdk_inventory_record(&cdk_record);
         self.dispose_worker_profile(app_handle).await;
@@ -1913,7 +2740,7 @@ impl RegistrationEngine {
       let identity = match email_service.generate_alias(&base_email) {
         Ok(alias) => AccountIdentity::new(alias),
         Err(e) => {
-          let msg = format!("Alias: {e}");
+          let msg = format!("Alias: {}", safe_email_service_error(&e));
           last_error = Some(msg.clone());
           self.log(&format!(
             "[CDK {}/{} Alias {}/{}] {msg}",
@@ -1958,7 +2785,7 @@ impl RegistrationEngine {
             "Retry {attempt}/{max_retries} for alias {}/{accounts_per}...",
             alias_idx + 1
           ));
-          sleep(std::time::Duration::from_secs(2)).await;
+          self.human_pause(1800, 2200).await;
         }
 
         match self
@@ -2000,12 +2827,63 @@ impl RegistrationEngine {
               }
             }
 
-            // Persist every finished attempt (free-trial yes AND free-trial no).
-            save_registration_result(&result);
+            // Persist every finished attempt before reporting it as durable.
+            if let Err(error) = save_registration_result(&result) {
+              let safe_error = format!(
+                "Account was created remotely, but local credential persistence failed: {error}"
+              );
+              self.log(&safe_error);
+              cdk_record.record_hard_failure(&safe_error);
+              put_cdk_inventory_record(&cdk_record);
+              self.emit(
+                app_handle,
+                RegistrationStep::Failed,
+                &safe_error,
+                cdk_idx,
+                alias_idx,
+                total_cdks,
+                None,
+              );
+              last_error = Some(safe_error);
+              finished_result = Some(result);
+              break;
+            }
             cdk_record.record_result(&result);
             put_cdk_inventory_record(&cdk_record);
             all_results.push(result.clone());
             finished_result = Some(result.clone());
+
+            let terminal_step = if result.success {
+              RegistrationStep::Completed
+            } else {
+              RegistrationStep::Failed
+            };
+            let terminal_message = if result.success {
+              format!(
+                "Account saved. free-trial{}{}",
+                if result.plan_type.is_empty() {
+                  String::new()
+                } else {
+                  format!(" [{}]", result.plan_type)
+                },
+                if result.two_fa_enabled {
+                  " (2FA on)"
+                } else {
+                  " (2FA skipped)"
+                }
+              )
+            } else {
+              format!("Account saved as non-success: {}", result.error_message)
+            };
+            self.emit(
+              app_handle,
+              terminal_step,
+              &terminal_message,
+              cdk_idx,
+              alias_idx,
+              total_cdks,
+              Some(result.clone()),
+            );
 
             if result.success {
               let sc = success_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2034,7 +2912,7 @@ impl RegistrationEngine {
                         if self.is_cancelled() {
                           break;
                         }
-                        sleep(std::time::Duration::from_secs(3)).await;
+                        self.human_pause(2500, 3500).await;
                         if let Ok(ip) = crate::ip_utils::fetch_public_ip(None).await {
                           new_ip = ip;
                           if !new_ip.is_empty() && new_ip != old_ip {
@@ -2368,6 +3246,13 @@ impl RegistrationEngine {
     );
     session.navigate("https://chatgpt.com/", 30).await?;
 
+    // Humanize: explore the homepage briefly (scroll, idle) before proceeding
+    self.human_pause(1200, 2800).await;
+    let _ = session.evaluate("window.scrollBy(0, 300)", false).await;
+    self.human_pause(800, 1500).await;
+    let _ = session.evaluate("window.scrollBy(0, -150)", false).await;
+    self.human_pause(600, 1200).await;
+
     // Step 5: CSRF token
     self.emit(
       app_handle,
@@ -2503,8 +3388,7 @@ impl RegistrationEngine {
               self.log(&format!(
                 "{prefix} Password form missing on {cur_url}; refreshing authorize then force-register"
               ));
-              let auth_url = self.create_authorize_url(session, alias_email).await?;
-              session.navigate(&auth_url, 30).await?;
+              self.navigate_to_signup_page(session, alias_email).await?;
               self.human_pause(1200, 2000).await;
               if let Err(e) = self.advance_auth_ui_to_password(session, alias_email).await {
                 self.log(&format!("{prefix} advance_auth_ui after refresh: {e}"));
@@ -2524,10 +3408,10 @@ impl RegistrationEngine {
                   "{prefix} Password submitted via UI after authorize refresh"
                 ));
               } else {
-                let reg = self
+                self
                   .force_api_register(session, alias_email, password)
                   .await?;
-                self.log(&format!("{prefix} Force-register response: {reg}"));
+                self.log(&format!("{prefix} Force-register request accepted"));
               }
             }
           } else {
@@ -2537,13 +3421,13 @@ impl RegistrationEngine {
               }
               Err(ui_err) => {
                 self.log(&format!("{prefix} UI password submit failed: {ui_err}"));
-                let reg = self
+                self
                   .force_api_register(session, alias_email, password)
                   .await
                   .map_err(|api_err| {
                     format!("UI password failed ({ui_err}); API register failed: {api_err}")
                   })?;
-                self.log(&format!("{prefix} Register response: {reg}"));
+                self.log(&format!("{prefix} Register request accepted"));
               }
             }
           }
@@ -2558,12 +3442,27 @@ impl RegistrationEngine {
             total_cdks,
             None,
           );
-          let otp_send = format!(
-            "fetch('https://auth.openai.com/api/accounts/email-otp/send', {{ method: 'POST', credentials: 'include', headers: {{ accept: 'application/json', 'content-type': 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{}}) }})",
-            did = self.device_id,
-          );
-          let otp_send_resp = session.fetch_json(&otp_send).await?;
-          self.log(&format!("{prefix} OTP send response: {otp_send_resp}"));
+          // Try UI-first OTP send: click "Send code" / "Continue" button on page.
+          let mut otp_sent_via_ui = false;
+          for label in ["Send code", "Continue", "Send verification", "Next"] {
+            if self
+              .click_by_text(session, label, "button, [role='button']")
+              .await
+              .is_ok()
+            {
+              self.log(&format!("{prefix} OTP send via UI click: '{label}'"));
+              otp_sent_via_ui = true;
+              break;
+            }
+          }
+          if !otp_sent_via_ui {
+            let otp_send = format!(
+              "fetch('https://auth.openai.com/api/accounts/email-otp/send', {{ method: 'POST', credentials: 'include', headers: {{ accept: 'application/json', 'content-type': 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{}}) }})",
+              did = self.device_id,
+            );
+            session.fetch_json(&otp_send).await?;
+            self.log(&format!("{prefix} OTP send via API accepted"));
+          }
 
           // After password submit, settle on current URL (usually email-verification).
           self.human_pause(1200, 2400).await;
@@ -2617,12 +3516,12 @@ impl RegistrationEngine {
             let otp = match email_service.poll_verification_code(cdk, poll_secs) {
               Ok(c) => c,
               Err(e) => {
-                last_otp_err = format!("OTP poll: {e}");
+                last_otp_err = format!("OTP poll: {}", safe_email_service_error(&e));
                 self.log(&format!("{prefix} {last_otp_err}"));
                 break;
               }
             };
-            self.log(&format!("{prefix} OTP (attempt {otp_attempt}/3): {otp}"));
+            self.log(&format!("{prefix} OTP received (attempt {otp_attempt}/3)"));
             // Always mark attempted — even before validate — so a failed 401 cannot
             // re-use the same mailbox code on the next poll.
             email_service.mark_verification_code_used(cdk, &otp);
@@ -2645,85 +3544,109 @@ impl RegistrationEngine {
               self.human_pause(800, 1500).await;
             }
 
-            let verify_js = format!(
-              "fetch('https://auth.openai.com/api/accounts/email-otp/validate', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ code: '{otp}' }}) }})",
-              did = self.device_id,
-            );
-            let verify = session.fetch_json(&verify_js).await?;
-            let vs = verify["_status"].as_u64().unwrap_or(200);
-            if vs == 200 && verify.get("error").is_none() {
-              cur_url = verify["continue_url"]
-                .as_str()
-                .unwrap_or("https://auth.openai.com/about-you")
-                .to_string();
-              self.log(&format!(
-                "{prefix} OTP verified (attempt {otp_attempt}/3) → {cur_url}"
-              ));
-              otp_ok = true;
-              break;
-            }
-
-            let body = verify
-              .get("_body")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-            last_otp_err = format!("OTP verify HTTP {vs}: {body} | {verify}");
-            self.log(&format!("{prefix} {last_otp_err}"));
-
-            // 401 / wrong code → stale or not-yet-bound OTP: full page refresh + re-send
-            // so OpenAI issues a *new* code; mailbox poll skips used codes.
-            let is_stale = vs == 401
-              || body.to_ascii_lowercase().contains("wrong")
-              || body.to_ascii_lowercase().contains("invalid")
-              || body.to_ascii_lowercase().contains("unauthorized")
-              || verify
-                .get("error")
-                .map(|e| e.to_string().to_ascii_lowercase())
-                .is_some_and(|s| s.contains("invalid") || s.contains("unauthorized"));
-
-            if !is_stale || otp_attempt == 3 {
-              break;
-            }
-
-            self.log(&format!(
-              "{prefix} OTP rejected (likely stale/unsent binding); refresh page + re-send for new code"
-            ));
-            // Full page reload to rebind auth session cookies to the OTP challenge.
-            let _ = session
-              .navigate("https://auth.openai.com/email-verification", 25)
-              .await;
-            self.human_pause(1200, 2200).await;
-
-            // Prefer UI "Resend email" then API send as backup.
-            let mut resent = false;
-            for label in ["Resend email", "Resend", "Send code again", "Resend code"] {
-              if self
-                .click_by_text(session, label, "button, a, [role='button']")
-                .await
-                .is_ok()
-              {
-                self.log(&format!("{prefix} Clicked resend control: {label}"));
-                resent = true;
-                break;
-              }
-            }
-            let otp_send = format!(
-              "fetch('https://auth.openai.com/api/accounts/email-otp/send', {{ method: 'POST', credentials: 'include', headers: {{ accept: 'application/json', 'content-type': 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{}}) }})",
-              did = self.device_id,
-            );
-            match session.fetch_json(&otp_send).await {
-              Ok(resp) => {
+            // Try UI-first OTP validation (type code into form fields).
+            // Falls back to direct API call if UI inputs not found or UI fails.
+            let mut ui_verified = false;
+            match self.try_ui_email_otp(session, &otp).await {
+              Ok(Some(continue_url)) => {
+                cur_url = continue_url;
                 self.log(&format!(
-                  "{prefix} OTP re-send response (ui_resend={resent}): {resp}"
+                  "{prefix} OTP verified via UI (attempt {otp_attempt}/3) → {cur_url}"
+                ));
+                otp_ok = true;
+                ui_verified = true;
+              }
+              Ok(None) => {
+                self.log(&format!(
+                  "{prefix} UI OTP not available, falling back to API validation"
                 ));
               }
               Err(e) => {
-                self.log(&format!("{prefix} OTP re-send API failed: {e}"));
+                self.log(&format!("{prefix} UI OTP error: {e}, falling back to API"));
               }
             }
-            // Give the mailbox time to receive the *new* message before polling.
-            self.human_pause(2500, 4500).await;
+
+            if !ui_verified {
+              let verify_js = format!(
+              "fetch('https://auth.openai.com/api/accounts/email-otp/validate', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ code: '{otp}' }}) }})",
+              did = self.device_id,
+            );
+              let verify = session.fetch_json(&verify_js).await?;
+              let vs = verify["_status"].as_u64().unwrap_or(200);
+              if vs == 200 && verify.get("error").is_none() {
+                cur_url = verify["continue_url"]
+                  .as_str()
+                  .unwrap_or("https://auth.openai.com/about-you")
+                  .to_string();
+                self.log(&format!(
+                  "{prefix} OTP verified via API (attempt {otp_attempt}/3) → {cur_url}"
+                ));
+                otp_ok = true;
+                break;
+              }
+
+              let body = verify
+                .get("_body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+              last_otp_err = format!("OTP verification rejected with HTTP {vs}");
+              self.log(&format!("{prefix} {last_otp_err}"));
+
+              // 401 / wrong code → stale or not-yet-bound OTP: full page refresh + re-send
+              // so OpenAI issues a *new* code; mailbox poll skips used codes.
+              let is_stale = vs == 401
+                || body.to_ascii_lowercase().contains("wrong")
+                || body.to_ascii_lowercase().contains("invalid")
+                || body.to_ascii_lowercase().contains("unauthorized")
+                || verify
+                  .get("error")
+                  .map(|e| e.to_string().to_ascii_lowercase())
+                  .is_some_and(|s| s.contains("invalid") || s.contains("unauthorized"));
+
+              if !is_stale || otp_attempt == 3 {
+                break;
+              }
+
+              self.log(&format!(
+              "{prefix} OTP rejected (likely stale/unsent binding); refresh page + re-send for new code"
+            ));
+              // Full page reload to rebind auth session cookies to the OTP challenge.
+              let _ = session
+                .navigate("https://auth.openai.com/email-verification", 25)
+                .await;
+              self.human_pause(1200, 2200).await;
+
+              // Prefer UI "Resend email" then API send as backup.
+              let mut resent = false;
+              for label in ["Resend email", "Resend", "Send code again", "Resend code"] {
+                if self
+                  .click_by_text(session, label, "button, a, [role='button']")
+                  .await
+                  .is_ok()
+                {
+                  self.log(&format!("{prefix} Clicked resend control: {label}"));
+                  resent = true;
+                  break;
+                }
+              }
+              let otp_send = format!(
+              "fetch('https://auth.openai.com/api/accounts/email-otp/send', {{ method: 'POST', credentials: 'include', headers: {{ accept: 'application/json', 'content-type': 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{}}) }})",
+              did = self.device_id,
+            );
+              match session.fetch_json(&otp_send).await {
+                Ok(_response) => {
+                  self.log(&format!(
+                    "{prefix} OTP re-send API accepted (ui_resend={resent})"
+                  ));
+                }
+                Err(e) => {
+                  self.log(&format!("{prefix} OTP re-send API failed: {e}"));
+                }
+              }
+              // Give the mailbox time to receive the *new* message before polling.
+              self.human_pause(2500, 4500).await;
+            } // end if !ui_verified
           }
 
           if !otp_ok {
@@ -2750,31 +3673,14 @@ impl RegistrationEngine {
             None,
           );
 
-          let sentinel = build_sentinel_token(&self.device_id, "authorize_continue").await;
-          let sentinel_header = sentinel
-            .as_ref()
-            .map(|s| format!("'openai-sentinel-token': '{s}', "))
-            .unwrap_or_default();
-
-          let create_js = format!(
-            "fetch('https://auth.openai.com/api/accounts/create_account', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', {sentinel}'oai-device-id': '{did}' }}, body: JSON.stringify({{ name: '{first} {last}', birthdate: '{birth}' }}) }})",
-            sentinel = sentinel_header, did = self.device_id, first = first_name, last = last_name, birth = birthdate,
-          );
-          let create = session.fetch_json(&create_js).await?;
-          self.log(&format!("{prefix} create_account response: {create}"));
-          let cs = create["_status"].as_u64().unwrap_or(200);
-          if cs != 200 {
-            let body = create["_body"].as_str().unwrap_or("");
-            return Err(format!("Create account HTTP {cs}: {create} {body}"));
-          }
+          // About You must be completed through the visible form. Falling back
+          // to create_account API skips the same human signals this page asks for.
+          self
+            .submit_about_you_via_ui(session, first_name, last_name, birthdate)
+            .await
+            .map_err(|e| format!("About You UI submit failed: {e}"))?;
           account_created = true;
-          self.log(&format!("{prefix} Account created"));
-
-          if let Some(next) = create["continue_url"].as_str() {
-            if !next.is_empty() {
-              session.navigate(next, 30).await?;
-            }
-          }
+          self.log(&format!("{prefix} Account created via UI form"));
           cur_url = session.current_url().await.unwrap_or_default();
           continue;
         }
@@ -2810,7 +3716,7 @@ impl RegistrationEngine {
           };
           let number_info = sms
             .request_number(&request)
-            .map_err(|e| format!("SMS rent number: {e}"))?;
+            .map_err(|error| format!("SMS rent number: {}", safe_sms_service_error(&error)))?;
           phone_number_used = number_info.phone_number.clone();
           self.log(&format!(
             "{prefix} SMS number: {} (request_id={})",
@@ -2839,7 +3745,7 @@ impl RegistrationEngine {
           if !filled {
             return Err("Could not find phone input on add-phone page".into());
           }
-          sleep(std::time::Duration::from_millis(400)).await;
+          self.human_pause(350, 450).await;
 
           let mut submitted = false;
           for sel in [
@@ -2873,12 +3779,12 @@ impl RegistrationEngine {
           );
           let otp_info = sms
             .get_otp(&number_info.request_id, 150)
-            .map_err(|e| format!("SMS OTP poll: {e}"))?;
+            .map_err(|error| format!("SMS OTP poll: {}", safe_sms_service_error(&error)))?;
           let sms_code = otp_info
             .code
             .filter(|c| !c.is_empty())
             .ok_or_else(|| "SMS OTP completed without code".to_string())?;
-          self.log(&format!("{prefix} SMS OTP: {sms_code}"));
+          self.log(&format!("{prefix} SMS OTP received"));
 
           self.emit(
             app_handle,
@@ -2930,8 +3836,7 @@ impl RegistrationEngine {
             let verify = session.fetch_json(&verify_js).await?;
             let vs = verify["_status"].as_u64().unwrap_or(200);
             if vs != 200 {
-              let body = verify["_body"].as_str().unwrap_or("");
-              return Err(format!("SMS OTP verify HTTP {vs}: {body}"));
+              return Err(format!("SMS OTP verification failed with HTTP {vs}"));
             }
             if let Some(next) = verify["continue_url"].as_str() {
               if !next.is_empty() {
@@ -2940,7 +3845,7 @@ impl RegistrationEngine {
             }
           }
 
-          sleep(std::time::Duration::from_secs(2)).await;
+          self.human_pause(1800, 2200).await;
           cur_url = session.current_url().await.unwrap_or_default();
           continue;
         }
@@ -2975,7 +3880,7 @@ impl RegistrationEngine {
     let (access_token, account_id) = self.extract_access_token_with_retry(session, prefix).await;
 
     self.log(&format!(
-      "{prefix} accessToken obtained={}, account={account_id}",
+      "{prefix} access token obtained={}",
       !access_token.is_empty()
     ));
     if access_token.is_empty() && !account_created {
@@ -3025,16 +3930,16 @@ impl RegistrationEngine {
         note: "free_trial_no".into(),
         exported_at: None,
         sold_at: None,
+        email_provider: Some(self.config.email_provider),
+        email_provider_provenance: Some(EmailProviderProvenance::RegistrationConfig),
+        registration_outcome_reason: Some(RegistrationOutcomeReason::FreeTrialNo),
+        two_factor_backfill_access_state: Some(TwoFactorBackfillAccessState::Accessible),
+        two_factor_backfill_exclusion: None,
+        two_factor_backfill_state: None,
+        two_factor_backfill_outcome: None,
+        two_factor_backfill_operation_id: None,
+        record_revision: 1,
       };
-      self.emit(
-        app_handle,
-        RegistrationStep::Failed,
-        &format!("{prefix} {err}"),
-        cdk_idx,
-        alias_idx,
-        total_cdks,
-        Some(result.clone()),
-      );
       return Ok(result);
     }
 
@@ -3123,29 +4028,17 @@ impl RegistrationEngine {
       note: String::new(),
       exported_at: None,
       sold_at: None,
+      email_provider: Some(self.config.email_provider),
+      email_provider_provenance: Some(EmailProviderProvenance::RegistrationConfig),
+      registration_outcome_reason: Some(RegistrationOutcomeReason::Registered),
+      two_factor_backfill_access_state: Some(TwoFactorBackfillAccessState::Accessible),
+      two_factor_backfill_exclusion: None,
+      two_factor_backfill_state: None,
+      two_factor_backfill_outcome: None,
+      two_factor_backfill_operation_id: None,
+      record_revision: 1,
     };
 
-    self.emit(
-      app_handle,
-      RegistrationStep::Completed,
-      &format!(
-        "{prefix} Done! free-trial{}{}",
-        if plan_type.is_empty() {
-          String::new()
-        } else {
-          format!(" [{plan_type}]")
-        },
-        if two_fa_enabled {
-          " (2FA on)"
-        } else {
-          " (2FA skipped)"
-        }
-      ),
-      cdk_idx,
-      alias_idx,
-      total_cdks,
-      Some(result.clone()),
-    );
     Ok(result)
   }
 
@@ -3194,7 +4087,7 @@ impl RegistrationEngine {
           .is_ok()
         {
           advanced = true;
-          sleep(std::time::Duration::from_secs(1)).await;
+          self.human_pause(800, 1200).await;
           break;
         }
       }
@@ -3207,27 +4100,20 @@ impl RegistrationEngine {
             "choose-an-account action",
           )
           .await;
-        sleep(std::time::Duration::from_secs(1)).await;
+        self.human_pause(800, 1200).await;
       }
       url = session.current_url().await.unwrap_or_default();
       self.log(&format!("After choose-an-account action URL: {url}"));
     }
 
-    if self
-      .page_has_selector(
-        session,
-        r#"input#email, input[name="email"], input[type="email"], input[autocomplete*="email"]"#,
-      )
-      .await
-    {
-      self
-        .fill_input(
-          session,
-          r#"input#email, input[name="email"], input[type="email"], input[autocomplete*="email"]"#,
-          email,
-        )
-        .await?;
-      sleep(std::time::Duration::from_millis(400)).await;
+    let email_selectors =
+      r#"input#email, input[name="email"], input[type="email"], input[autocomplete*="email"]"#;
+    let email_visible = self.page_has_selector(session, email_selectors).await;
+
+    if email_visible {
+      // Fill email on this page (when email wasn't already entered via dialog).
+      self.fill_input(session, email_selectors, email).await?;
+      self.human_pause(350, 450).await;
 
       let mut clicked = false;
       for sel in [
@@ -3247,16 +4133,38 @@ impl RegistrationEngine {
       if !clicked {
         let _ = self.click_by_text(session, "Continue", "button").await;
       }
+    }
 
-      // After submitting email, OpenAI's log-in-or-create-account page often
-      // shows a method picker (e.g. "Continue with password", "Continue with
-      // email") rather than the password form directly. Click the password
-      // option so the password form appears; otherwise the page auto-advances
-      // to email-verification and the downstream register API fails with
-      // `invalid_auth_step`.
-      for _ in 0..30 {
-        sleep(std::time::Duration::from_millis(500)).await;
-        url = session.current_url().await.unwrap_or_default();
+    // After submitting email (or if email was already entered via dialog),
+    // wait for the password form to appear. OpenAI may show a method picker
+    // ("Continue with password") before the password form.
+    for _ in 0..30 {
+      self.human_pause(450, 550).await;
+      url = session.current_url().await.unwrap_or_default();
+      if self
+        .page_has_selector(
+          session,
+          r#"input[name="new-password"], input[type="password"]"#,
+        )
+        .await
+      {
+        self.log(&format!("Password field appeared at {url}"));
+        return Ok(());
+      }
+      // Click "password" method option if the method picker is visible.
+      if self
+        .click_by_text(
+          session,
+          "password",
+          "button, a, [role='button'], div[role='button']",
+        )
+        .await
+        .is_ok()
+      {
+        self.log(&format!(
+          "Clicked 'password' method option at {url}; waiting for password form"
+        ));
+        self.human_pause(750, 850).await;
         if self
           .page_has_selector(
             session,
@@ -3264,38 +4172,15 @@ impl RegistrationEngine {
           )
           .await
         {
-          self.log(&format!("Password field appeared at {url}"));
+          let url_now = session.current_url().await.unwrap_or_default();
+          self.log(&format!("Password field appeared after click at {url_now}"));
           return Ok(());
         }
-        if self
-          .click_by_text(
-            session,
-            "password",
-            "button, a, [role='button'], div[role='button']",
-          )
-          .await
-          .is_ok()
-        {
-          self.log(&format!(
-            "Clicked 'password' method option at {url}; waiting for password form"
-          ));
-          sleep(std::time::Duration::from_millis(800)).await;
-          if self
-            .page_has_selector(
-              session,
-              r#"input[name="new-password"], input[type="password"]"#,
-            )
-            .await
-          {
-            let url_now = session.current_url().await.unwrap_or_default();
-            self.log(&format!("Password field appeared after click at {url_now}"));
-            return Ok(());
-          }
-        }
-        if url.contains("email-verification") || url.contains("about-you") {
-          self.log(&format!("Auth advanced to {url} without password field"));
-          return Ok(());
-        }
+      }
+      // Accept email-verification / about-you as valid outcomes (no password needed).
+      if url.contains("email-verification") || url.contains("about-you") {
+        self.log(&format!("Auth advanced to {url} without password field"));
+        return Ok(());
       }
     }
 
@@ -3334,12 +4219,653 @@ impl RegistrationEngine {
     sleep(jitter_ms(min_ms, max_ms)).await;
   }
 
+  /// Try to validate email OTP via UI form inputs instead of direct API call.
+  /// Returns Ok(Some(continue_url)) if UI succeeded, Ok(None) if UI not available,
+  /// Err if UI was attempted but failed.
+  async fn try_ui_email_otp(
+    &mut self,
+    session: &mut BrowserSession,
+    otp_code: &str,
+  ) -> Result<Option<String>, String> {
+    // Detect OTP input fields on the page.
+    let detect_js = r#"(function(){
+      // Pattern 1: Multiple single-digit inputs (common OTP pattern)
+      const singleDigitInputs = Array.from(document.querySelectorAll(
+        'input[maxlength="1"], input[data-index], input[type="tel"][maxlength="1"]'
+      ));
+      if (singleDigitInputs.length >= 4) {
+        return { found: true, mode: 'multi', count: singleDigitInputs.length,
+          selectors: singleDigitInputs.map((el, i) => {
+            const sel = el.id ? '#' + el.id :
+              el.name ? 'input[name="' + el.name + '"]' :
+              'input[data-index="' + i + '"]';
+            return sel;
+          })
+        };
+      }
+      // Pattern 2: Single code input
+      const codeInput = document.querySelector(
+        'input[name="code"], input[name="otp"], input[name="emailCode"], ' +
+        'input[autocomplete="one-time-code"], input[inputmode="numeric"][maxlength], ' +
+        'input[type="tel"][maxlength]'
+      );
+      if (codeInput) {
+        const sel = codeInput.id ? '#' + codeInput.id :
+          codeInput.name ? 'input[name="' + codeInput.name + '"]' :
+          'input[inputmode="numeric"]';
+        return { found: true, mode: 'single', selector: sel };
+      }
+      return { found: false };
+    })()"#;
+
+    let detect_result = match session.evaluate(detect_js, false).await {
+      Ok(r) => r.get("value").cloned().unwrap_or_default(),
+      Err(_) => return Ok(None),
+    };
+
+    if detect_result["found"].as_bool() != Some(true) {
+      return Ok(None); // No OTP inputs found — caller falls back to API
+    }
+
+    self.log("UI OTP: found input fields, attempting humanized entry");
+
+    let mode = detect_result["mode"].as_str().unwrap_or("single");
+
+    if mode == "multi" {
+      // Type each digit into its own input field
+      let digits: Vec<char> = otp_code.chars().filter(|c| c.is_ascii_digit()).collect();
+      let count = detect_result["count"].as_u64().unwrap_or(6) as usize;
+
+      for (i, &digit) in digits.iter().enumerate().take(count) {
+        let selector = detect_result["selectors"]
+          .get(i)
+          .and_then(|v| v.as_str())
+          .unwrap_or("input[maxlength=\"1\"]");
+        let digit_str = digit.to_string();
+
+        // Click into the input first (human-like)
+        let _ = self.click_selector(session, selector, "otp-digit").await;
+        self.human_pause(80, 200).await;
+
+        // Type the digit
+        if session
+          .human_type(
+            selector,
+            &digit_str,
+            &crate::browser_actions::HumanProfile::form_fill(),
+          )
+          .await
+          .is_err()
+        {
+          self.log(&format!(
+            "UI OTP: failed to type digit {i}, aborting UI path"
+          ));
+          return Ok(None);
+        }
+        self.human_pause(100, 300).await;
+      }
+    } else {
+      // Single input field — type the full code
+      let selector = detect_result["selector"]
+        .as_str()
+        .unwrap_or("input[name=\"code\"]");
+
+      let _ = self.click_selector(session, selector, "otp-input").await;
+      self.human_pause(100, 250).await;
+
+      if session
+        .human_type(
+          selector,
+          otp_code,
+          &crate::browser_actions::HumanProfile::form_fill(),
+        )
+        .await
+        .is_err()
+      {
+        self.log("UI OTP: failed to type code, aborting UI path");
+        return Ok(None);
+      }
+    }
+
+    // Wait for auto-submit or click submit button
+    self.human_pause(1500, 3000).await;
+
+    // Check if page navigated (auto-submit worked)
+    let new_url = session.current_url().await.unwrap_or_default();
+    if !new_url.contains("email-verification") && !new_url.contains("email-otp") {
+      self.log(&format!("UI OTP: auto-submitted → {new_url}"));
+      return Ok(Some(new_url));
+    }
+
+    // Try clicking submit button
+    for label in ["Continue", "Verify", "Submit", "Next", "Confirm"] {
+      if self
+        .click_by_text(session, label, "button, [role='button']")
+        .await
+        .is_ok()
+      {
+        self.human_pause(1500, 3000).await;
+        let after_url = session.current_url().await.unwrap_or_default();
+        if !after_url.contains("email-verification") && !after_url.contains("email-otp") {
+          self.log(&format!("UI OTP: submitted via '{label}' → {after_url}"));
+          return Ok(Some(after_url));
+        }
+        break;
+      }
+    }
+
+    // UI didn't navigate — fall back to API
+    self.log("UI OTP: no navigation detected, falling back to API");
+    Ok(None)
+  }
+
+  /// Fill and submit the About You form through the visible UI.
+  async fn submit_about_you_via_ui(
+    &mut self,
+    session: &mut BrowserSession,
+    first_name: &str,
+    last_name: &str,
+    birthdate: &str,
+  ) -> Result<(), String> {
+    let detect_js = r#"(function(){
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const pick = (selectors) => {
+        for (const selector of selectors) {
+          const el = Array.from(document.querySelectorAll(selector)).find(visible);
+          if (el) return el;
+        }
+        return null;
+      };
+      const selectorFor = (el, fallback) => {
+        if (!el) return null;
+        if (el.id) return '#' + CSS.escape(el.id);
+        if (el.name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
+        return fallback;
+      };
+      const first = pick([
+        'input[name="first_name"]', 'input[name="firstName"]', 'input[name="given_name"]',
+        'input[autocomplete="given-name"]', 'input[id*="first" i]', 'input[placeholder*="First" i]',
+        'input[aria-label*="First" i]'
+      ]);
+      const last = pick([
+        'input[name="last_name"]', 'input[name="lastName"]', 'input[name="family_name"]',
+        'input[autocomplete="family-name"]', 'input[id*="last" i]', 'input[placeholder*="Last" i]',
+        'input[aria-label*="Last" i]'
+      ]);
+      const full = pick([
+        'input[name="name"]', 'input[name="full_name"]', 'input[name="fullName"]',
+        'input[autocomplete="name"]', 'input[id*="name" i]', 'input[placeholder*="Name" i]',
+        'input[aria-label*="Name" i]'
+      ]);
+      const age = pick([
+        'input[name="age"]', 'input[autocomplete="age"]', 'input[id*="age" i]',
+        'input[placeholder*="Age" i]', 'input[aria-label*="Age" i]',
+        'input[type="number"][min][max]'
+      ]);
+      const birth = pick([
+        'input:not([type="hidden"])[name="birthdate"]',
+        'input:not([type="hidden"])[name="birthday"]',
+        'input:not([type="hidden"])[name="date_of_birth"]',
+        'input:not([type="hidden"])[name="birth_date"]',
+        'input:not([type="hidden"])[autocomplete="bday"]',
+        'input:not([type="hidden"])[id*="birth" i]',
+        'input:not([type="hidden"])[placeholder*="Birth" i]',
+        'input:not([type="hidden"])[aria-label*="Birth" i]',
+        'input[type="date"]'
+      ]);
+      const month = pick([
+        'input[name="birth_month"]', 'input[name="month"]', 'input[autocomplete="bday-month"]',
+        'select[name="birth_month"]', 'select[name="month"]', 'input[id*="month" i]', 'select[id*="month" i]'
+      ]);
+      const day = pick([
+        'input[name="birth_day"]', 'input[name="day"]', 'input[autocomplete="bday-day"]',
+        'select[name="birth_day"]', 'select[name="day"]', 'input[id*="day" i]', 'select[id*="day" i]'
+      ]);
+      const year = pick([
+        'input[name="birth_year"]', 'input[name="year"]', 'input[autocomplete="bday-year"]',
+        'select[name="birth_year"]', 'select[name="year"]', 'input[id*="year" i]', 'select[id*="year" i]'
+      ]);
+      const birthFormat = birth && birth.type === 'date' ? 'iso'
+        : birth && /dd\s*[\/-]\s*mm|day.*month/i.test([birth.placeholder, birth.getAttribute('aria-label')].filter(Boolean).join(' ')) ? 'dmy'
+        : birth && /mm\s*[\/-]\s*dd|month.*day/i.test([birth.placeholder, birth.getAttribute('aria-label')].filter(Boolean).join(' ')) ? 'mdy'
+        : 'iso';
+      return {
+        firstSel: selectorFor(first, 'input[placeholder*="First" i]'),
+        lastSel: selectorFor(last, 'input[placeholder*="Last" i]'),
+        fullSel: selectorFor(full, 'input[autocomplete="name"]'),
+        ageSel: selectorFor(age, 'input[name="age"]'),
+        birthSel: selectorFor(birth, 'input[type="date"]'),
+        birthFormat,
+        monthSel: selectorFor(month, 'input[name="month"], select[name="month"]'),
+        daySel: selectorFor(day, 'input[name="day"], select[name="day"]'),
+        yearSel: selectorFor(year, 'input[name="year"], select[name="year"]')
+      };
+    })()"#;
+
+    // The About You page is React-rendered: after the OTP succeed step the
+    // visit can land on the about-you path before the form fields are painted.
+    // Evaluate the detector up to 12 times with 1-2s spacing. React's router
+    // sometimes briefly renders email-verification between re-renders — we
+    // only bail when the URL has been off about-you for 3 consecutive loops.
+    let mut detect: Option<serde_json::Value> = None;
+    let mut off_about_you = 0_u32;
+    for attempt in 1..=12_u32 {
+      // Tiered wait: quick polls early (form renders in 2-4s), slower fallback
+      // if the page is genuinely slow. Keeps the same total attempt count for
+      // reliability but cuts typical detection time from ~10s to ~2s.
+      let (min_ms, max_ms) = if attempt <= 4 {
+        (150, 300)
+      } else if attempt <= 8 {
+        (350, 700)
+      } else {
+        (700, 1400)
+      };
+      self.human_pause(min_ms, max_ms).await;
+      let cur_url = session.current_url().await.unwrap_or_default();
+      if !cur_url.contains("about-you") {
+        off_about_you += 1;
+        self.log(&format!(
+          "UI About You: not on about-you page on attempt {attempt}/12 (url={cur_url})"
+        ));
+        if off_about_you >= 3 {
+          return Err(format!("left about-you before form detection: {cur_url}"));
+        }
+        continue;
+      }
+      off_about_you = 0;
+      match session.evaluate(detect_js, false).await {
+        Ok(res) => {
+          if let Some(value) = res.get("value").cloned() {
+            let has_name = value
+              .get("firstSel")
+              .and_then(serde_json::Value::as_str)
+              .is_some()
+              || value
+                .get("fullSel")
+                .and_then(serde_json::Value::as_str)
+                .is_some();
+            let has_birth = value
+              .get("ageSel")
+              .and_then(serde_json::Value::as_str)
+              .is_some()
+              || value
+                .get("birthSel")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+              || (value
+                .get("monthSel")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && value
+                  .get("daySel")
+                  .and_then(serde_json::Value::as_str)
+                  .is_some()
+                && value
+                  .get("yearSel")
+                  .and_then(serde_json::Value::as_str)
+                  .is_some());
+            if has_name && has_birth {
+              detect = Some(value);
+              self.log(&format!(
+                "UI About You: form detected on attempt {attempt}/12"
+              ));
+              break;
+            }
+          }
+          self.log(&format!(
+            "UI About You: form fields incomplete on attempt {attempt}/12"
+          ));
+        }
+        Err(e) => self.log(&format!(
+          "UI About You: detect evaluate failed on attempt {attempt}: {e}"
+        )),
+      }
+    }
+    let detect =
+      detect.ok_or_else(|| "About You form fields not detected after 12 retries".to_string())?;
+
+    let first_sel = detect["firstSel"].as_str();
+    let last_sel = detect["lastSel"].as_str();
+    let full_sel = detect["fullSel"].as_str();
+    let age_sel = detect["ageSel"].as_str();
+    let birth_sel = detect["birthSel"].as_str();
+    let birth_format = detect["birthFormat"].as_str().unwrap_or("iso");
+    let month_sel = detect["monthSel"].as_str();
+    let day_sel = detect["daySel"].as_str();
+    let year_sel = detect["yearSel"].as_str();
+
+    if first_sel.is_none() && full_sel.is_none() {
+      snapshot_about_you_page(session, "detect-name-missing").await;
+      return Err("name input not found on About You form".into());
+    }
+    if first_sel.is_some() && last_sel.is_none() {
+      snapshot_about_you_page(session, "detect-last-missing").await;
+      return Err("last name input not found on About You form".into());
+    }
+    let birth_mode = resolve_about_you_birth_mode(
+      age_sel.is_some(),
+      birth_sel.is_some(),
+      month_sel.is_some() && day_sel.is_some() && year_sel.is_some(),
+    );
+    if birth_mode.is_none() {
+      snapshot_about_you_page(session, "detect-birth-missing").await;
+      return Err("age or birthdate inputs not found on About You form".into());
+    }
+    let birth_mode = birth_mode.unwrap();
+    let (year, month, day, age) = birthdate_parts(birthdate)?;
+    let single_birthdate = match birth_format {
+      "dmy" => format!("{day}/{month}/{year}"),
+      "mdy" => format!("{month}/{day}/{year}"),
+      _ => birthdate.to_string(),
+    };
+    let mut expected_fields = Vec::new();
+
+    self.log("UI About You: found form fields, attempting humanized fill");
+    let _ = session.evaluate("window.scrollBy(0, 150)", false).await;
+    self.human_pause(600, 1200).await;
+
+    if let (Some(first_sel), Some(last_sel)) = (first_sel, last_sel) {
+      self
+        .fill_about_you_field(session, first_sel, first_name, "first name")
+        .await?;
+      expected_fields.push((first_sel.to_string(), first_name.to_string(), "first name"));
+      self.human_pause(400, 900).await;
+
+      self
+        .fill_about_you_field(session, last_sel, last_name, "last name")
+        .await?;
+      expected_fields.push((last_sel.to_string(), last_name.to_string(), "last name"));
+      self.human_pause(400, 900).await;
+    } else if let Some(full_sel) = full_sel {
+      let full_name = format!("{first_name} {last_name}");
+      self
+        .fill_about_you_field(session, full_sel, &full_name, "full name")
+        .await?;
+      expected_fields.push((full_sel.to_string(), full_name, "full name"));
+      self.human_pause(400, 900).await;
+    }
+
+    match birth_mode {
+      AboutYouBirthMode::Age => {
+        let age_sel = age_sel.unwrap_or_default();
+        self
+          .fill_about_you_field(session, age_sel, &age, "age")
+          .await?;
+        expected_fields.push((age_sel.to_string(), age.clone(), "age"));
+      }
+      AboutYouBirthMode::SingleDate => {
+        let birth_sel = birth_sel.unwrap_or_default();
+        self
+          .fill_about_you_field(session, birth_sel, &single_birthdate, "birthdate")
+          .await?;
+        expected_fields.push((birth_sel.to_string(), single_birthdate.clone(), "birthdate"));
+      }
+      AboutYouBirthMode::SplitDate => {
+        for (selector, value, label) in [
+          (month_sel.unwrap_or_default(), month.as_str(), "birth month"),
+          (day_sel.unwrap_or_default(), day.as_str(), "birth day"),
+          (year_sel.unwrap_or_default(), year.as_str(), "birth year"),
+        ] {
+          self
+            .fill_about_you_field(session, selector, value, label)
+            .await?;
+          expected_fields.push((selector.to_string(), value.to_string(), label));
+          self.human_pause(250, 600).await;
+        }
+      }
+    }
+
+    self.human_pause(400, 700).await;
+    for (selector, expected, label) in expected_fields {
+      self
+        .verify_about_you_field(session, &selector, &expected, label)
+        .await?;
+    }
+
+    // React-controlled submit buttons re-enable only after their store observes
+    // the final input change. Wait up to 4s for the disabled state to clear
+    // before attempting a click; otherwise the click is a no-op and the page
+    // never advances (observed live: "Finish creating account" aria-disabled
+    // true even though all fields were filled).
+    let submit_ready_js = r#"(function(){
+      const btns = Array.from(document.querySelectorAll('button[type="submit"], button:not([type]), [role="button"]'))
+        .filter((el) => {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          if (el.disabled) return false;
+          if ((el.getAttribute('aria-disabled') || '') === 'true') return false;
+          const t = (el.innerText || el.textContent || '').toLowerCase();
+          return /finish|continue|create|submit|sign up|next/i.test(t);
+        });
+      return { ready: btns.length > 0, count: btns.length };
+    })()"#;
+    let mut submit_enabled = false;
+    for _ in 0..25 {
+      if let Ok(res) = session.evaluate(submit_ready_js, false).await {
+        let ready = res
+          .get("value")
+          .and_then(|v| v.get("ready"))
+          .and_then(serde_json::Value::as_bool)
+          == Some(true);
+        if ready {
+          submit_enabled = true;
+          break;
+        }
+      }
+      self.human_pause(100, 150).await;
+    }
+    let mut via_force = false;
+    if !submit_enabled {
+      self.log("UI About You: submit still disabled after 4s; forcing form.requestSubmit()");
+      eprintln!("UI About You: submit still disabled after 4s; forcing form.requestSubmit()");
+      // React's <form onSubmit> handler receives submit events even when the
+      // submit button is aria-disabled — the disabled state only affects the
+      // button, not the form. requestSubmit() queues a real submit event that
+      // goes through the same path as the button click. Form's `noValidate`
+      // option is honored; we let React handle server-side validation.
+      let force_js = r#"(function(){
+        const form = document.querySelector('form');
+        if (!form) return { ok: false, reason: 'no_form' };
+        // Re-validate React state by dispatching a focus+blur cycle on each
+        // visible input before submitting; this often clears stale disabled.
+        const visibleInputs = Array.from(document.querySelectorAll('input, select, textarea'))
+          .filter((el) => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          });
+        visibleInputs.forEach((el) => {
+          try { el.focus(); el.blur(); } catch (_) {}
+        });
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+          return { ok: true, via: 'requestSubmit' };
+        }
+        form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+        return { ok: true, via: 'dispatch' };
+      })()"#;
+      if let Ok(res) = session.evaluate(force_js, false).await {
+        let via = res
+          .get("value")
+          .and_then(|v| v.get("via"))
+          .and_then(serde_json::Value::as_str)
+          .unwrap_or("?");
+        let ok = res
+          .get("value")
+          .and_then(|v| v.get("ok"))
+          .and_then(serde_json::Value::as_bool)
+          == Some(true);
+        if ok {
+          self.log(&format!("UI About You: forced form submit via {via}"));
+          eprintln!("UI About You: forced form submit via {via}");
+          via_force = true;
+        }
+      }
+    }
+
+    let mut submitted = via_force;
+    if !submitted {
+      for label in [
+        "Continue",
+        "Submit",
+        "Create account",
+        "Finish creating account",
+        "Next",
+        "Sign up",
+      ] {
+        if self
+          .click_by_text(session, label, "button, [role='button']")
+          .await
+          .is_ok()
+        {
+          submitted = true;
+          self.log(&format!("UI About You: clicked '{label}'"));
+          break;
+        }
+      }
+    }
+    if !submitted {
+      self
+        .click_selector(session, "button[type='submit']", "about-you submit")
+        .await
+        .map_err(|e| format!("submit button not found: {e}"))?;
+    }
+
+    // Wait for page navigation after submit. The form has aria-busy="true"
+    // while processing, so we poll both URL and button state for up to 20s.
+    // Server-side validation can take 5-15s on auth.openai.com.
+    let mut final_url = String::new();
+    for attempt in 1..=20 {
+      self.human_pause(400, 700).await;
+      let cur_url = session.current_url().await.unwrap_or_default();
+      if !cur_url.contains("about-you") {
+        final_url = cur_url.clone();
+        self.log(&format!(
+          "UI About You: navigated to {cur_url} after {attempt} poll(s)"
+        ));
+        break;
+      }
+      // Still on about-you — check if button is still busy (processing)
+      // or if it has re-enabled (validation error).
+      let check_js = r#"(function(){
+        const btn = document.querySelector('button[type="submit"], button:not([type])');
+        if (!btn) return { busy: false, reason: 'no_button' };
+        const r = btn.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return { busy: false, reason: 'not_visible' };
+        const busy = btn.getAttribute('aria-busy') === 'true' || btn.disabled;
+        return { busy, reason: 'checking' };
+      })()"#;
+      if let Ok(res) = session.evaluate(check_js, false).await {
+        let busy = res
+          .get("value")
+          .and_then(|v| v.get("busy"))
+          .and_then(serde_json::Value::as_bool)
+          == Some(true);
+        if busy && attempt < 20 {
+          self.log(&format!(
+            "UI About You: form still processing on attempt {attempt}/20"
+          ));
+          continue;
+        }
+      }
+      if attempt == 20 {
+        final_url = cur_url.clone();
+        self.log(&format!(
+          "UI About You: timeout after 20 polls, still on {cur_url}"
+        ));
+      }
+    }
+    if final_url.contains("about-you") {
+      // Diagnostics (no secrets): dump the About You DOM state so the operator
+      // can see why submit did not advance the page — visible vs disabled
+      // submit buttons, the form's current field values, and any inline error
+      // text. This is the only evidence we get without a step-log surfacing.
+      let snap_js = r#"(function(){
+        const form = document.querySelector('form') || document.body;
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const inputs = Array.from(document.querySelectorAll('input, select, textarea'))
+          .filter(visible)
+          .map((el) => ({
+            name: el.name || el.id || el.getAttribute('aria-label') || '',
+            value: String(el.value || '').length > 30
+              ? String(el.value || '').slice(0, 30) + '...'
+              : String(el.value || ''),
+            kind: el.tagName.toLowerCase() + (el.type ? '[' + el.type + ']' : ''),
+            disabled: !!el.disabled,
+          }));
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))
+          .filter(visible)
+          .map((el) => ({
+            text: ((el.innerText || el.textContent || '') + '').trim().slice(0, 40),
+            type: el.getAttribute('type') || '',
+            disabled: !!el.disabled,
+            aria: el.getAttribute('aria-disabled') || '',
+          }));
+        const active = document.activeElement
+          ? (document.activeElement.tagName + '#' + (document.activeElement.id || '')
+             + ' name=' + (document.activeElement.getAttribute('name') || ''))
+          : 'none';
+        const errors = Array.from(document.querySelectorAll('[role="alert"], [class*="error" i], [data-error]'))
+          .filter(visible)
+          .map((el) => ((el.innerText || el.textContent || '') + '').trim().slice(0, 140))
+          .filter((t) => t.length > 0);
+        return { inputs, buttons, active, errors };
+      })()"#;
+      if let Ok(snap) = session.evaluate(snap_js, false).await {
+        let value = snap.get("value").cloned().unwrap_or_default();
+        let active = value
+          .get("active")
+          .and_then(serde_json::Value::as_str)
+          .unwrap_or("?");
+        let inputs = value
+          .get("inputs")
+          .and_then(|v| v.as_array())
+          .map(|arr| serde_json::to_string(arr).unwrap_or_default())
+          .unwrap_or_default();
+        let buttons = value
+          .get("buttons")
+          .and_then(|v| v.as_array())
+          .map(|arr| serde_json::to_string(arr).unwrap_or_default())
+          .unwrap_or_default();
+        let errors = value
+          .get("errors")
+          .and_then(|v| v.as_array())
+          .map(|arr| serde_json::to_string(arr).unwrap_or_default())
+          .unwrap_or_default();
+        let summary = format!(
+          "UI About You: still on about-you; active={} inputs={} buttons={} errors={}",
+          active, inputs, buttons, errors
+        );
+        self.log(&summary);
+        // Emit to stderr/stdout too because the failing account is not
+        // persisted (fail-closed), so the operator needs the snapshot without
+        // a separate audit step.
+        eprintln!("{summary}");
+      } else {
+        self.log("UI About You: form snapshot evaluation failed");
+        eprintln!("UI About You: form snapshot evaluation failed");
+      }
+      snapshot_about_you_page(session, "post-submit-still-on-page").await;
+      return Err(format!("still on about-you page after submit: {final_url}"));
+    }
+    self.log(&format!("UI About You: navigated to {final_url}"));
+    Ok(())
+  }
+
   async fn force_api_register(
     &mut self,
     session: &mut BrowserSession,
     alias_email: &str,
     password: &str,
-  ) -> Result<serde_json::Value, String> {
+  ) -> Result<(), String> {
     let reg_js = format!(
       "fetch('https://auth.openai.com/api/accounts/user/register', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/json', accept: 'application/json', 'oai-device-id': '{did}' }}, body: JSON.stringify({{ username: '{email}', password: '{pw}' }}) }})",
       did = self.device_id,
@@ -3349,9 +4875,9 @@ impl RegistrationEngine {
     let reg = session.fetch_json(&reg_js).await?;
     let st = reg["_status"].as_u64().unwrap_or(200);
     if st != 200 || reg.get("error").is_some() {
-      return Err(format!("{reg}"));
+      return Err(format!("registration request failed with HTTP {st}"));
     }
-    Ok(reg)
+    Ok(())
   }
 
   /// Poll `/api/auth/session` with human-like waits. Session cookies often land
@@ -3447,7 +4973,7 @@ impl RegistrationEngine {
       {
         break;
       }
-      sleep(std::time::Duration::from_millis(400)).await;
+      self.human_pause(350, 450).await;
     }
 
     self
@@ -3457,7 +4983,7 @@ impl RegistrationEngine {
         password,
       )
       .await?;
-    sleep(std::time::Duration::from_millis(400)).await;
+    self.human_pause(350, 450).await;
 
     let mut submitted = false;
     if self
@@ -3495,7 +5021,7 @@ impl RegistrationEngine {
     }
 
     for _ in 0..30 {
-      sleep(std::time::Duration::from_millis(500)).await;
+      self.human_pause(450, 550).await;
       let u = session.current_url().await.unwrap_or_default();
       if u.contains("email-verification")
         || u.contains("about-you")
@@ -3543,7 +5069,7 @@ impl RegistrationEngine {
       );
       match session.fetch_json(&check_js).await {
         Ok(check) => {
-          detail_parts.push(format!("accounts_check={}", compact_json(&check)));
+          detail_parts.push("accounts_check_ok".into());
           if let Some((ok, plan, why)) = evaluate_subscription_json(&check) {
             eligible |= ok;
             if !plan.is_empty() {
@@ -3565,7 +5091,7 @@ impl RegistrationEngine {
         );
         match session.fetch_json(&subs_js).await {
           Ok(subs) => {
-            detail_parts.push(format!("subscriptions={}", compact_json(&subs)));
+            detail_parts.push("subscriptions_ok".into());
             if let Some((ok, plan, why)) = evaluate_subscription_json(&subs) {
               eligible |= ok;
               if plan_type.is_empty() && !plan.is_empty() {
@@ -3582,15 +5108,14 @@ impl RegistrationEngine {
     }
 
     let _ = session.navigate("https://chatgpt.com/", 20).await;
-    sleep(std::time::Duration::from_secs(1)).await;
+    self.human_pause(800, 1200).await;
     if let Ok(dom) = session
       .evaluate(
         r#"(function(){
           const t = (document.body && (document.body.innerText || document.body.textContent) || '').toLowerCase();
           return {
             hasFreeTrial: /free trial|try plus free|try it free|start free trial|get plus free|claim offer|free offer|free for \d|0 ?đ|0 ?d|mi[eẽ]n ph[ií]/.test(t),
-            hasPlusOffer: /chatgpt plus|upgrade to plus|get plus|try plus/.test(t),
-            snippet: t.slice(0, 500)
+            hasPlusOffer: /chatgpt plus|upgrade to plus|get plus|try plus/.test(t)
           };
         })()"#,
         false,
@@ -3598,7 +5123,7 @@ impl RegistrationEngine {
       .await
     {
       let value = dom.get("value").cloned().unwrap_or(dom);
-      detail_parts.push(format!("dom={}", compact_json(&value)));
+      detail_parts.push("dom_probe_ok".into());
       if value["hasFreeTrial"].as_bool() == Some(true) {
         eligible = true;
         if plan_type.is_empty() {
@@ -3620,605 +5145,134 @@ impl RegistrationEngine {
     (eligible, plan_type, detail_parts.join(" | "))
   }
 
-  /// Capture a compact ChatGPT UI snapshot for 2FA navigation debugging.
-  /// Writes full JSON under TEMP and logs a short summary (no secrets).
-  async fn dump_2fa_ui_snapshot(&mut self, session: &mut BrowserSession, phase: &str) {
-    let js = r#"(function(){
-      const textOf = (el) => ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g,' ').trim().slice(0,160);
-      const rectOf = (el) => {
-        try {
-          const r = el.getBoundingClientRect();
-          return {x:Math.round(r.left), y:Math.round(r.top), w:Math.round(r.width), h:Math.round(r.height)};
-        } catch (_) { return null; }
-      };
-      const testids = Array.from(document.querySelectorAll('[data-testid]'))
-        .slice(0, 120)
-        .map((el) => ({
-          testid: el.getAttribute('data-testid'),
-          tag: el.tagName,
-          role: el.getAttribute('role'),
-          aria: el.getAttribute('aria-label'),
-          text: textOf(el).slice(0, 80),
-          rect: rectOf(el),
-        }));
-      // Prefer leaf menu rows (menuitem / option / links) over giant containers.
-      const menuRows = Array.from(document.querySelectorAll(
-        '[role="menuitem"], [role="menuitemradio"], [role="option"], [data-testid*="menu"], a[href*="settings"], a[href*="security"]'
-      )).slice(0, 60).map((el) => ({
-        tag: el.tagName,
-        role: el.getAttribute('role'),
-        testid: el.getAttribute('data-testid'),
-        href: el.getAttribute('href'),
-        aria: el.getAttribute('aria-label'),
-        text: textOf(el).slice(0, 120),
-        rect: rectOf(el),
-      }));
-      const openPanels = Array.from(document.querySelectorAll(
-        '[role="menu"], [role="dialog"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-state="open"]'
-      )).slice(0, 20).map((el) => ({
-        tag: el.tagName,
-        role: el.getAttribute('role'),
-        testid: el.getAttribute('data-testid'),
-        text: textOf(el).slice(0, 220),
-        rect: rectOf(el),
-      }));
-      const settingsHits = Array.from(document.querySelectorAll('button, a, [role="menuitem"], [role="button"], div, span, li'))
-        .filter((el) => {
-          const t = textOf(el);
-          const tid = el.getAttribute('data-testid') || '';
-          return /(^|\b)settings(\b|$)/i.test(t) || /settings/i.test(tid) || /security/i.test(t) || /authenticator/i.test(t);
-        })
-        .slice(0, 30)
-        .map((el) => ({
-          tag: el.tagName,
-          testid: el.getAttribute('data-testid'),
-          role: el.getAttribute('role'),
-          text: textOf(el).slice(0, 100),
-          href: el.getAttribute('href'),
-          rect: rectOf(el),
-        }));
-      const body = ((document.body && (document.body.innerText || document.body.textContent)) || '')
-        .replace(/\s+/g,' ')
-        .trim()
-        .slice(0, 1200);
-      return {
-        url: location.href,
-        title: document.title,
-        path: location.pathname + location.search + location.hash,
-        hasSettingsTestid: !!document.querySelector('[data-testid="settings-menu-item"]'),
-        hasAccountsProfile: !!document.querySelector('[data-testid="accounts-profile-button"]'),
-        hasMfaToggle: !!document.querySelector('[data-testid="mfa-authenticator-toggle"]'),
-        openDialogs: document.querySelectorAll('[role="dialog"], [data-state="open"]').length,
-        testids,
-        menuRows,
-        openPanels,
-        settingsHits,
-        body,
-      };
-    })()"#;
-    match session.evaluate(js, false).await {
-      Ok(result) => {
-        let value = result
-          .get("value")
-          .cloned()
-          .unwrap_or(serde_json::json!({}));
-        // Persist full dump for offline inspection (log lines are truncated by hosts).
-        let dump_path = std::env::temp_dir().join(format!(
-          "jnmbrowser-2fa-ui-{}-{}.json",
-          phase,
-          Utc::now().format("%H%M%S")
-        ));
-        if let Ok(pretty) = serde_json::to_string_pretty(&value) {
-          let _ = std::fs::write(&dump_path, pretty);
-          self.log(&format!(
-            "2FA UI dump [{phase}] wrote {}",
-            dump_path.display()
-          ));
-        }
-        let summary = serde_json::json!({
-          "url": value.get("url"),
-          "path": value.get("path"),
-          "hasSettingsTestid": value.get("hasSettingsTestid"),
-          "hasAccountsProfile": value.get("hasAccountsProfile"),
-          "hasMfaToggle": value.get("hasMfaToggle"),
-          "openDialogs": value.get("openDialogs"),
-          "settingsHits": value.get("settingsHits"),
-          "menuRows": value.get("menuRows"),
-          "openPanels": value.get("openPanels").and_then(|v| v.as_array()).map(|a| a.len()),
-          "body": value.get("body").and_then(|v| v.as_str()).map(|s| s.chars().take(280).collect::<String>()),
-        });
-        self.log(&format!("2FA UI dump [{phase}] summary: {}", summary));
-      }
-      Err(e) => self.log(&format!("2FA UI dump [{phase}] failed: {e}")),
-    }
-  }
-
-  /// Close free-offer / splash dialogs that can intercept profile-menu clicks.
-  /// Live dump showed `openDialogs=1` + multiple `close-button` while Settings was missing.
-  async fn dismiss_2fa_blockers(&mut self, session: &mut BrowserSession) {
-    let js = r#"(function(){
-      const clicked = [];
-      const tryClick = (el, why) => {
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) return;
-        try { el.click(); clicked.push(why); } catch (_) {}
-      };
-      // Prefer explicit close buttons in open dialogs / overlays.
-      for (const el of Array.from(document.querySelectorAll(
-        '[data-testid="close-button"], button[aria-label="Close"], [role="dialog"] button[aria-label="Close"]'
-      )).slice(0, 6)) {
-        tryClick(el, el.getAttribute('data-testid') || el.getAttribute('aria-label') || 'close');
-      }
-      // Free-offer CTA can sit as a modal layer; Escape is a soft dismiss.
-      try {
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-        document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
-        clicked.push('escape');
-      } catch (_) {}
-      return clicked;
-    })()"#;
-    match session.evaluate(js, false).await {
-      Ok(result) => {
-        let value = result
-          .get("value")
-          .cloned()
-          .unwrap_or(serde_json::json!([]));
-        self.log(&format!("2FA dismiss blockers: {value}"));
-      }
-      Err(e) => self.log(&format!("2FA dismiss blockers failed: {e}")),
-    }
-    sleep(std::time::Duration::from_millis(400)).await;
-  }
-
-  /// Open the account profile menu. Live DOM (2026-07-22) uses
-  /// `data-testid="accounts-profile-button"` (not legacy `profile-button`).
-  ///
-  /// Important: there are often two nodes with that testid (compact avatar +
-  /// wider name chip). `querySelector` hits the first; we must pick the widest
-  /// visible chip so the full menu (Settings) mounts.
-  async fn open_profile_menu_for_2fa(
-    &mut self,
-    session: &mut BrowserSession,
-  ) -> Result<(), String> {
-    use crate::browser_actions::{click_point_in_rect, HumanProfile};
-
-    // Prefer JS-picked largest accounts-profile-button over brittle first-match CSS.
-    let pick_js = r#"(function(){
-      const nodes = Array.from(document.querySelectorAll(
-        '[data-testid="accounts-profile-button"], [data-testid="profile-button"], [aria-label*="open profile menu" i], [aria-label="Open profile menu"]'
-      ));
-      let best = null;
-      let bestArea = 0;
-      for (const el of nodes) {
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) continue;
-        // Prefer the wider account chip (name + Free) over the 38px avatar.
-        const area = r.width * r.height + (r.width >= 120 ? 10000 : 0);
-        if (area > bestArea) {
-          bestArea = area;
-          best = el;
-        }
-      }
-      if (!best) return { ok: false, reason: 'not_found' };
-      best.scrollIntoView({ block: 'center', inline: 'center' });
-      const r2 = best.getBoundingClientRect();
-      return {
-        ok: true,
-        testid: best.getAttribute('data-testid'),
-        aria: best.getAttribute('aria-label'),
-        x: r2.left,
-        y: r2.top,
-        w: r2.width,
-        h: r2.height
-      };
-    })()"#;
-
-    if let Ok(result) = session.evaluate(pick_js, false).await {
-      if let Some(value) = result.get("value") {
-        if value["ok"].as_bool() == Some(true) {
-          let x = value["x"].as_f64().unwrap_or(0.0);
-          let y = value["y"].as_f64().unwrap_or(0.0);
-          let w = value["w"].as_f64().unwrap_or(1.0);
-          let h = value["h"].as_f64().unwrap_or(1.0);
-          let (tx, ty) = click_point_in_rect(x, y, w, h);
-          let from = (x.max(8.0) - 24.0, y.max(8.0) - 18.0);
-          session
-            .human_click(from, (tx, ty), &HumanProfile::careful())
-            .await?;
-          self.log(&format!(
-            "2FA opened profile menu via largest chip testid={} aria={} rect=({x:.0},{y:.0},{w:.0}x{h:.0})",
-            value["testid"].as_str().unwrap_or(""),
-            value["aria"].as_str().unwrap_or("")
-          ));
-          return Ok(());
-        }
-      }
-    }
-
-    // Coordinate fallback from live rects: chip ~ (8,665) size 246x52; avatar ~ (8,719).
-    for (x, y) in [(130.0, 690.0), (27.0, 739.0), (65.0, 640.0)] {
-      if self.click_xy(session, x, y).await.is_ok() {
-        self.log(&format!("2FA profile menu xy fallback: ({x},{y})"));
-        return Ok(());
-      }
-    }
-    Err("profile menu button: not_found".into())
-  }
-
-  /// Click Settings inside the open profile menu.
-  /// Primary: `settings-menu-item` testid. Fallbacks: role/text.
-  /// Does NOT re-click the profile button on every miss (that toggles the menu closed).
-  async fn open_settings_from_profile_menu(
-    &mut self,
-    session: &mut BrowserSession,
-  ) -> Result<(), String> {
-    // Poll briefly — menu mount can lag after the profile click.
-    for attempt in 1..=6 {
-      // Detect menu presence before clicking; if missing, reopen once.
-      let menu_open = session
-        .evaluate(
-          r#"(function(){
-            return !!(
-              document.querySelector('[data-testid="settings-menu-item"]') ||
-              Array.from(document.querySelectorAll('[role="menu"] [role="menuitem"], [role="menuitem"]'))
-                .some((el) => /^settings$/i.test((el.innerText || el.textContent || '').trim()))
-            );
-          })()"#,
-          false,
-        )
-        .await
-        .ok()
-        .and_then(|v| v["value"].as_bool())
-        .unwrap_or(false);
-
-      if !menu_open {
-        if attempt > 1 {
-          // Close any half-open panel, then reopen cleanly.
-          let _ = session
-            .evaluate(
-              r#"(function(){
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-                return true;
-              })()"#,
-              false,
-            )
-            .await;
-          sleep(std::time::Duration::from_millis(250)).await;
-        }
-        let _ = self.open_profile_menu_for_2fa(session).await;
-        sleep(std::time::Duration::from_millis(700)).await;
-      }
-
-      if self
-        .click_selector(
-          session,
-          r#"[data-testid="settings-menu-item"]"#,
-          "settings menu item",
-        )
-        .await
-        .is_ok()
-      {
-        self.log(&format!(
-          "2FA settings menu item clicked (testid, attempt {attempt})"
-        ));
-        return Ok(());
-      }
-
-      // Text / role fallbacks observed across ChatGPT shell variants.
-      if self
-        .click_by_text(
-          session,
-          "Settings",
-          r#"[data-testid="settings-menu-item"], [role="menuitem"], button, a, div[role="button"]"#,
-        )
-        .await
-        .is_ok()
-      {
-        self.log(&format!("2FA settings opened via text (attempt {attempt})"));
-        return Ok(());
-      }
-
-      sleep(std::time::Duration::from_millis(400)).await;
-    }
-
-    self
-      .dump_2fa_ui_snapshot(session, "settings_menu_not_found")
-      .await;
-    Err("settings menu item: not_found".into())
-  }
-
-  /// Fast in-page hash open for Settings/Security.
-  ///
-  /// Do **not** use CDP `Page.navigate` for `…/#settings/…`: hash-only navigations
-  /// often never fire `Page.loadEventFired`, so the 20s navigation waiter times out
-  /// even though the SPA already opened the modal (live batch 2026-07-22).
-  async fn open_settings_security_via_hash(
-    &mut self,
-    session: &mut BrowserSession,
-  ) -> Result<(), String> {
-    let set_hash = session
-      .evaluate(
-        r#"(function(){
-          try {
-            // Prefer SPA hash routing without a full document navigation.
-            if (location.hash !== '#settings/Security') {
-              location.hash = '#settings/Security';
-            } else {
-              // Retrigger listeners if already on the hash.
-              location.hash = '#settings';
-              location.hash = '#settings/Security';
-            }
-            return { ok: true, href: location.href };
-          } catch (e) {
-            return { ok: false, error: String(e) };
-          }
-        })()"#,
-        false,
-      )
-      .await;
-    match set_hash {
-      Ok(v) => self.log(&format!(
-        "2FA hash route set: {}",
-        v.get("value").cloned().unwrap_or_default()
-      )),
-      Err(e) => return Err(format!("hash route evaluate failed: {e}")),
-    }
-    self.human_pause(700, 1400).await;
-    self.dismiss_2fa_blockers(session).await;
-
-    if self.mfa_toggle_present(session).await {
-      self.log("2FA Security panel ready via hash route");
-      return Ok(());
-    }
-
-    // Modal may open on General — click Security tab.
-    if self
-      .click_selector(session, r#"[data-testid="security-tab"]"#, "security tab")
-      .await
-      .is_ok()
-      || self
-        .click_by_text(
-          session,
-          "Security and login",
-          r#"[data-testid="security-tab"], button, [role='tab'], div[role='tab']"#,
-        )
-        .await
-        .is_ok()
-      || self
-        .click_by_text(session, "Security", "button, [role='tab'], div[role='tab']")
-        .await
-        .is_ok()
-    {
-      self.human_pause(600, 1200).await;
-      if self.mfa_toggle_present(session).await {
-        self.log("2FA Security tab opened after hash route");
-        return Ok(());
-      }
-    }
-    Err("hash settings/security route did not expose mfa toggle".into())
-  }
-
-  async fn mfa_toggle_present(&mut self, session: &mut BrowserSession) -> bool {
-    session
-      .evaluate(
-        r#"(function(){ return !!document.querySelector('[data-testid="mfa-authenticator-toggle"]'); })()"#,
-        false,
-      )
-      .await
-      .ok()
-      .and_then(|v| v["value"].as_bool())
-      .unwrap_or(false)
-  }
-
-  /// Open Security panel for 2FA.
-  /// Primary (live-proven, reliable): profile menu → Settings → Security tab.
-  /// Secondary (fast, no CDP navigate timeout): in-page `#settings/Security` hash.
-  async fn open_security_panel_for_2fa(
-    &mut self,
-    session: &mut BrowserSession,
-  ) -> Result<(), String> {
-    // 1) Profile menu path first — this is what succeeded in every live enable.
-    self.dismiss_2fa_blockers(session).await;
-    if self.open_profile_menu_for_2fa(session).await.is_ok() {
-      self.human_pause(700, 1300).await;
-      self
-        .dump_2fa_ui_snapshot(session, "after_profile_click")
-        .await;
-      if self.open_settings_from_profile_menu(session).await.is_ok() {
-        self.human_pause(600, 1100).await;
-        if self
-          .click_selector(session, r#"[data-testid="security-tab"]"#, "security tab")
-          .await
-          .is_ok()
-          || self
-            .click_by_text(
-              session,
-              "Security and login",
-              r#"[data-testid="security-tab"], button, [role='tab'], div[role='tab']"#,
-            )
-            .await
-            .is_ok()
-          || self
-            .click_by_text(session, "Security", "button, [role='tab'], div[role='tab']")
-            .await
-            .is_ok()
-        {
-          self.human_pause(700, 1300).await;
-          if self.mfa_toggle_present(session).await {
-            self.log("2FA Security panel ready via profile menu");
-            return Ok(());
-          }
-        }
-      }
-    } else {
-      self.log("2FA profile menu open failed; trying hash route");
-    }
-
-    // 2) Hash fallback without CDP navigation timeout.
-    if let Err(e) = self.open_settings_security_via_hash(session).await {
-      return Err(format!(
-        "could not open Security panel (menu+hash failed): {e}"
-      ));
-    }
-    Ok(())
-  }
-
-  /// Drive Settings → Security → Authenticator app using stable locators from recordings.
+  /// Enable ChatGPT authenticator 2FA through the shared fail-closed flow.
   async fn enable_2fa(&mut self, session: &mut BrowserSession) -> Result<String, String> {
-    // Ensure we are on ChatGPT with a live session.
-    session.navigate("https://chatgpt.com/", 20).await?;
-    self.human_pause(1200, 2200).await;
-    self.dismiss_2fa_blockers(session).await;
-    self
-      .dump_2fa_ui_snapshot(session, "home_before_settings")
-      .await;
-
-    self.open_security_panel_for_2fa(session).await?;
-
-    self
-      .dump_2fa_ui_snapshot(session, "security_panel_ready")
-      .await;
-
-    // Toggle authenticator app on (skip if already checked).
-    let already_on = session
-      .evaluate(
-        r#"(function(){
-          const t = document.querySelector('[data-testid="mfa-authenticator-toggle"]');
-          if (!t) return false;
-          return t.getAttribute('aria-checked') === 'true' || t.getAttribute('data-state') === 'checked';
-        })()"#,
-        false,
-      )
+    let mut adapter = BrowserTwoFactorAdapter::new(session);
+    enable_authenticator_two_factor(&mut adapter, |_secret| Ok(()))
       .await
-      .ok()
-      .and_then(|v| v["value"].as_bool())
-      .unwrap_or(false);
-    if already_on {
-      return Err("mfa authenticator already enabled; secret not available from toggle".into());
+      .map_err(|error| error.to_string())
+  }
+
+  async fn fill_about_you_field(
+    &mut self,
+    session: &mut BrowserSession,
+    selector: &str,
+    value: &str,
+    label: &str,
+  ) -> Result<(), String> {
+    // About You form inputs are React-controlled. CDP keyboard events
+    // (human_type) go to `document.activeElement` which is BODY when Chromium
+    // runs in background — React never commits the value. Instead we use the
+    // React-compatible JS pattern: native value-setter + InputInput + change
+    // + blur, which works regardless of OS-level focus.
+    //
+    // The canonical sequence React listens to:
+    //   1. el.focus()        — React attaches onChange handler
+    //   2. native value set  — sets the actual DOM property
+    //   3. InputEvent        — React reads e.target.value and commits
+    //   4. change + blur     — form-level validation re-runs, button re-enables
+    let js = format!(
+      r#"(function(){{
+    const el = document.querySelector({selector});
+    if (!el) return {{ ok: false, reason: 'not_found' }};
+    const wanted = {value};
+    el.focus();
+
+    if (el.tagName === 'SELECT') {{
+      const wantedNumber = /^\d+$/.test(wanted) ? Number(wanted) : null;
+      const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december'];
+      const option = Array.from(el.options || []).find((candidate) => {{
+        const optionValue = String(candidate.value || '').trim();
+        const optionText = String(candidate.textContent || '').trim();
+        if (optionValue === wanted || optionText === wanted) return true;
+        if (wantedNumber !== null &&
+            (Number(optionValue) === wantedNumber || Number(optionText) === wantedNumber)) {{
+          return true;
+        }}
+        return {is_month} && wantedNumber !== null &&
+          monthNames.indexOf(optionText.toLowerCase()) + 1 === wantedNumber;
+      }});
+      if (!option) return {{ ok: false, reason: 'option_not_found' }};
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+      if (descriptor && descriptor.set) descriptor.set.call(el, option.value);
+      else el.value = option.value;
+    }} else {{
+      const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+      const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+      // Clear then set so React sees a transition even from a stale prior value.
+      if (desc && desc.set) desc.set.call(el, '');
+      else el.value = '';
+      el.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: '' }}));
+
+      if (desc && desc.set) desc.set.call(el, wanted);
+      else el.value = wanted;
+    }}
+    // React commits the controlled value only when it observes an input event
+    // with the current e.target.value. InputEvent with the final data is the
+    // most portable contract across React versions.
+    el.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: wanted }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    // blur is critical: React form libraries re-run validation on blur and
+    // re-evaluate the submit-button disabled state.
+    el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+    return {{ ok: true, value: String(el.value || '') }};
+  }})()"#,
+      selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+      value = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+      is_month = label == "birth month",
+    );
+    let result = session.evaluate(&js, false).await?;
+    let value_obj = result.get("value").cloned().unwrap_or_default();
+    if value_obj.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+      let reason = value_obj
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("failed");
+      return Err(format!("fill {label}: {reason}"));
     }
-    self
-      .click_selector(
-        session,
-        r#"[data-testid="mfa-authenticator-toggle"]"#,
-        "mfa authenticator toggle",
-      )
-      .await?;
-    sleep(std::time::Duration::from_secs(2)).await;
 
-    // Recording step: click the underlined "show code / can't scan QR" link so the
-    // base32 secret becomes visible. Both enable2FA.json and register_2.json hit
-    // `button.interactive-label-accent.underline` here.
-    if self
-      .click_selector(
-        session,
-        r#"button.interactive-label-accent.underline, button.underline.interactive-label-accent"#,
-        "reveal secret link",
-      )
+    self
+      .verify_about_you_field(session, selector, value, label)
       .await
-      .is_err()
+  }
+
+  async fn verify_about_you_field(
+    &mut self,
+    session: &mut BrowserSession,
+    selector: &str,
+    expected: &str,
+    label: &str,
+  ) -> Result<(), String> {
+    let js = format!(
+      r#"(function(){{
+        const el = document.querySelector({selector});
+        if (!el) return {{ ok: false, reason: 'not_found' }};
+        const actual = String(el.value || '').trim();
+        const expected = String({expected}).trim();
+        const sameNumber = /^\d+$/.test(actual) && /^\d+$/.test(expected) &&
+          Number(actual) === Number(expected);
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+          'july', 'august', 'september', 'october', 'november', 'december'];
+        const sameMonth = {is_month} && /^\d+$/.test(expected) &&
+          monthNames.indexOf(actual.toLowerCase()) + 1 === Number(expected);
+        return {{ ok: actual === expected || sameNumber || sameMonth, reason: 'value_mismatch' }};
+      }})()"#,
+      selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+      expected = serde_json::to_string(expected).unwrap_or_else(|_| "\"\"".into()),
+      is_month = label == "birth month",
+    );
+    let result = session.evaluate(&js, false).await?;
+    if result
+      .get("value")
+      .and_then(|value| value.get("ok"))
+      .and_then(serde_json::Value::as_bool)
+      == Some(true)
     {
-      // Text fallbacks if ChatGPT renames the control.
-      let mut revealed = false;
-      for label in [
-        "Can't scan",
-        "can't scan",
-        "enter the code",
-        "Enter the code",
-        "show code",
-        "Show code",
-      ] {
-        if self
-          .click_by_text(session, label, "button, a, [role='button']")
-          .await
-          .is_ok()
-        {
-          revealed = true;
-          break;
-        }
-      }
-      if !revealed {
-        self.log("2FA reveal-secret link not found; trying to scrape secret anyway");
-      }
+      Ok(())
+    } else {
+      Err(format!("verify {label}: value was not accepted"))
     }
-    sleep(std::time::Duration::from_secs(1)).await;
-
-    // Recording step: click "Copy code" (aria-label / role button|Copy code).
-    // We still scrape from DOM afterwards — clipboard is not required for automation.
-    if self
-      .click_selector(
-        session,
-        r#"button[aria-label="Copy code"]"#,
-        "copy code button",
-      )
-      .await
-      .is_err()
-    {
-      let _ = self
-        .click_by_text(session, "Copy code", "button, [role='button']")
-        .await;
-    }
-    sleep(std::time::Duration::from_millis(500)).await;
-
-    // Capture the base32 secret that was just revealed / copied.
-    let secret_raw = self.scrape_totp_secret(session).await?;
-    let secret = normalize_secret(&secret_raw)?;
-    self.log(&format!("2FA secret captured (len={})", secret.len()));
-
-    // Same as manual flow: secret → local TOTP generator → 6-digit code.
-    let code = generate_totp_now(&secret)?;
-    self.log(&format!("Generated TOTP code from secret: {code}"));
-
-    // Recording step: paste code into #totp_otp (we set value via React setter).
-    self
-      .fill_input(
-        session,
-        r#"#totp_otp, input[name="totp_otp"], input[placeholder*="6-digit"], input[placeholder*="Enter your 6-digit"]"#,
-        &code,
-      )
-      .await?;
-    sleep(std::time::Duration::from_millis(500)).await;
-
-    // Confirm button (recording clicks the primary btn under the dialog).
-    let mut confirmed = false;
-    for label in ["Continue", "Confirm", "Done", "Verify"] {
-      if self.click_by_text(session, label, "button").await.is_ok() {
-        confirmed = true;
-        break;
-      }
-    }
-    if !confirmed {
-      self
-        .click_selector(
-          session,
-          r#"button.btn.relative, button[type="submit"]"#,
-          "2FA confirm button",
-        )
-        .await?;
-    }
-    sleep(std::time::Duration::from_secs(2)).await;
-
-    // Best-effort verification: toggle should now be on, or OTP field gone.
-    let verified = session
-      .evaluate(
-        r#"(function(){
-          const t = document.querySelector('[data-testid="mfa-authenticator-toggle"]');
-          if (t && (t.getAttribute('aria-checked') === 'true' || t.getAttribute('data-state') === 'checked')) return true;
-          const otp = document.querySelector('#totp_otp, input[name="totp_otp"]');
-          return !otp;
-        })()"#,
-        false,
-      )
-      .await
-      .ok()
-      .and_then(|v| v["value"].as_bool())
-      .unwrap_or(true);
-
-    if !verified {
-      return Err("2FA confirm did not clear setup UI".into());
-    }
-
-    Ok(secret)
   }
 
   async fn click_selector(
@@ -4267,10 +5321,8 @@ impl RegistrationEngine {
     let w = value["w"].as_f64().unwrap_or(1.0);
     let h = value["h"].as_f64().unwrap_or(1.0);
     let (tx, ty) = click_point_in_rect(x, y, w, h);
-    // Approximate previous cursor near viewport origin-ish of element.
-    let from = (x.max(8.0) - 24.0, y.max(8.0) - 18.0);
     session
-      .human_click(from, (tx, ty), &HumanProfile::careful())
+      .human_click((tx, ty), &HumanProfile::careful())
       .await
   }
 
@@ -4323,17 +5375,8 @@ impl RegistrationEngine {
     let w = value["w"].as_f64().unwrap_or(1.0);
     let h = value["h"].as_f64().unwrap_or(1.0);
     let (tx, ty) = click_point_in_rect(x, y, w, h);
-    let from = (x.max(8.0) - 24.0, y.max(8.0) - 18.0);
     session
-      .human_click(from, (tx, ty), &HumanProfile::careful())
-      .await
-  }
-
-  async fn click_xy(&mut self, session: &mut BrowserSession, x: f64, y: f64) -> Result<(), String> {
-    use crate::browser_actions::HumanProfile;
-    let from = ((x - 40.0).max(4.0), (y - 28.0).max(4.0));
-    session
-      .human_click(from, (x, y), &HumanProfile::careful())
+      .human_click((tx, ty), &HumanProfile::careful())
       .await
   }
 
@@ -4362,6 +5405,17 @@ impl RegistrationEngine {
         const el = document.querySelector({sel});
         if (!el) return {{ ok: false, reason: 'not_found' }};
         el.focus();
+        if (el.tagName === 'SELECT') {{
+          const wanted = {val};
+          const option = Array.from(el.options || []).find((opt) =>
+            opt.value === wanted || opt.textContent.trim() === wanted || opt.textContent.trim().startsWith(wanted)
+          );
+          if (option) el.value = option.value;
+          else el.value = wanted;
+          el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+          el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+          return {{ ok: true, value: el.value }};
+        }}
         const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
         const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
         if (desc && desc.set) desc.set.call(el, {val});
@@ -4387,136 +5441,113 @@ impl RegistrationEngine {
     Ok(())
   }
 
-  async fn scrape_totp_secret(&mut self, session: &mut BrowserSession) -> Result<String, String> {
-    // After "reveal secret" + "Copy code", the base32 secret is visible in the dialog.
-    // Prefer nearby text around the Copy code button, then broader DOM / otpauth fallback.
-    let js = r#"(function(){
-      const clean = (t) => (t || '').replace(/[\s\-]/g, '').toUpperCase();
-      const isSecret = (t) => /^[A-Z2-7]{16,64}$/.test(t);
-      const candidates = [];
-
-      const push = (raw, score) => {
-        const c = clean(raw);
-        if (!isSecret(c)) return;
-        candidates.push({ secret: c, score: score + c.length });
-      };
-
-      // 1) Text near the "Copy code" control (recording target).
-      const copyBtn = document.querySelector('button[aria-label="Copy code"]')
-        || Array.from(document.querySelectorAll('button')).find(b =>
-             /copy code/i.test((b.innerText || b.textContent || b.getAttribute('aria-label') || ''))
-           );
-      if (copyBtn) {
-        let root = copyBtn.parentElement;
-        for (let i = 0; i < 5 && root; i++, root = root.parentElement) {
-          push(root.innerText || root.textContent || '', 100 - i * 5);
-          for (const child of root.querySelectorAll('code, pre, span, div, p')) {
-            const t = (child.innerText || child.textContent || '').trim();
-            if (t && t.length <= 80) push(t, 120 - i * 5);
-          }
-        }
-      }
-
-      // 2) Explicit secret-ish nodes.
-      for (const el of document.querySelectorAll(
-        'code, pre, [data-testid*="secret"], [class*="secret"], [class*="mono"], span, div, p'
-      )) {
-        const t = (el.innerText || el.textContent || '').trim();
-        if (!t || t.length < 16 || t.length > 80) continue;
-        // Single-token secrets score higher than multi-line blobs.
-        const score = (t.split(/\s+/).length === 1) ? 80 : 40;
-        push(t, score);
-      }
-
-      // 3) otpauth:// URL embedded in page/QR payload.
-      const html = document.documentElement.innerHTML;
-      const m = html.match(/secret=([A-Z2-7]{16,64})/i);
-      if (m && m[1]) push(m[1], 200);
-
-      if (!candidates.length) return { ok: false };
-      candidates.sort((a, b) => b.score - a.score);
-      return { ok: true, secret: candidates[0].secret };
-    })()"#;
-    let result = session.evaluate(js, false).await?;
-    let value = result
-      .get("value")
-      .cloned()
-      .ok_or_else(|| "scrape secret: no value".to_string())?;
-    if value["ok"].as_bool() != Some(true) {
-      return Err("could not scrape TOTP secret from dialog after reveal/copy".into());
-    }
-    value["secret"]
-      .as_str()
-      .map(|s| s.to_string())
-      .ok_or_else(|| "scrape secret: empty".into())
-  }
-
   // -----------------------------------------------------------------------
   // Authorize with retry + Cloudflare handling
   // -----------------------------------------------------------------------
 
-  async fn create_authorize_url(
+  /// First establish session on chatgpt.com homepage (Cloudflare clearance),
+  /// then navigate to chatgpt.com/auth/login, fill email in the dedicated
+  /// login form, click Continue, and wait for redirect to auth.openai.com.
+  /// No API calls — pure UI interaction matching real human behavior.
+  async fn navigate_to_signup_page(
     &mut self,
     session: &mut BrowserSession,
-    alias_email: &str,
+    email: &str,
   ) -> Result<String, String> {
-    // Ensure we are on chatgpt origin before csrf/signin fetch (avoids No csrfToken
-    // when previous step left us on about:blank or auth.openai.com).
+    // If already on auth.openai.com, nothing to do.
     let cur = session.current_url().await.unwrap_or_default();
+    if cur.contains("auth.openai.com") {
+      self.log(&format!("Already on auth.openai.com: {cur}"));
+      return Ok(cur);
+    }
+
+    // Step 1: Establish session on chatgpt.com homepage first.
+    // This ensures Cloudflare cookies / Turnstile clearance is obtained
+    // before navigating to auth/login on the same origin.
     if !cur.starts_with("https://chatgpt.com") {
       session.navigate("https://chatgpt.com/", 25).await?;
-      self.human_pause(900, 1600).await;
+      self.human_pause(1500, 2800).await;
+      // Let Cloudflare challenge auto-resolve if present.
+      let _ = session.evaluate("window.scrollBy(0, 200)", false).await;
+      self.human_pause(800, 1500).await;
+    } else {
+      self.log(&format!(
+        "Already on chatgpt.com: {cur}, using existing session"
+      ));
     }
 
-    let mut last_err = String::from("No csrfToken");
-    for attempt in 1..=4 {
-      let csrf_json = session
-        .fetch_json("fetch('/api/auth/csrf', { credentials: 'include', headers: { accept: 'application/json', referer: 'https://chatgpt.com/' } })")
+    // Step 2: Navigate to the dedicated login/signup page (same origin).
+    // This page has a stable form with email input and Continue button.
+    session
+      .navigate("https://chatgpt.com/auth/login", 25)
+      .await?;
+    self.human_pause(1200, 2200).await;
+
+    // Step 3: Find and fill the email input on the login form.
+    let email_selectors = r#"input[type="email"], input[name="email"], input[id="email"], input[autocomplete*="email"], input[placeholder*="email" i], input[aria-label*="email" i]"#;
+    let mut filled = false;
+    for _ in 0..15 {
+      self.human_pause(300, 500).await;
+      if self.page_has_selector(session, email_selectors).await {
+        self.fill_input(session, email_selectors, email).await?;
+        self.human_pause(350, 500).await;
+        filled = true;
+        break;
+      }
+    }
+    if !filled {
+      return Err("Email input not found on chatgpt.com/auth/login".into());
+    }
+    self.log("Filled email on auth/login page");
+
+    // Step 4: Click the "Continue" button.
+    let mut continued = false;
+    for sel in [
+      r#"button[type="submit"]"#,
+      r#"button[name="intent"]"#,
+      r#"form button"#,
+    ] {
+      if self
+        .click_selector(session, sel, "login continue")
         .await
-        .unwrap_or_else(|e| {
-          last_err = format!("csrf fetch failed: {e}");
-          serde_json::json!({})
-        });
-      if let Some(csrf_token) = csrf_json["csrfToken"].as_str().filter(|s| !s.is_empty()) {
-        let session_log_id = Uuid::new_v4().to_string();
-        let login_hint = urlencoding::encode(alias_email);
-        let signin_js = format!(
-          "fetch('/api/auth/signin/openai?prompt=login&ext-oai-did={did}&auth_session_logging_id={sid}&screen_hint=login_or_signup&login_hint={email}', {{ method: 'POST', credentials: 'include', headers: {{ 'content-type': 'application/x-www-form-urlencoded', referer: 'https://chatgpt.com/' }}, body: new URLSearchParams({{ callbackUrl: '/', csrfToken: '{token}', json: 'true' }}) }})",
-          did = self.device_id,
-          sid = session_log_id,
-          email = login_hint,
-          token = csrf_token,
-        );
-        let signin = session.fetch_json(&signin_js).await?;
-        if let Some(url) = signin["url"].as_str().filter(|s| !s.is_empty()) {
-          return Ok(url.to_string());
-        }
-        last_err = format!("No authorize URL (attempt {attempt}): {signin}");
-      } else {
-        last_err = format!(
-          "No csrfToken (attempt {attempt}): {}",
-          csrf_json
-            .get("_status")
-            .cloned()
-            .unwrap_or_else(|| csrf_json.clone())
-        );
+        .is_ok()
+      {
+        continued = true;
+        break;
       }
-      // Soft reload home + human wait — thrashing relaunch on every miss is too robotic.
-      if attempt == 2 {
-        let _ = session.navigate("https://chatgpt.com/", 20).await;
-      }
-      self
-        .human_pause(700 + attempt as u64 * 300, 1400 + attempt as u64 * 400)
+    }
+    if !continued {
+      let _ = self
+        .click_by_text(session, "Continue", "button, [role='button']")
         .await;
     }
-    Err(last_err)
+    self.log("Clicked Continue on auth/login page");
+    self.human_pause(1000, 2000).await;
+
+    // Step 5: Wait for navigation to auth.openai.com.
+    for _ in 0..25 {
+      self.human_pause(400, 600).await;
+      let cur = session.current_url().await.unwrap_or_default();
+      if cur.contains("auth.openai.com") {
+        self.log(&format!("Landed on auth.openai.com: {cur}"));
+        return Ok(cur);
+      }
+    }
+
+    // Return whatever URL we ended on (caller will retry if wrong).
+    let cur = session.current_url().await.unwrap_or_default();
+    self.log(&format!("navigate_to_signup_page final URL: {cur}"));
+    Ok(cur)
   }
 
+  /// Navigate to auth.openai.com signup page via UI (click "Sign up" on
+  /// homepage → fill email in dialog → Continue) with browser-relaunch
+  /// retry on failure / Cloudflare block.
   async fn authorize_with_retry(
     &mut self,
     session: &mut BrowserSession,
     profile: &mut crate::profile::BrowserProfile,
-    alias_email: &str,
+    email: &str,
     app_handle: &tauri::AppHandle,
   ) -> Result<String, String> {
     let max_attempts = 3;
@@ -4555,19 +5586,15 @@ impl RegistrationEngine {
         ));
       }
 
-      let auth_url = match self.create_authorize_url(session, alias_email).await {
+      let cur = match self.navigate_to_signup_page(session, email).await {
         Ok(u) => u,
         Err(e) => {
           self.log(&format!(
-            "create_authorize_url failed (attempt {attempt}): {e}"
+            "navigate_to_signup_page failed (attempt {attempt}): {e}"
           ));
-          // Only hard-relaunch after soft csrf retries inside create_authorize_url.
           continue;
         }
       };
-      session.navigate(&auth_url, 30).await?;
-      self.human_pause(800, 1500).await;
-      let cur = session.current_url().await?;
 
       if is_cloudflare_block(&cur) {
         self.log(&format!("Cloudflare block detected: {cur}"));
@@ -4577,7 +5604,7 @@ impl RegistrationEngine {
       return Ok(cur);
     }
 
-    Err("Authorize failed after max retries — csrf/authorize/Cloudflare".into())
+    Err("Authorize failed after max retries — signup navigation/Cloudflare".into())
   }
 
   // -----------------------------------------------------------------------
@@ -4596,84 +5623,8 @@ impl RegistrationEngine {
       profile.name, profile.id, profile.browser
     ));
 
-    let profile_path = crate::ephemeral_dirs::get_effective_profile_path(
-      &profile,
-      &crate::profile::ProfileManager::instance().get_profiles_dir(),
-    );
-    let profile_path_str = profile_path.to_string_lossy().to_string();
-
-    if profile.browser == "camoufox" {
-      // Camoufox has no CDP port — attach Playwright page from the manager.
-      let mut last_err = String::new();
-      for attempt in 0..15 {
-        if attempt > 0 {
-          sleep(std::time::Duration::from_millis(500)).await;
-        }
-        match crate::camoufox_manager::CamoufoxManager::instance()
-          .get_active_page(&profile_path_str)
-          .await
-        {
-          Ok(page) => {
-            self.log(&format!(
-              "Camoufox Playwright page attached (attempt {})",
-              attempt + 1
-            ));
-            return Ok((
-              profile,
-              BrowserSession::Camoufox {
-                page,
-                profile_path: profile_path_str,
-              },
-            ));
-          }
-          Err(e) => last_err = e.to_string(),
-        }
-      }
-      return Err(format!(
-        "Failed to attach Camoufox Playwright page for {profile_path_str}: {last_err}"
-      ));
-    }
-
-    // Chromium path: wait for CDP port then open debugger websocket.
-    // Prefer PID lookup: ephemeral path can race with status checks.
-    let cdp_port = self
-      .wait_for_cdp_port(&profile.browser, &profile_path_str, profile.process_id)
-      .await?;
-    self.log(&format!("CDP port ready: {cdp_port}"));
-    let ws_url = get_page_ws_url(cdp_port).await?;
-    let cdp = CdpConnection::connect(&ws_url).await?;
-    Ok((profile, BrowserSession::Cdp(cdp)))
-  }
-
-  async fn wait_for_cdp_port(
-    &self,
-    browser: &str,
-    profile_path: &str,
-    process_id: Option<u32>,
-  ) -> Result<u16, String> {
-    let mgr = crate::chromium_manager::ChromiumManager::instance();
-    for attempt in 0..20 {
-      if attempt > 0 {
-        sleep(std::time::Duration::from_millis(500)).await;
-      }
-      if let Some(pid) = process_id {
-        if let Some(p) = mgr.get_cdp_port_by_pid(pid).await {
-          return Ok(p);
-        }
-      }
-      if let Some(p) = mgr.get_cdp_port(profile_path).await {
-        return Ok(p);
-      }
-      if let Some(p) = mgr.get_single_cdp_port().await {
-        log::info!(
-          "CDP port resolved via single-instance fallback: {p} (path lookup missed {profile_path})"
-        );
-        return Ok(p);
-      }
-    }
-    Err(format!(
-      "Failed to get CDP port for browser={browser} path={profile_path} pid={process_id:?}"
-    ))
+    let session = attach_browser_session(&profile).await?;
+    Ok((profile, session))
   }
 
   /// Ensure a single reusable worker profile exists for this engine/batch.
@@ -5011,7 +5962,7 @@ impl RegistrationEngine {
       }
     }
 
-    sleep(std::time::Duration::from_millis(500)).await;
+    self.human_pause(450, 550).await;
 
     if let Err(e) = crate::profile::ProfileManager::instance().delete_profile(app_handle, &id) {
       self.log(&format!(
@@ -5045,6 +5996,15 @@ impl RegistrationEngine {
       note: String::new(),
       exported_at: None,
       sold_at: None,
+      email_provider: Some(self.config.email_provider),
+      email_provider_provenance: Some(EmailProviderProvenance::RegistrationConfig),
+      registration_outcome_reason: Some(RegistrationOutcomeReason::RegistrationFailed),
+      two_factor_backfill_access_state: Some(TwoFactorBackfillAccessState::Accessible),
+      two_factor_backfill_exclusion: None,
+      two_factor_backfill_state: None,
+      two_factor_backfill_outcome: None,
+      two_factor_backfill_operation_id: None,
+      record_revision: 1,
     }
   }
 }

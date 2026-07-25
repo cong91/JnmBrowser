@@ -52,8 +52,8 @@ pub struct RegistrationConfig {
   #[serde(default = "default_concurrency")]
   pub concurrency: u32,
   /// Nord simultaneous WireGuard session budget (device/session limit).
-  /// VPN mode: concurrency is auto-set to this budget (fixed policy max **6**).
-  /// Peer pool size follows it so multi-IP concurrency stays within Nord limits (~10 devices plan; we use 6).
+  /// VPN mode caps the operator-selected concurrency to this budget (fixed policy max **6**).
+  /// Peer pool size follows effective concurrency so multi-IP execution stays within Nord limits.
   #[serde(default = "default_nord_max_sessions")]
   pub nord_max_sessions: u32,
   /// Network mode: none | proxy | vpn | nord
@@ -506,6 +506,58 @@ impl AccountInventoryStatus {
   }
 }
 
+/// How the email provider attached to a registration result was determined.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailProviderProvenance {
+  RegistrationConfig,
+  InferredFromCdk,
+}
+
+/// Structured registration outcome used by repair eligibility policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationOutcomeReason {
+  Registered,
+  FreeTrialNo,
+  RegistrationFailed,
+  BatchSummary,
+}
+
+/// Last known account access condition for 2FA repair.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillAccessState {
+  Accessible,
+  Locked,
+}
+
+/// Persisted policy reason preventing automatic 2FA repair.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillExclusion {
+  OperatorExcluded,
+  ManualReview,
+}
+
+/// Persisted lifecycle state for a 2FA repair attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillState {
+  InProgress,
+  Completed,
+}
+
+/// Persisted terminal outcome for a 2FA repair attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillOutcome {
+  Enabled,
+  Failed,
+  Cancelled,
+  ReconciliationRequired,
+}
+
 /// The result of a completed (or failed) registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -546,6 +598,68 @@ pub struct RegistrationResult {
   /// When this account was marked sold/used.
   #[serde(default)]
   pub sold_at: Option<DateTime<Utc>>,
+  /// Email OTP provider used when this account was registered.
+  #[serde(default)]
+  pub email_provider: Option<EmailProvider>,
+  /// Source of the persisted email provider metadata.
+  #[serde(default)]
+  pub email_provider_provenance: Option<EmailProviderProvenance>,
+  /// Structured reason for the registration result status.
+  #[serde(default)]
+  pub registration_outcome_reason: Option<RegistrationOutcomeReason>,
+  /// Last known access condition relevant to 2FA backfill.
+  #[serde(default)]
+  pub two_factor_backfill_access_state: Option<TwoFactorBackfillAccessState>,
+  /// Explicit policy exclusion for 2FA backfill.
+  #[serde(default)]
+  pub two_factor_backfill_exclusion: Option<TwoFactorBackfillExclusion>,
+  /// Persisted lifecycle state of the latest 2FA backfill attempt.
+  #[serde(default)]
+  pub two_factor_backfill_state: Option<TwoFactorBackfillState>,
+  /// Operation that owns the current or most recent 2FA backfill lifecycle.
+  #[serde(default)]
+  pub two_factor_backfill_operation_id: Option<String>,
+  /// Persisted terminal outcome of the latest 2FA backfill attempt.
+  #[serde(default)]
+  pub two_factor_backfill_outcome: Option<TwoFactorBackfillOutcome>,
+  /// Monotonic record version used by later compare-and-update persistence.
+  #[serde(default)]
+  pub record_revision: u64,
+}
+
+#[cfg(test)]
+mod registration_result_tests {
+  use super::*;
+
+  #[test]
+  fn legacy_minimal_json_defaults_backfill_metadata() {
+    let json = r#"{
+      "success": true,
+      "email": "legacy@example.com",
+      "password": "password",
+      "accountId": "account-1",
+      "accessToken": "token",
+      "deviceId": "device-1",
+      "errorMessage": "",
+      "stepLogs": [],
+      "createdAt": "2026-01-01T00:00:00Z",
+      "twoFaEnabled": false,
+      "cdk": "GMAIL-LEGACY",
+      "baseEmail": "legacy@example.com"
+    }"#;
+
+    let result: RegistrationResult = serde_json::from_str(json).unwrap();
+
+    assert_eq!(result.email_provider, None);
+    assert_eq!(result.email_provider_provenance, None);
+    assert_eq!(result.registration_outcome_reason, None);
+    assert_eq!(result.two_factor_backfill_access_state, None);
+    assert_eq!(result.two_factor_backfill_exclusion, None);
+    assert_eq!(result.two_factor_backfill_state, None);
+    assert_eq!(result.two_factor_backfill_operation_id, None);
+    assert_eq!(result.two_factor_backfill_outcome, None);
+    assert_eq!(result.record_revision, 0);
+  }
 }
 
 /// One account attempt recorded under a CDK inventory row.

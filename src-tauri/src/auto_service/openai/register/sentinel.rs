@@ -4,7 +4,7 @@
 //! for the create_account API call.
 
 use base64::Engine;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::time::Instant;
 
 /// FNV-1a 32-bit hash with MurmurHash3-style finalizer.
@@ -29,20 +29,34 @@ fn base64_encode_config(config: &[serde_json::Value]) -> String {
   base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
+/// Generate a randomized Chrome user-agent string to avoid hardcoded fingerprint.
+fn random_chrome_ua() -> String {
+  let mut rng = rand::rng();
+  let major: u32 = rng.random_range(128..136);
+  let minor: u32 = rng.random_range(0..5);
+  let build: u32 = rng.random_range(0..10);
+  let patch: u32 = rng.random_range(0..100);
+  format!(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{}.0.{}.{} Safari/537.36",
+    major, minor, build * 10 + patch
+  )
+}
+
 /// Fetch the sentinel challenge from OpenAI's sentinel backend.
 async fn fetch_sentinel_challenge(
   client: &reqwest::Client,
   device_id: &str,
 ) -> Result<(String, String, String), String> {
   let mut rng = rand::rng();
+  let ua = random_chrome_ua();
   let requirements_config = vec![
     serde_json::json!(rng.next_u32()),
     serde_json::json!(rng.next_u32()),
     serde_json::json!(rng.next_u32()),
-    serde_json::json!(0),           // nonce
+    serde_json::json!(0), // nonce
     serde_json::json!([rng.next_u32(), rng.next_u32()]),
     serde_json::json!(rng.next_u32()),
-    serde_json::json!(format!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")),
+    serde_json::json!(ua),
     serde_json::json!(rng.next_u32()),
     serde_json::json!(rng.next_u32()),
     serde_json::json!(rng.next_u32()),
@@ -92,6 +106,7 @@ async fn fetch_sentinel_challenge(
 fn solve_pow(seed: &str, difficulty: &str, max_attempts: u32) -> String {
   let mut rng = rand::rng();
   let start = Instant::now();
+  let ua = random_chrome_ua();
 
   for nonce in 0..max_attempts {
     let config = vec![
@@ -101,7 +116,7 @@ fn solve_pow(seed: &str, difficulty: &str, max_attempts: u32) -> String {
       serde_json::json!(nonce),
       serde_json::json!([rng.next_u32(), rng.next_u32()]),
       serde_json::json!(rng.next_u32()),
-      serde_json::json!("Mozilla/5.0"),
+      serde_json::json!(ua),
       serde_json::json!(rng.next_u32()),
       serde_json::json!(start.elapsed().as_millis() as u32),
       serde_json::json!(rng.next_u32()),
@@ -135,7 +150,7 @@ fn solve_pow(seed: &str, difficulty: &str, max_attempts: u32) -> String {
     serde_json::json!(max_attempts),
     serde_json::json!([rng.next_u32(), rng.next_u32()]),
     serde_json::json!(rng.next_u32()),
-    serde_json::json!("Mozilla/5.0"),
+    serde_json::json!(ua),
     serde_json::json!(rng.next_u32()),
     serde_json::json!(start.elapsed().as_millis() as u32),
     serde_json::json!(rng.next_u32()),

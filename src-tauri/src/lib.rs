@@ -2541,6 +2541,12 @@ pub fn run() {
       auto_service::openai::login::commands::update_login_result_fields_cmd,
       auto_service::openai::login::commands::export_login_results_cmd,
       auto_service::openai::login::commands::push_login_results_to_sub2api_cmd,
+      // OpenAI 2FA backfill repair (auto_service::openai::two_factor_backfill)
+      auto_service::openai::two_factor_backfill::commands::preview_two_factor_backfill,
+      auto_service::openai::two_factor_backfill::commands::start_two_factor_backfill,
+      auto_service::openai::two_factor_backfill::commands::cancel_two_factor_backfill,
+      auto_service::openai::two_factor_backfill::commands::list_two_factor_backfill_recovery,
+      auto_service::openai::two_factor_backfill::commands::recover_two_factor_backfill_journal,
       // Sub2API settings commands
       settings_manager::get_sub2api_settings_cmd,
       settings_manager::set_sub2api_settings_cmd,
@@ -2640,6 +2646,12 @@ mod tests {
       "cloud_get_proxy_usage",
       // Action recorder: full recording payload is used by MCP / future UI
       "get_recording",
+      // 2FA backfill: operator workflow and secret-free recovery commands
+      "preview_two_factor_backfill",
+      "start_two_factor_backfill",
+      "cancel_two_factor_backfill",
+      "list_two_factor_backfill_recovery",
+      "recover_two_factor_backfill_journal",
     ];
 
     // Extract command names from the generate_handler! macro in this file
