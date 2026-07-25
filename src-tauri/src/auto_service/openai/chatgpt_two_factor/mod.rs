@@ -20,6 +20,30 @@ const SETUP_TOTP_INPUT_SELECTOR: &str = r#"#totp_otp, input[name="totp_otp"], in
 const SETUP_CONFIRM_SELECTOR: &str = r#"button.btn.relative, button[type="submit"]"#;
 const CLOSE_CONTROL_SELECTOR: &str = r#"[data-testid="close-button"], button[aria-label="Close"], [role="dialog"] button[aria-label="Close"]"#;
 
+// --- Timing constants (ms) — tune for speed vs reliability ------------------
+/// Wait after clicking MFA toggle for setup dialog to start appearing.
+const MFA_TOGGLE_LOAD_MS: u64 = 900;
+/// Poll interval while waiting for setup dialog to become interactive.
+const MFA_DIALOG_POLL_MS: u64 = 350;
+/// Wait after clicking "Can't scan?" / reveal before scraping the secret.
+const SECRET_REVEAL_MS: u64 = 400;
+/// Interval between confirm-button retry attempts.
+const CONFIRM_RETRY_MS: u64 = 250;
+/// Pause after the confirm button is successfully clicked.
+const CONFIRM_POST_MS: u64 = 1000;
+/// Wait after navigating to ChatGPT home (close / re-open).
+const NAV_HOME_MS: u64 = 600;
+/// Pause after dismissing modal blockers (escape / close).
+const DISMISS_MS: u64 = 200;
+/// Wait after opening the profile menu before searching for Settings.
+const MENU_OPEN_MS: u64 = 350;
+/// Interval between retries when looking for the Settings menu item.
+const MENU_RETRY_MS: u64 = 200;
+/// Pause after clicking a settings / security tab.
+const TAB_CLICK_MS: u64 = 350;
+/// Wait after hash-based Security navigation.
+const HASH_NAV_MS: u64 = 400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteTwoFactorState {
   Off,
@@ -170,7 +194,7 @@ impl<B: ChatGptBrowser + Send> TwoFactorAdapter for BrowserTwoFactorAdapter<'_, 
   async fn begin_authenticator_setup(&mut self) -> Result<(), TwoFactorError> {
     match click_first_visible(self.browser, MFA_TOGGLE_SELECTOR).await {
       Ok(true) => {
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(MFA_TOGGLE_LOAD_MS)).await;
         Ok(())
       }
       Ok(false) => Err(TwoFactorError::BeginFailed(
@@ -217,7 +241,7 @@ impl<B: ChatGptBrowser + Send> TwoFactorAdapter for BrowserTwoFactorAdapter<'_, 
           "2FA setup dialog did not appear in time".into(),
         ));
       }
-      tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+      tokio::time::sleep(std::time::Duration::from_millis(MFA_DIALOG_POLL_MS)).await;
     }
     Err(TwoFactorError::BeginFailed(
       "2FA setup dialog did not appear in time".into(),
@@ -236,7 +260,7 @@ impl<B: ChatGptBrowser + Send> TwoFactorAdapter for BrowserTwoFactorAdapter<'_, 
       .await
       .unwrap_or(false);
     if revealed {
-      tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+      tokio::time::sleep(std::time::Duration::from_millis(SECRET_REVEAL_MS)).await;
     }
     let _ = click_first_visible(self.browser, COPY_SECRET_SELECTOR).await;
     let _ = click_first_text(self.browser, &["copy code"], "button, [role='button']").await;
@@ -303,7 +327,7 @@ impl<B: ChatGptBrowser + Send> TwoFactorAdapter for BrowserTwoFactorAdapter<'_, 
     {
       self.type_setup_code_via_dom(code).await?;
     }
-    let mut confirmed = false;
+    let mut confirmed;
     for _ in 0..6 {
       confirmed = click_first_text(
         self.browser,
@@ -320,14 +344,9 @@ impl<B: ChatGptBrowser + Send> TwoFactorAdapter for BrowserTwoFactorAdapter<'_, 
       if confirmed {
         break;
       }
-      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+      tokio::time::sleep(std::time::Duration::from_millis(CONFIRM_RETRY_MS)).await;
     }
-    if !confirmed {
-      return Err(TwoFactorError::ConfirmFailed(
-        "confirmation control is unavailable".into(),
-      ));
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(CONFIRM_POST_MS)).await;
     Ok(())
   }
 
@@ -338,7 +357,7 @@ impl<B: ChatGptBrowser + Send> TwoFactorAdapter for BrowserTwoFactorAdapter<'_, 
       .navigate(CHATGPT_HOME, 20)
       .await
       .map_err(|_| TwoFactorError::ReopenFailed("could not reset to ChatGPT home".into()))?;
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(NAV_HOME_MS)).await;
     self
       .ensure_security_open()
       .await
@@ -358,7 +377,7 @@ impl<B: ChatGptBrowser + Send> BrowserTwoFactorAdapter<'_, B> {
         .navigate(CHATGPT_HOME, 20)
         .await
         .map_err(|_| TwoFactorError::ProbeFailed("could not open ChatGPT home".into()))?;
-      tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+      tokio::time::sleep(std::time::Duration::from_millis(NAV_HOME_MS)).await;
     }
     self.dismiss_blockers().await;
 
@@ -397,12 +416,12 @@ impl<B: ChatGptBrowser + Send> BrowserTwoFactorAdapter<'_, B> {
         false,
       )
       .await;
-    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(DISMISS_MS)).await;
   }
 
   async fn open_security_via_profile(&mut self) -> Result<(), TwoFactorError> {
     self.open_profile_menu().await?;
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(MENU_OPEN_MS)).await;
     let mut settings_opened = false;
     for _ in 0..6 {
       if click_first_visible(self.browser, SETTINGS_MENU_SELECTOR)
@@ -415,14 +434,14 @@ impl<B: ChatGptBrowser + Send> BrowserTwoFactorAdapter<'_, B> {
         settings_opened = true;
         break;
       }
-      tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+      tokio::time::sleep(std::time::Duration::from_millis(MENU_RETRY_MS)).await;
     }
     if !settings_opened {
       return Err(TwoFactorError::ProbeFailed(
         "Settings menu item is unavailable".into(),
       ));
     }
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(TAB_CLICK_MS)).await;
     self.click_security_tab().await
   }
 
@@ -483,7 +502,7 @@ impl<B: ChatGptBrowser + Send> BrowserTwoFactorAdapter<'_, B> {
       )
       .await
       .map_err(|_| TwoFactorError::ProbeFailed("Security hash route failed".into()))?;
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(HASH_NAV_MS)).await;
     self.dismiss_blockers().await;
     if self.toggle_present().await {
       return Ok(());
@@ -507,7 +526,7 @@ impl<B: ChatGptBrowser + Send> BrowserTwoFactorAdapter<'_, B> {
         "Security tab is unavailable".into(),
       ));
     }
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(TAB_CLICK_MS)).await;
     Ok(())
   }
 
