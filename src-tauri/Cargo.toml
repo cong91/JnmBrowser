@@ -1,6 +1,6 @@
 [package]
 name = "JnmBrowser"
-version = "0.22.10"
+version = "0.22.11"
 description = "Simple Yet Powerful Anti-Detect Browser"
 authors = ["zhom@github"]
 edition = "2021"
@@ -31,10 +31,12 @@ path = "src/bin/donut_daemon.rs"
 [[bin]]
 name = "auto-reg-live"
 path = "src/bin/auto_reg_live.rs"
+required-features = ["auto-reg-live"]
 
 [[bin]]
 name = "auto-login-live"
 path = "src/bin/auto_login_live.rs"
+required-features = ["auto-login-live"]
 
 [[bin]]
 name = "twofa-backfill-live"
@@ -43,6 +45,10 @@ path = "src/bin/twofa_backfill_live.rs"
 [[bin]]
 name = "probe-free-trial"
 path = "src/bin/probe_free_trial.rs"
+
+[[bin]]
+name = "download-chromium"
+path = "src/bin/download_chromium.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -212,3 +218,5 @@ default = ["custom-protocol"]
 # this feature is used used for production builds where `devPath` points to the filesystem
 # DO NOT remove this
 custom-protocol = ["tauri/custom-protocol"]
+auto-reg-live = []
+auto-login-live = []
