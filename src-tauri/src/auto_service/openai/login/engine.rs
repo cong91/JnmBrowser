@@ -6,6 +6,7 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[allow(unused_imports)]
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -15,11 +16,11 @@ use uuid::Uuid;
 use super::store::save_login_result;
 use super::sub2api::Sub2ApiClient;
 use super::types::{
-  should_rotate, LoginConfig, LoginCredential, LoginNetworkMode, LoginProgress, LoginResult,
-  LoginResultStatus, LoginStep,
+  should_rotate, LoginConfig, LoginCredential, LoginNetworkMode, LoginProgress,
+  LoginProgressEventKind, LoginResult, LoginResultStatus, LoginStep, LoginTerminalSummary,
 };
-use super::{oauth, pkce};
-use crate::sms::{NumberRequest, SmsService};
+use super::{oauth, pkce, safe_browser_url_for_log};
+use crate::sms::{poll_otp_with_cancel, NumberRequest, SmsService};
 
 type CdpWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -35,6 +36,13 @@ const CLOUDFLARE_SOFT_WAIT_SECS: u64 = 20;
 /// Extra relaunches dedicated to Cloudflare recovery (on top of normal retries).
 const MAX_CLOUDFLARE_RECOVERIES: u32 = 2;
 
+fn is_whatsapp_phone_fallback(text: &str) -> bool {
+  let normalized = text.to_ascii_lowercase();
+  normalized.contains("switched to whatsapp")
+    && normalized.contains("continue")
+    && normalized.contains("verification code")
+}
+
 /// Short-lived local HTTP listener for OpenAI OAuth redirect.
 ///
 /// OpenAI redirects to `http://localhost:1455/auth/callback?code=...&state=...`.
@@ -46,29 +54,38 @@ struct OAuthCallbackListener {
 }
 
 impl OAuthCallbackListener {
-  async fn start() -> Result<Self, String> {
-    let addr = format!("{OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}");
-    Self::start_on_addr(&addr).await
-  }
-
   async fn start_on_addr(addr: &str) -> Result<Self, String> {
     // Windows keeps sockets in TIME_WAIT after close. Retries of the same login
-    // attempt can hit os error 10048 unless we wait for the previous accept-loop
-    // task to drop its TcpListener.
+    // attempt can hit os error 10048. Use SO_REUSEADDR so the port can be
+    // re-bound immediately across batch login iterations.
+    let addr: std::net::SocketAddr = addr
+      .parse()
+      .map_err(|e| format!("Invalid OAuth callback addr '{addr}': {e}"))?;
+
     let mut last_err = String::new();
     let mut listener = None;
     for attempt in 0..20 {
       if attempt > 0 {
         sleep(std::time::Duration::from_millis(150)).await;
       }
-      match TcpListener::bind(&addr).await {
-        Ok(l) => {
-          listener = Some(l);
-          break;
+      match tokio::net::TcpSocket::new_v4() {
+        Ok(socket) => {
+          if let Err(e) = socket.set_reuseaddr(true) {
+            last_err = format!("set_reuseaddr: {e}");
+            continue;
+          }
+          match socket.bind(addr) {
+            Ok(()) => match socket.listen(128) {
+              Ok(l) => {
+                listener = Some(l);
+                break;
+              }
+              Err(e) => last_err = e.to_string(),
+            },
+            Err(e) => last_err = e.to_string(),
+          }
         }
-        Err(e) => {
-          last_err = e.to_string();
-        }
+        Err(e) => last_err = e.to_string(),
       }
     }
     let listener = listener
@@ -153,6 +170,26 @@ impl Drop for OAuthCallbackListener {
     if let Some(task) = self.task.take() {
       task.abort();
     }
+  }
+}
+
+#[derive(Debug)]
+enum CallbackAfterLaunchError<T> {
+  Launch(String),
+  Bind { launched: T, error: String },
+}
+
+async fn start_callback_after<T, F>(
+  launch: F,
+  addr: &str,
+) -> Result<(T, OAuthCallbackListener), CallbackAfterLaunchError<T>>
+where
+  F: std::future::Future<Output = Result<T, String>>,
+{
+  let launched = launch.await.map_err(CallbackAfterLaunchError::Launch)?;
+  match OAuthCallbackListener::start_on_addr(addr).await {
+    Ok(listener) => Ok((launched, listener)),
+    Err(error) => Err(CallbackAfterLaunchError::Bind { launched, error }),
   }
 }
 
@@ -906,16 +943,59 @@ impl LoginEngine {
     message: &str,
     credential_index: u32,
     total_credentials: u32,
-    result: Option<LoginResult>,
+    terminal: Option<LoginTerminalSummary>,
   ) {
+    let safe_message = if let Some(summary) = terminal.as_ref() {
+      summary.status_code.clone()
+    } else if step == LoginStep::Failed {
+      "failed".into()
+    } else {
+      super::sanitize_browser_urls_for_log(message)
+    };
     let payload = LoginProgress {
       task_id: self.task_id.clone(),
       credential_index,
       total_credentials,
       step,
-      message: message.to_string(),
+      message: safe_message,
       timestamp: Utc::now(),
-      result,
+      event_kind: LoginProgressEventKind::Account,
+      terminal,
+    };
+    let _ = app_handle.emit("login-progress", payload);
+  }
+
+  fn emit_batch_terminal(
+    &self,
+    app_handle: &tauri::AppHandle,
+    _message: &str,
+    total_credentials: u32,
+    success: bool,
+  ) {
+    let payload = LoginProgress {
+      task_id: self.task_id.clone(),
+      credential_index: 0,
+      total_credentials,
+      step: if success {
+        LoginStep::Completed
+      } else {
+        LoginStep::Failed
+      },
+      message: if success {
+        "completed".into()
+      } else {
+        "failed".into()
+      },
+      timestamp: Utc::now(),
+      event_kind: LoginProgressEventKind::Batch,
+      terminal: Some(LoginTerminalSummary {
+        success,
+        status_code: if success {
+          "completed".into()
+        } else {
+          "failed".into()
+        },
+      }),
     };
     let _ = app_handle.emit("login-progress", payload);
   }
@@ -1077,7 +1157,14 @@ impl LoginEngine {
               ),
               idx as u32,
               total,
-              Some(result.clone()),
+              Some(LoginTerminalSummary {
+                success: login_ok,
+                status_code: if login_ok {
+                  "completed".into()
+                } else {
+                  "failed".into()
+                },
+              }),
             );
             results.push(result);
             succeeded = true;
@@ -1191,7 +1278,10 @@ impl LoginEngine {
           &format!("[{}/{}] {}", idx + 1, total, result.error_message),
           idx as u32,
           total,
-          Some(result.clone()),
+          Some(LoginTerminalSummary {
+            success: false,
+            status_code: "failed".into(),
+          }),
         );
         results.push(result);
       }
@@ -1204,7 +1294,7 @@ impl LoginEngine {
     let fail = results.iter().filter(|r| !r.success).count();
     let msg = format!("Done: {ok} logged in, {fail} failed");
 
-    self.emit(&app_handle, LoginStep::Completed, &msg, 0, total, None);
+    self.emit_batch_terminal(&app_handle, &msg, total, fail == 0 && ok > 0);
 
     results
   }
@@ -1243,14 +1333,9 @@ impl LoginEngine {
       "{prefix} Auth URL ready (PKCE, client=codex, redirect=localhost:1455)"
     ));
 
-    // Start local callback listener BEFORE browser navigates to auth.
-    // OpenAI redirects to localhost:1455; without a listener Chromium shows chrome-error.
-    let mut callback_listener = OAuthCallbackListener::start().await?;
-    self.log(&format!(
-      "{prefix} OAuth callback listener bound on {OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}"
-    ));
-
-    // Step 2: Launch browser
+    // Step 2: Launch browser before binding the callback socket. Detached Windows
+    // workers inherit open handles, so binding first can leave :1455 owned by a
+    // child after listener shutdown and make the next retry fail with EADDRINUSE.
     self.emit(
       app_handle,
       LoginStep::LaunchingBrowser,
@@ -1260,15 +1345,28 @@ impl LoginEngine {
       None,
     );
 
-    let (profile, mut cdp) = match self.launch_browser(app_handle).await {
-      Ok(v) => v,
-      Err(e) => {
-        // Await socket release so the next retry can re-bind :1455 on Windows.
-        callback_listener.shutdown().await;
-        return Err(e);
+    let ((profile, mut cdp), mut callback_listener) = match start_callback_after(
+      self.launch_browser(app_handle),
+      &format!("{OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}"),
+    )
+    .await
+    {
+      Ok(started) => started,
+      Err(CallbackAfterLaunchError::Launch(error)) => return Err(error),
+      Err(CallbackAfterLaunchError::Bind { launched, error }) => {
+        let (profile, _) = launched;
+        if let Err(kill_error) = self.kill_browser_only(app_handle, &profile).await {
+          return Err(format!(
+            "{error}; browser cleanup after callback bind failure also failed: {kill_error}"
+          ));
+        }
+        return Err(error);
       }
     };
     self.log(&format!("{prefix} Browser launched: {}", profile.name));
+    self.log(&format!(
+      "{prefix} OAuth callback listener bound on {OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}"
+    ));
 
     let result = self
       .run_login_in_browser(
@@ -1332,7 +1430,10 @@ impl LoginEngine {
     sleep(std::time::Duration::from_secs(2)).await;
 
     let mut cur_url = cdp.current_url().await.unwrap_or_default();
-    self.log(&format!("{prefix} Auth page URL: {cur_url}"));
+    self.log(&format!(
+      "{prefix} Auth page URL: {}",
+      safe_browser_url_for_log(&cur_url)
+    ));
     if let Some(error) = self.detect_unsupported_region_error_from_dom(cdp).await {
       return Err(error);
     }
@@ -1384,13 +1485,17 @@ impl LoginEngine {
           let resolved_page = resolve_dom_page_override(page, dom_page);
           if resolved_page != page {
             self.log(&format!(
-              "{prefix} DOM page override: {page:?} -> {resolved_page:?} (url={cur_url})"
+              "{prefix} DOM page override: {page:?} -> {resolved_page:?} (url={})",
+              safe_browser_url_for_log(&cur_url)
             ));
             page = resolved_page;
           }
         }
       }
-      self.log(&format!("{prefix} Page[{step_i}]: {page:?} url={cur_url}"));
+      self.log(&format!(
+        "{prefix} Page[{step_i}]: {page:?} url={}",
+        safe_browser_url_for_log(&cur_url)
+      ));
 
       match page {
         LoginPageType::LoginEmail => {
@@ -1592,6 +1697,24 @@ impl LoginEngine {
               break;
             }
           }
+          if matches!(detect_login_page_type(&cur_url), LoginPageType::AddPhone)
+            && self.confirm_whatsapp_phone_fallback(cdp, prefix).await?
+          {
+            for _ in 0..12 {
+              sleep(std::time::Duration::from_millis(500)).await;
+              cur_url = cdp.current_url().await.unwrap_or_default();
+              let page = detect_login_page_type(&cur_url);
+              if matches!(page, LoginPageType::PhoneOtp) {
+                break;
+              }
+              if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
+                if dom_page == LoginPageType::PhoneOtp {
+                  cur_url = cdp.current_url().await.unwrap_or_default();
+                  break;
+                }
+              }
+            }
+          }
           if matches!(detect_login_page_type(&cur_url), LoginPageType::AddPhone) {
             if let Ok(err_probe) = cdp
               .evaluate(
@@ -1617,7 +1740,10 @@ impl LoginEngine {
               ));
             }
           }
-          self.log(&format!("{prefix} After phone submit, URL: {cur_url}"));
+          self.log(&format!(
+            "{prefix} After phone submit, URL: {}",
+            safe_browser_url_for_log(&cur_url)
+          ));
         }
 
         LoginPageType::PhoneOtp => {
@@ -1654,9 +1780,17 @@ impl LoginEngine {
           );
           // On timeout/no SMS: do NOT fail the whole login_once. Blacklist the number,
           // return to AddPhone, and rent a different Viotp number within this attempt.
-          let otp_info = match sms.get_otp(&request_id, SMS_OTP_TIMEOUT_SECS) {
+          let otp_info = match poll_otp_with_cancel(
+            sms,
+            &request_id,
+            SMS_OTP_TIMEOUT_SECS,
+            self.cancel_flag.as_ref(),
+          ) {
             Ok(info) => info,
             Err(e) => {
+              if self.is_cancelled() {
+                return Err("Cancelled during SMS OTP polling".into());
+              }
               let err = e.to_string();
               self.log(&format!(
                 "{prefix} SMS OTP poll failed for request {request_id}: {err}"
@@ -1722,7 +1856,8 @@ impl LoginEngine {
             cur_url = cdp.current_url().await.unwrap_or_default();
             let after = detect_login_page_type(&cur_url);
             self.log(&format!(
-              "{prefix} After phone OTP poll: {after:?} url={cur_url}"
+              "{prefix} After phone OTP poll: {after:?} url={}",
+              safe_browser_url_for_log(&cur_url)
             ));
             if matches!(
               after,
@@ -1745,7 +1880,8 @@ impl LoginEngine {
             None,
           );
           self.log(&format!(
-            "{prefix} Consent page detected, clicking Continue... url={cur_url}"
+            "{prefix} Consent page detected, clicking Continue... url={}",
+            safe_browser_url_for_log(&cur_url)
           ));
           // A few robust click strategies, then stop re-looping forever on the same page.
           // Camoufox often lands on Remix "Try again" after Continue — recover and re-click.
@@ -1761,7 +1897,8 @@ impl LoginEngine {
               if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
                 if dom_page != LoginPageType::Consent && dom_page != LoginPageType::Unknown {
                   self.log(&format!(
-                    "{prefix} Left consent via recover/DOM -> {dom_page:?} url={cur_url}"
+                    "{prefix} Left consent via recover/DOM -> {dom_page:?} url={}",
+                    safe_browser_url_for_log(&cur_url)
                   ));
                   if matches!(
                     dom_page,
@@ -1781,7 +1918,10 @@ impl LoginEngine {
               cur_url = cdp.current_url().await.unwrap_or_default();
               let after = detect_login_page_type(&cur_url);
               if matches!(after, LoginPageType::Callback | LoginPageType::ChatgptHome) {
-                self.log(&format!("{prefix} Left consent -> {after:?} url={cur_url}"));
+                self.log(&format!(
+                  "{prefix} Left consent -> {after:?} url={}",
+                  safe_browser_url_for_log(&cur_url)
+                ));
                 left_consent = true;
                 break;
               }
@@ -1799,22 +1939,27 @@ impl LoginEngine {
               break;
             }
             self.log(&format!(
-              "{prefix} Still on consent after attempt {}: {cur_url}",
-              attempt + 1
+              "{prefix} Still on consent after attempt {}: {}",
+              attempt + 1,
+              safe_browser_url_for_log(&cur_url)
             ));
           }
           if !left_consent {
             // Break out of the state machine so extract_callback can wait on the listener
             // in case a late redirect arrives, instead of clicking forever.
             self.log(&format!(
-              "{prefix} Consent did not navigate away; waiting on callback listener. url={cur_url}"
+              "{prefix} Consent did not navigate away; waiting on callback listener. url={}",
+              safe_browser_url_for_log(&cur_url)
             ));
             break;
           }
         }
 
         LoginPageType::Callback | LoginPageType::ChatgptHome => {
-          self.log(&format!("{prefix} Login flow reached end: {cur_url}"));
+          self.log(&format!(
+            "{prefix} Login flow reached end: {}",
+            safe_browser_url_for_log(&cur_url)
+          ));
           break;
         }
 
@@ -2110,8 +2255,9 @@ impl LoginEngine {
         .get("iframeCount")
         .and_then(|u| u.as_u64())
         .unwrap_or(0);
+      let safe_url = safe_browser_url_for_log(url);
       last_err = format!(
-        "fill {field}: {} url={url} ready={ready} iframes={iframes}",
+        "fill {field}: {} url={safe_url} ready={ready} iframes={iframes}",
         value_json["reason"].as_str().unwrap_or("failed")
       );
     }
@@ -3217,6 +3363,63 @@ impl LoginEngine {
     }
   }
 
+  async fn confirm_whatsapp_phone_fallback(
+    &mut self,
+    cdp: &mut BrowserSession,
+    prefix: &str,
+  ) -> Result<bool, String> {
+    let body = cdp
+      .evaluate(
+        "(document.body && (document.body.innerText || document.body.textContent) || '').slice(0,4000)",
+        false,
+      )
+      .await?
+      .get("value")
+      .and_then(serde_json::Value::as_str)
+      .unwrap_or("")
+      .to_string();
+    if !is_whatsapp_phone_fallback(&body) {
+      return Ok(false);
+    }
+    let probe_js = r#"(function(){
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0
+          && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const control = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))
+        .find((el) => {
+          if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+          const text = (el.innerText || el.textContent || el.value || '').trim().toLowerCase();
+          return text === 'continue' || text.includes('continue');
+        });
+      if (!control) return { ready: false };
+      control.scrollIntoView({ block: 'center', inline: 'nearest' });
+      const rect = control.getBoundingClientRect();
+      return {
+        ready: true,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      };
+    })()"#;
+    let probe = cdp.evaluate(probe_js, false).await?;
+    let value = probe.get("value").cloned().unwrap_or_default();
+    let x = value
+      .get("x")
+      .and_then(serde_json::Value::as_f64)
+      .ok_or_else(|| "WhatsApp phone fallback Continue control is unavailable".to_string())?;
+    let y = value
+      .get("y")
+      .and_then(serde_json::Value::as_f64)
+      .ok_or_else(|| "WhatsApp phone fallback Continue control is unavailable".to_string())?;
+    self.log(&format!(
+      "{prefix} SMS unavailable; confirming OpenAI WhatsApp verification fallback"
+    ));
+    cdp.mouse_click(x, y).await?;
+    Ok(true)
+  }
+
   /// Fill phone number and submit.
   ///
   /// `force_country_reselect`: after SMS timeout we always re-pick Vietnam even
@@ -4062,6 +4265,8 @@ impl LoginEngine {
 
     let browser_str = if self.config.browser_type.eq_ignore_ascii_case("camoufox") {
       "camoufox"
+    } else if self.config.browser_type.eq_ignore_ascii_case("firefox") {
+      "firefox"
     } else {
       "chromium"
     };
@@ -4447,6 +4652,33 @@ mod tests {
   use super::*;
 
   #[test]
+  fn browser_url_log_removes_query_fragment_and_userinfo() {
+    assert_eq!(
+      safe_browser_url_for_log(
+        "http://user:pass@localhost:1455/auth/callback?code=secret&state=secret#done"
+      ),
+      "http://localhost:1455/auth/callback"
+    );
+    assert_eq!(
+      safe_browser_url_for_log("https://auth.openai.com/log-in/password"),
+      "https://auth.openai.com/log-in/password"
+    );
+  }
+
+  #[test]
+  fn whatsapp_phone_fallback_requires_switch_and_continue_signal() {
+    assert!(is_whatsapp_phone_fallback(
+      "We couldn't send a text message to this phone number, so we switched to WhatsApp. Continue to send a verification code on WhatsApp."
+    ));
+    assert!(!is_whatsapp_phone_fallback(
+      "Continue to add your phone number"
+    ));
+    assert!(!is_whatsapp_phone_fallback(
+      "Send a verification code by text message"
+    ));
+  }
+
+  #[test]
   fn submit_probe_never_submits_from_javascript() {
     let js = submit_control_probe_js(r#"button[type="submit"]"#);
 
@@ -4567,6 +4799,37 @@ mod tests {
       .expect("test callback address should resolve");
     drop(listener);
     addr.to_string()
+  }
+
+  #[cfg(windows)]
+  #[tokio::test(flavor = "current_thread")]
+  #[serial_test::serial]
+  async fn callback_listener_is_bound_after_child_process_launch() {
+    use std::process::{Command, Stdio};
+
+    let addr = free_callback_test_addr();
+    let (mut child, mut listener) = start_callback_after(
+      async {
+        Command::new("cmd")
+          .args(["/C", "ping -n 4 127.0.0.1 >NUL"])
+          .stdin(Stdio::null())
+          .stdout(Stdio::null())
+          .stderr(Stdio::null())
+          .spawn()
+          .map_err(|error| error.to_string())
+      },
+      &addr,
+    )
+    .await
+    .expect("child must launch before callback listener binds");
+
+    listener.shutdown().await;
+    let rebound = TcpListener::bind(&addr)
+      .await
+      .expect("child must not inherit callback listener handle");
+    drop(rebound);
+    let _ = child.kill();
+    let _ = child.wait();
   }
 
   #[tokio::test(flavor = "current_thread")]

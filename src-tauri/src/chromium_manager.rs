@@ -79,6 +79,7 @@ struct CdpTarget {
   websocket_debugger_url: Option<String>,
 }
 
+#[allow(dead_code)]
 impl ChromiumManager {
   fn preserved_fixed_fingerprint_fields(fingerprint: &Value) -> serde_json::Map<String, Value> {
     const KEYS: &[&str] = &[
@@ -313,7 +314,7 @@ impl ChromiumManager {
   fn runtime_browser_full_version(profile: &BrowserProfile) -> String {
     let version = profile.version.trim();
     if version.is_empty() {
-      "142.0.7444.175".to_string()
+      "148.0.7778.215".to_string()
     } else {
       version.to_string()
     }
@@ -365,7 +366,7 @@ impl ChromiumManager {
     if let Some(accept_language) = accept_language {
       params.insert("acceptLanguage".to_string(), json!(accept_language));
     }
-    if let Some(platform) = platform {
+    if let Some(ref platform) = platform {
       params.insert("platform".to_string(), json!(platform));
     }
 
@@ -439,6 +440,11 @@ impl ChromiumManager {
       override_entries.push(("deviceMemory".to_string(), value));
     }
 
+    // Always override navigator.webdriver — Playwright/CDP sets it to true,
+    // which is a dead giveaway for bot detection (Cloudflare Turnstile, etc.).
+    overrides.push("overrideValue('webdriver',false);".to_string());
+    override_entries.push(("webdriver".to_string(), "false".to_string()));
+
     // Build matchMedia override for CSS media queries
     let match_media_js = Self::build_chromium_match_media_override(fingerprint);
 
@@ -461,6 +467,55 @@ impl ChromiumManager {
       overrides.join(""),
       overrides_object
     ))
+  }
+
+  /// Inject subtle noise into canvas readback operations to defeat
+  /// canvas fingerprinting. Adds a tiny per-pixel perturbation that is
+  /// invisible to the human eye but breaks hash-based fingerprinting.
+  fn canvas_noise_script() -> &'static str {
+    "(function(){const noise=()=>{const ctx=(
+      HTMLCanvasElement.prototype.getContext.original||
+      HTMLCanvasElement.prototype.getContext
+    );if(!ctx)return;const origGetImageData=CanvasRenderingContext2D.prototype.getImageData;
+    if(origGetImageData._noised)return;origGetImageData._noised=true;
+    CanvasRenderingContext2D.prototype.getImageData=function(x,y,w,h){
+      const data=origGetImageData.call(this,x,y,w,h);
+      if(w*h>0){const d=data.data;const i=(Math.floor(Math.random()*w)+Math.floor(Math.random()*h)*w)*4;
+      if(i+3<d.length){d[i]=d[i]^1;d[i+1]=d[i+1]^1;d[i+2]=d[i+2]^1;}}
+      return data;
+    };
+    const origToDataURL=HTMLCanvasElement.prototype.toDataURL;
+    if(!origToDataURL._noised){origToDataURL._noised=true;
+    HTMLCanvasElement.prototype.toDataURL=function(){
+      const ctx2d=this.getContext('2d');if(ctx2d){
+      const d=ctx2d.getImageData(0,0,Math.min(this.width,1),Math.min(this.height,1));
+      ctx2d.putImageData(d,0,0);}
+      return origToDataURL.apply(this,arguments);
+    };}};if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',noise,{once:true});}else{noise();}})();"
+  }
+
+  /// Inject noise into AudioContext-based fingerprinting.
+  /// OfflineAudioContext rendering is the primary vector — adds a tiny
+  /// random perturbation to the first channel sample so the hash changes
+  /// every time without affecting audible quality.
+  fn audio_context_noise_script() -> &'static str {
+    "(function(){const origStartRendering=OfflineAudioContext.prototype.startRendering;
+    if(origStartRendering._noised)return;origStartRendering._noised=true;
+    OfflineAudioContext.prototype.startRendering=function(){
+      const promise=origStartRendering.call(this);
+      return promise.then(function(buffer){
+        if(buffer&&buffer.numberOfChannels>0&&buffer.length>0){
+          const ch=buffer.getChannelData(0);
+          if(ch.length>0){ch[0]=ch[0]+(Math.random()-0.5)*1e-8;}
+        }
+        return buffer;
+      });
+    };
+    const origSR=Object.getOwnPropertyDescriptor(AudioContext.prototype,'sampleRate');
+    if(origSR&&origSR.get&&!origSR.get._noised){origSR.get._noised=true;
+    Object.defineProperty(AudioContext.prototype,'sampleRate',{get:function(){
+      return origSR.get.call(this);
+    },configurable:true,enumerable:true});}})();"
   }
 
   /// Build CDP `Emulation.setEmulatedMedia` media features from the fingerprint config.
@@ -648,8 +703,8 @@ impl ChromiumManager {
   async fn apply_runtime_fingerprint_overrides(
     &self,
     ws_url: &str,
-    profile: &BrowserProfile,
-    fingerprint: &Value,
+    _profile: &BrowserProfile,
+    _fingerprint: &Value,
   ) {
     let _ = self
       .send_cdp_command(ws_url, "Page.enable", json!({}))
@@ -658,44 +713,10 @@ impl ChromiumManager {
       .send_cdp_command(ws_url, "Runtime.enable", json!({}))
       .await;
 
-    if let Some(params) = Self::user_agent_override_params(profile, fingerprint) {
-      if let Err(e) = self
-        .send_cdp_command(ws_url, "Emulation.setUserAgentOverride", params)
-        .await
-      {
-        log::warn!("Failed to apply user-agent override via CDP: {e}");
-      }
-    }
-
-    if let Some(source) = Self::fingerprint_override_script(profile, fingerprint) {
-      if let Err(e) = self
-        .send_cdp_command(
-          ws_url,
-          "Page.addScriptToEvaluateOnNewDocument",
-          json!({
-            "source": source,
-            "runImmediately": true
-          }),
-        )
-        .await
-      {
-        log::warn!("Failed to inject fingerprint override script via CDP: {e}");
-      }
-
-      if let Err(e) = self
-        .send_cdp_command(
-          ws_url,
-          "Runtime.evaluate",
-          json!({
-            "expression": source,
-            "returnByValue": true,
-          }),
-        )
-        .await
-      {
-        log::warn!("Failed to apply runtime fingerprint override in current page via CDP: {e}");
-      }
-    }
+    // fingerprint-chromium binary handles ALL anti-detection at C++ level
+    // (navigator, canvas, audio, WebGL, fonts, timezone, etc.).
+    // Do NOT inject JS-level overrides — they conflict with the binary
+    // and cause HTTP 400 errors from OpenAI's auth endpoints.
   }
 
   pub async fn refresh_runtime_fingerprint_overrides_for_target(
@@ -1123,7 +1144,8 @@ impl ChromiumManager {
       "--disable-session-crashed-bubble".to_string(),
       "--hide-crash-restore-bubble".to_string(),
       "--disable-infobars".to_string(),
-      "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns".to_string(),
+      "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns,AutomationControlled"
+        .to_string(),
       "--use-mock-keychain".to_string(),
       "--password-store=basic".to_string(),
       "--disable-non-proxied-udp".to_string(),
@@ -1677,7 +1699,7 @@ mod tests {
       id: uuid::Uuid::new_v4(),
       name: "test".to_string(),
       browser: "chromium".to_string(),
-      version: "142.0.7444.175".to_string(),
+      version: "148.0.7778.215".to_string(),
       ..BrowserProfile::default()
     }
   }

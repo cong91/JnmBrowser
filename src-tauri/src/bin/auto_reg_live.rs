@@ -3,300 +3,364 @@
 //! Usage (from repo root):
 //! ```text
 //! pnpm copy-proxy-binary
-//! cargo run --manifest-path src-tauri/Cargo.toml --bin auto-reg-live -- \
+//! cargo run --manifest-path src-tauri/Cargo.toml --features auto-reg-live --bin auto-reg-live -- \
 //!   --cdk GMAIL-XXXX \
 //!   --browser camoufox \
 //!   --profile-id 2d31c07b-df06-4630-9081-433b16baa26c \
 //!   --network nord --rotate-every 1 --accounts-per-cdk 2 --nord-group "United States"
+//!
+//! # VPN mode — auto-resolves first Nord config from settings, or use --vpn-name:
+//! cargo run --manifest-path src-tauri/Cargo.toml --features auto-reg-live --bin auto-reg-live -- \
+//!   --cdk GMAIL-XXXX --browser chromium --network vpn
+//! cargo run --manifest-path src-tauri/Cargo.toml --features auto-reg-live --bin auto-reg-live -- \
+//!   --cdk GMAIL-XXXX --browser chromium --network vpn --vpn-name "Japan"
+//!
+//! # List saved VPN configs:
+//! cargo run --manifest-path src-tauri/Cargo.toml --features auto-reg-live --bin auto-reg-live -- --list-vpns
 //! ```
 
+use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use donutbrowser_lib::auto_service::openai::register::execution::{
+  prepare_registration, run_prepared_registration,
+};
 use donutbrowser_lib::auto_service::openai::register::types::NetworkMode;
-use donutbrowser_lib::auto_service::openai::register::{RegistrationConfig, RegistrationEngine};
-use donutbrowser_lib::email::{build_email_service, EmailProvider, EmailService};
+use donutbrowser_lib::auto_service::openai::register::RegistrationConfig;
+use donutbrowser_lib::email::EmailProvider;
 
+#[derive(Default)]
 struct LiveArgs {
-  /// One or more CDKs (comma-separated or repeated `--cdk`).
   cdks: Vec<String>,
-  browser: String,
+  browser: Option<String>,
   profile_id: Option<String>,
-  max_retries: u32,
-  accounts_per_cdk: u32,
-  concurrency: u32,
-  network_mode: NetworkMode,
-  rotate_every_n: u32,
+  proxy_id: Option<String>,
+  max_retries: Option<u32>,
+  accounts_per_cdk: Option<u32>,
+  concurrency: Option<u32>,
+  network_mode: Option<NetworkMode>,
+  rotate_every_n: Option<u32>,
   nord_group: Option<String>,
   nord_server_name: Option<String>,
   vpn_id: Option<String>,
-  email_provider: EmailProvider,
+  vpn_name: Option<String>,
+  list_vpns: bool,
+  email_provider: Option<EmailProvider>,
 }
 
-fn parse_network_mode(s: &str) -> NetworkMode {
-  match s.trim().to_ascii_lowercase().as_str() {
-    "proxy" => NetworkMode::Proxy,
-    "vpn" | "wireguard" | "wg" => NetworkMode::Vpn,
-    "nord" | "nordvpn" | "nord-cli" => NetworkMode::Nord,
-    _ => NetworkMode::None,
+fn parse_network_mode(value: &str) -> Result<NetworkMode, String> {
+  match value.trim().to_ascii_lowercase().as_str() {
+    "none" => Ok(NetworkMode::None),
+    "proxy" => Ok(NetworkMode::Proxy),
+    "vpn" | "wireguard" | "wg" => Ok(NetworkMode::Vpn),
+    "nord" | "nordvpn" | "nord-cli" => Ok(NetworkMode::Nord),
+    _ => Err("network must be one of: none, proxy, vpn, nord".into()),
   }
 }
 
-fn parse_email_provider(value: &str) -> EmailProvider {
-  EmailProvider::parse(value).unwrap_or_else(|error| {
-    eprintln!("{error}");
-    std::process::exit(2);
+fn parse_email_provider(value: &str) -> Result<EmailProvider, String> {
+  EmailProvider::parse(value).map_err(|_| {
+    format!(
+      "email provider must be {} or {}",
+      EmailProvider::GMAIL_123452026_ID,
+      EmailProvider::SMS_IOSMQ_ID
+    )
   })
 }
 
-fn push_cdks(dest: &mut Vec<String>, raw: &str) {
+fn parse_u32(option: &str, value: &str) -> Result<u32, String> {
+  value
+    .parse()
+    .map_err(|_| format!("{option} must be an unsigned integer"))
+}
+
+fn push_cdks(destination: &mut Vec<String>, raw: &str) {
   for part in raw.split([',', ';', ' ', '\n', '\t']) {
-    let c = part.trim();
-    if !c.is_empty() {
-      dest.push(c.to_string());
+    let cdk = part.trim();
+    if !cdk.is_empty() {
+      destination.push(cdk.to_string());
     }
   }
 }
 
-fn parse_args() -> LiveArgs {
-  let mut cdks: Vec<String> = Vec::new();
-  if let Ok(env_cdk) = std::env::var("AUTO_REG_CDK") {
-    push_cdks(&mut cdks, &env_cdk);
-  }
-  let mut browser = std::env::var("AUTO_REG_BROWSER").unwrap_or_else(|_| "camoufox".into());
-  let mut profile_id = std::env::var("AUTO_REG_PROFILE_ID").ok();
-  let mut max_retries = 1u32;
-  let mut accounts_per_cdk = 1u32;
-  let mut concurrency = 1u32;
-  let mut concurrency_explicit = false;
-  let mut network_mode = NetworkMode::None;
-  let mut rotate_every_n = 0u32;
-  let mut nord_group = std::env::var("AUTO_REG_NORD_GROUP").ok();
-  let mut nord_server_name = std::env::var("AUTO_REG_NORD_SERVER").ok();
-  let mut vpn_id = std::env::var("AUTO_REG_VPN_ID").ok();
-  let mut email_provider = std::env::var("AUTO_REG_EMAIL_PROVIDER")
-    .map(|value| parse_email_provider(&value))
-    .unwrap_or(EmailProvider::Gmail123452026);
+fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<String, String> {
+  args
+    .next()
+    .ok_or_else(|| format!("{option} requires a value"))
+}
 
-  if let Ok(m) = std::env::var("AUTO_REG_NETWORK") {
-    network_mode = parse_network_mode(&m);
+fn parse_args_from(
+  env_value: impl Fn(&str) -> Option<String>,
+  raw_args: impl IntoIterator<Item = String>,
+) -> Result<LiveArgs, String> {
+  let mut parsed = LiveArgs::default();
+
+  if let Some(value) = env_value("AUTO_REG_CDK") {
+    push_cdks(&mut parsed.cdks, &value);
   }
-  if let Ok(n) = std::env::var("AUTO_REG_ROTATE_EVERY") {
-    rotate_every_n = n.parse().unwrap_or(0);
+  parsed.browser = env_value("AUTO_REG_BROWSER");
+  parsed.profile_id = env_value("AUTO_REG_PROFILE_ID");
+  parsed.proxy_id = env_value("AUTO_REG_PROXY_ID");
+  parsed.nord_group = env_value("AUTO_REG_NORD_GROUP");
+  parsed.nord_server_name = env_value("AUTO_REG_NORD_SERVER");
+  parsed.vpn_id = env_value("AUTO_REG_VPN_ID");
+  if let Some(value) = env_value("AUTO_REG_MAX_RETRIES") {
+    parsed.max_retries = Some(parse_u32("AUTO_REG_MAX_RETRIES", &value)?);
   }
-  if let Ok(n) = std::env::var("AUTO_REG_ACCOUNTS_PER_CDK") {
-    accounts_per_cdk = n.parse().unwrap_or(1);
+  if let Some(value) = env_value("AUTO_REG_ACCOUNTS_PER_CDK") {
+    parsed.accounts_per_cdk = Some(parse_u32("AUTO_REG_ACCOUNTS_PER_CDK", &value)?);
   }
-  if let Ok(n) = std::env::var("AUTO_REG_CONCURRENCY") {
-    concurrency = n.parse().unwrap_or(1);
-    concurrency_explicit = true;
+  if let Some(value) = env_value("AUTO_REG_CONCURRENCY") {
+    parsed.concurrency = Some(parse_u32("AUTO_REG_CONCURRENCY", &value)?);
+  }
+  if let Some(value) = env_value("AUTO_REG_NETWORK") {
+    parsed.network_mode = Some(parse_network_mode(&value)?);
+  }
+  if let Some(value) = env_value("AUTO_REG_ROTATE_EVERY") {
+    parsed.rotate_every_n = Some(parse_u32("AUTO_REG_ROTATE_EVERY", &value)?);
+  }
+  if let Some(value) = env_value("AUTO_REG_EMAIL_PROVIDER") {
+    parsed.email_provider = Some(parse_email_provider(&value)?);
   }
 
-  let mut args = std::env::args().skip(1);
-  while let Some(arg) = args.next() {
-    match arg.as_str() {
-      "--cdk" => {
-        if let Some(v) = args.next() {
-          push_cdks(&mut cdks, &v);
-        }
-      }
-      "--browser" => browser = args.next().unwrap_or(browser),
-      "--profile-id" => profile_id = args.next(),
+  let mut args = raw_args.into_iter();
+  while let Some(argument) = args.next() {
+    match argument.as_str() {
+      "--cdk" => push_cdks(&mut parsed.cdks, &next_value(&mut args, "--cdk")?),
+      "--browser" => parsed.browser = Some(next_value(&mut args, "--browser")?),
+      "--profile-id" => parsed.profile_id = Some(next_value(&mut args, "--profile-id")?),
+      "--proxy-id" => parsed.proxy_id = Some(next_value(&mut args, "--proxy-id")?),
       "--max-retries" => {
-        max_retries = args
-          .next()
-          .and_then(|v| v.parse().ok())
-          .unwrap_or(max_retries);
+        let value = next_value(&mut args, "--max-retries")?;
+        parsed.max_retries = Some(parse_u32("--max-retries", &value)?);
       }
       "--accounts-per-cdk" => {
-        accounts_per_cdk = args
-          .next()
-          .and_then(|v| v.parse().ok())
-          .unwrap_or(accounts_per_cdk);
+        let value = next_value(&mut args, "--accounts-per-cdk")?;
+        parsed.accounts_per_cdk = Some(parse_u32("--accounts-per-cdk", &value)?);
       }
       "--concurrency" => {
-        concurrency = args
-          .next()
-          .and_then(|v| v.parse().ok())
-          .unwrap_or(concurrency);
-        concurrency_explicit = true;
+        let value = next_value(&mut args, "--concurrency")?;
+        parsed.concurrency = Some(parse_u32("--concurrency", &value)?);
       }
       "--network" => {
-        network_mode = parse_network_mode(&args.next().unwrap_or_default());
+        parsed.network_mode = Some(parse_network_mode(&next_value(&mut args, "--network")?)?);
       }
       "--rotate-every" => {
-        rotate_every_n = args
-          .next()
-          .and_then(|v| v.parse().ok())
-          .unwrap_or(rotate_every_n);
+        let value = next_value(&mut args, "--rotate-every")?;
+        parsed.rotate_every_n = Some(parse_u32("--rotate-every", &value)?);
       }
-      "--nord-group" => nord_group = args.next(),
-      "--nord-server" => nord_server_name = args.next(),
-      "--vpn-id" => vpn_id = args.next(),
+      "--nord-group" => parsed.nord_group = Some(next_value(&mut args, "--nord-group")?),
+      "--nord-server" => {
+        parsed.nord_server_name = Some(next_value(&mut args, "--nord-server")?);
+      }
+      "--vpn-id" => parsed.vpn_id = Some(next_value(&mut args, "--vpn-id")?),
+      "--vpn-name" => parsed.vpn_name = Some(next_value(&mut args, "--vpn-name")?),
+      "--list-vpns" => parsed.list_vpns = true,
       "--email-provider" => {
-        if let Some(v) = args.next() {
-          email_provider = parse_email_provider(&v);
+        parsed.email_provider = Some(parse_email_provider(&next_value(
+          &mut args,
+          "--email-provider",
+        )?)?);
+      }
+      _ => {
+        let Some((option, value)) = argument.split_once('=') else {
+          return Err("unknown argument".into());
+        };
+        match option {
+          "--cdk" => push_cdks(&mut parsed.cdks, value),
+          "--browser" => parsed.browser = Some(value.to_string()),
+          "--profile-id" => parsed.profile_id = Some(value.to_string()),
+          "--proxy-id" => parsed.proxy_id = Some(value.to_string()),
+          "--max-retries" => {
+            parsed.max_retries = Some(parse_u32("--max-retries", value)?);
+          }
+          "--accounts-per-cdk" => {
+            parsed.accounts_per_cdk = Some(parse_u32("--accounts-per-cdk", value)?);
+          }
+          "--concurrency" => {
+            parsed.concurrency = Some(parse_u32("--concurrency", value)?);
+          }
+          "--network" => parsed.network_mode = Some(parse_network_mode(value)?),
+          "--rotate-every" => {
+            parsed.rotate_every_n = Some(parse_u32("--rotate-every", value)?);
+          }
+          "--nord-group" => parsed.nord_group = Some(value.to_string()),
+          "--nord-server" => parsed.nord_server_name = Some(value.to_string()),
+          "--vpn-id" => parsed.vpn_id = Some(value.to_string()),
+          "--vpn-name" => parsed.vpn_name = Some(value.to_string()),
+          "--list-vpns" => parsed.list_vpns = true,
+          "--email-provider" => parsed.email_provider = Some(parse_email_provider(value)?),
+          _ => return Err("unknown argument".into()),
         }
       }
-      other if other.starts_with("--cdk=") => {
-        push_cdks(&mut cdks, other.trim_start_matches("--cdk="));
-      }
-      other if other.starts_with("--browser=") => {
-        browser = other.trim_start_matches("--browser=").to_string();
-      }
-      other if other.starts_with("--profile-id=") => {
-        profile_id = Some(other.trim_start_matches("--profile-id=").to_string());
-      }
-      other if other.starts_with("--network=") => {
-        network_mode = parse_network_mode(other.trim_start_matches("--network="));
-      }
-      other if other.starts_with("--rotate-every=") => {
-        rotate_every_n = other
-          .trim_start_matches("--rotate-every=")
-          .parse()
-          .unwrap_or(rotate_every_n);
-      }
-      other if other.starts_with("--accounts-per-cdk=") => {
-        accounts_per_cdk = other
-          .trim_start_matches("--accounts-per-cdk=")
-          .parse()
-          .unwrap_or(accounts_per_cdk);
-      }
-      other if other.starts_with("--concurrency=") => {
-        concurrency = other
-          .trim_start_matches("--concurrency=")
-          .parse()
-          .unwrap_or(concurrency);
-        concurrency_explicit = true;
-      }
-      other if other.starts_with("--nord-group=") => {
-        nord_group = Some(other.trim_start_matches("--nord-group=").to_string());
-      }
-      other if other.starts_with("--nord-server=") => {
-        nord_server_name = Some(other.trim_start_matches("--nord-server=").to_string());
-      }
-      other if other.starts_with("--vpn-id=") => {
-        vpn_id = Some(other.trim_start_matches("--vpn-id=").to_string());
-      }
-      other if other.starts_with("--email-provider=") => {
-        email_provider = parse_email_provider(other.trim_start_matches("--email-provider="));
-      }
-      _ => {}
     }
   }
 
-  // de-dupe while preserving order
-  let mut seen = std::collections::HashSet::new();
-  cdks.retain(|c| seen.insert(c.clone()));
-
-  if cdks.is_empty() {
-    eprintln!(
-      "Usage: auto-reg-live --cdk GMAIL-XXXX[,GMAIL-YYYY] [--concurrency N] [--browser camoufox] \
-       [--profile-id UUID] [--network none|proxy|vpn|nord] [--vpn-id ID] [--rotate-every N] \
-       [--accounts-per-cdk N] [--nord-group \"United States\"] \
-       [--email-provider gmail.123452026.xyz|sms.iosmq.xyz]"
-    );
-    std::process::exit(2);
-  }
-
-  concurrency = resolve_concurrency(concurrency, concurrency_explicit, cdks.len());
-
-  LiveArgs {
-    cdks,
-    browser,
-    profile_id,
-    max_retries,
-    accounts_per_cdk,
-    concurrency,
-    network_mode,
-    rotate_every_n,
-    nord_group,
-    nord_server_name,
-    vpn_id,
-    email_provider,
-  }
+  let mut seen = HashSet::new();
+  parsed.cdks.retain(|cdk| seen.insert(cdk.clone()));
+  Ok(parsed)
 }
 
-fn resolve_concurrency(requested: u32, explicit: bool, cdk_count: usize) -> u32 {
-  if explicit {
-    requested.clamp(1, 8)
-  } else {
-    cdk_count.clamp(1, 8) as u32
+fn parse_args() -> Result<LiveArgs, String> {
+  parse_args_from(|name| std::env::var(name).ok(), std::env::args().skip(1))
+}
+
+fn build_config(args: LiveArgs) -> Result<RegistrationConfig, String> {
+  let mut config: RegistrationConfig = serde_json::from_value(serde_json::json!({
+    "cdks": args.cdks
+  }))
+  .map_err(|_| "failed to load registration product defaults".to_string())?;
+
+  if let Some(value) = args.browser {
+    config.browser_type = value;
   }
+  if let Some(value) = args.profile_id {
+    config.profile_id = Some(value);
+  }
+  if let Some(value) = args.proxy_id {
+    config.proxy_id = Some(value);
+  }
+  if let Some(value) = args.max_retries {
+    config.max_retries = value;
+  }
+  if let Some(value) = args.accounts_per_cdk {
+    config.accounts_per_cdk = value;
+  }
+  if let Some(value) = args.concurrency {
+    config.concurrency = value;
+  }
+  if let Some(value) = args.network_mode {
+    config.network_mode = value;
+  }
+  if let Some(value) = args.rotate_every_n {
+    config.rotate_every_n = value;
+  }
+  if let Some(value) = args.nord_group {
+    config.nord_group = Some(value);
+  }
+  if let Some(value) = args.nord_server_name {
+    config.nord_server_name = Some(value);
+  }
+  if let Some(value) = args.vpn_id {
+    config.vpn_id = Some(value);
+  }
+  if let Some(value) = args.email_provider {
+    config.email_provider = value;
+  }
+
+  // Auto-resolve VPN config from saved settings when using --network vpn
+  // without an explicit --vpn-id.
+  if config.network_mode == NetworkMode::Vpn && config.vpn_id.is_none() {
+    let storage = donutbrowser_lib::vpn::VPN_STORAGE
+      .lock()
+      .map_err(|e| format!("Failed to lock VPN storage: {e}"))?;
+    let configs = storage
+      .list_configs()
+      .map_err(|e| format!("Failed to list VPN configs: {e}"))?;
+    if configs.is_empty() {
+      return Err("VPN mode requires a WireGuard config, but none are saved in settings. Create one via the app's Proxies & VPNs page first.".into());
+    }
+    let matched = if let Some(ref name_filter) = args.vpn_name {
+      let filter = name_filter.to_ascii_lowercase();
+      configs
+        .iter()
+        .find(|c| c.name.to_ascii_lowercase().contains(&filter))
+        .or_else(|| {
+          configs
+            .iter()
+            .find(|c| c.id.to_ascii_lowercase().contains(&filter))
+        })
+        .ok_or_else(|| {
+          format!(
+            "No VPN config matching '{}' found ({} configs available)",
+            name_filter,
+            configs.len()
+          )
+        })?
+        .clone()
+    } else {
+      // Prefer Nord-sourced config, then any WireGuard config.
+      configs
+        .iter()
+        .find(|c| c.source.as_deref() == Some("nord"))
+        .or_else(|| configs.first())
+        .ok_or_else(|| "No VPN configs found".to_string())?
+        .clone()
+    };
+    eprintln!(
+      "vpn: auto-selected config id={} name='{}' source={}",
+      matched.id,
+      matched.name,
+      matched.source.as_deref().unwrap_or("-")
+    );
+    config.vpn_id = Some(matched.id);
+  }
+
+  Ok(config)
+}
+
+fn startup_failure(exit_code: i32) -> ! {
+  eprintln!("startup_valid=false");
+  std::process::exit(exit_code);
 }
 
 fn main() {
   env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-  let args = parse_args();
+  let args = parse_args().unwrap_or_else(|_| startup_failure(2));
+
+  if args.list_vpns {
+    match donutbrowser_lib::vpn::VPN_STORAGE.lock() {
+      Ok(storage) => match storage.list_configs() {
+        Ok(configs) => {
+          if configs.is_empty() {
+            eprintln!("No VPN configs saved.");
+          } else {
+            for c in &configs {
+              eprintln!(
+                "id={}  name='{}'  source={}  max_sessions={}",
+                c.id,
+                c.name,
+                c.source.as_deref().unwrap_or("-"),
+                c.max_sessions
+                  .map(|n| n.to_string())
+                  .unwrap_or_else(|| "-".to_string())
+              );
+            }
+          }
+          std::process::exit(0);
+        }
+        Err(e) => {
+          eprintln!("Failed to list VPN configs: {e}");
+          std::process::exit(1);
+        }
+      },
+      Err(e) => {
+        eprintln!("Failed to lock VPN storage: {e}");
+        std::process::exit(1);
+      }
+    }
+  }
+
+  let config = build_config(args).unwrap_or_else(|_| startup_failure(2));
+  let cdk_count = config.cdks.len();
+  let prepared = prepare_registration(config, Arc::new(AtomicBool::new(false)))
+    .unwrap_or_else(|_| startup_failure(2));
+
   eprintln!("=== LIVE AUTO-REGISTER ===");
-  eprintln!("cdk_count={}", args.cdks.len());
-  eprintln!("browser={}", args.browser);
-  eprintln!("profile_id={:?}", args.profile_id);
-  eprintln!("max_retries={}", args.max_retries);
-  eprintln!("accounts_per_cdk={}", args.accounts_per_cdk);
-  eprintln!("concurrency={}", args.concurrency);
-  eprintln!("network_mode={:?}", args.network_mode);
-  eprintln!("rotate_every_n={}", args.rotate_every_n);
-  eprintln!("nord_group={:?}", args.nord_group);
-  eprintln!("nord_server={:?}", args.nord_server_name);
-  eprintln!("email_provider={}", args.email_provider);
+  eprintln!("startup_valid=true");
+  eprintln!("cdk_count={cdk_count}");
 
   tauri::Builder::default()
     .setup(move |app| {
       let handle = app.handle().clone();
-      // Mirror production command path: RegistrationEngine is not Send across
-      // Tauri's async runtime, so run it on a dedicated blocking runtime.
       std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        let result = rt.block_on(async move {
-          let mut config = RegistrationConfig {
-            cdks: args.cdks,
-            profile_id: args.profile_id,
-            proxy_id: None,
-            vpn_id: args.vpn_id,
-            browser_type: args.browser,
-            max_retries: args.max_retries,
-            accounts_per_cdk: args.accounts_per_cdk.max(1),
-            headless: false,
-            concurrency: args.concurrency.max(1),
-            nord_max_sessions: 6,
-            network_mode: args.network_mode,
-            rotate_every_n: args.rotate_every_n,
-            nord_group: args.nord_group,
-            nord_server_name: args.nord_server_name,
-            nord_cli_path: None,
-            sms_provider: None,
-            sms_token: None,
-            sms_service_id: None,
-            sms_network: None,
-            sms_country: None,
-            email_provider: args.email_provider,
-          };
-          config.normalize_network();
-          if let Err(e) = config.validate_cdks() {
-            eprintln!("config error: {e}");
-            std::process::exit(2);
-          }
-          if let Err(e) = config.validate_network() {
-            eprintln!("config error: {e}");
-            std::process::exit(2);
-          }
-          eprintln!(
-            "effective network_mode={:?} rotate_every_n={} concurrency={} email_provider={}",
-            config.network_mode, config.rotate_every_n, config.concurrency, config.email_provider
-          );
-
-          let cancel = Arc::new(AtomicBool::new(false));
-          let email_provider = config.email_provider;
-          let mut engine = RegistrationEngine::with_cancel_flag(config, cancel);
-          let email: Box<dyn EmailService> = build_email_service(email_provider);
-          engine.run(handle, email.as_ref(), None).await
-        });
+        let result =
+          run_prepared_registration(handle, prepared).unwrap_or_else(|_| startup_failure(1));
 
         eprintln!("=== RESULT ===");
         eprintln!("success={}", result.success);
-        eprintln!("account_id={}", result.account_id);
         eprintln!("two_fa_enabled={}", result.two_fa_enabled);
         eprintln!("has_totp_secret={}", !result.totp_secret.trim().is_empty());
         eprintln!(
@@ -306,8 +370,6 @@ fn main() {
         eprintln!("has_error={}", !result.error_message.trim().is_empty());
         eprintln!("step_log_count={}", result.step_logs.len());
 
-        // Batch multi-CDK: account_id may be "batch:N" and success means any/all
-        // depending on engine aggregation — exit 0 only if success flag true.
         std::process::exit(if result.success { 0 } else { 1 });
       });
       Ok(())
@@ -318,18 +380,68 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-  use super::resolve_concurrency;
+  use super::*;
+  use donutbrowser_lib::auto_service::openai::register::execution::normalize_and_validate_registration;
 
   #[test]
-  fn explicit_concurrency_is_preserved_and_clamped() {
-    assert_eq!(resolve_concurrency(1, true, 3), 1);
-    assert_eq!(resolve_concurrency(6, true, 3), 6);
-    assert_eq!(resolve_concurrency(12, true, 3), 8);
+  fn unknown_network_cli_and_environment_values_fail() {
+    assert!(parse_args_from(|_| None, ["--network=unknown".to_string()]).is_err());
+    assert!(parse_args_from(
+      |name| (name == "AUTO_REG_NETWORK").then(|| "unknown".to_string()),
+      Vec::<String>::new()
+    )
+    .is_err());
   }
 
   #[test]
-  fn omitted_concurrency_defaults_to_cdk_count() {
-    assert_eq!(resolve_concurrency(1, false, 3), 3);
-    assert_eq!(resolve_concurrency(1, false, 0), 1);
+  fn omitted_options_use_registration_config_product_defaults() {
+    let parsed = parse_args_from(|_| None, ["--cdk=GMAIL-TEST".to_string()]).unwrap();
+    let config = build_config(parsed).unwrap();
+
+    assert_eq!(config.browser_type, "chromium");
+    assert_eq!(config.max_retries, 3);
+    assert_eq!(config.accounts_per_cdk, 1);
+    assert_eq!(config.concurrency, 1);
+    assert_eq!(config.nord_max_sessions, 6);
+    assert_eq!(config.network_mode, NetworkMode::None);
+    assert_eq!(config.email_provider, EmailProvider::Gmail123452026);
+  }
+
+  #[test]
+  fn live_adapter_maps_proxy_id_into_shared_preparation() {
+    let parsed = parse_args_from(
+      |name| (name == "AUTO_REG_PROXY_ID").then(|| "proxy-env".to_string()),
+      [
+        "--cdk=GMAIL-TEST".to_string(),
+        "--network=proxy".to_string(),
+        "--proxy-id=proxy-cli".to_string(),
+      ],
+    )
+    .unwrap();
+    let mut config = build_config(parsed).unwrap();
+
+    normalize_and_validate_registration(&mut config).unwrap();
+
+    assert_eq!(config.network_mode, NetworkMode::Proxy);
+    assert_eq!(config.proxy_id.as_deref(), Some("proxy-cli"));
+  }
+
+  #[test]
+  fn live_adapter_uses_shared_registration_preparation() {
+    let parsed = parse_args_from(
+      |_| None,
+      [
+        "--cdk=GMAIL-TEST".to_string(),
+        "--browser=CAMOUFOX".to_string(),
+        "--network=none".to_string(),
+      ],
+    )
+    .unwrap();
+    let mut config = build_config(parsed).unwrap();
+
+    normalize_and_validate_registration(&mut config).unwrap();
+
+    assert_eq!(config.browser_type, "camoufox");
+    assert_eq!(config.concurrency, 1);
   }
 }
