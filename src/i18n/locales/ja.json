@@ -190,7 +190,8 @@
       "recordings": "録画",
       "autoRegister": "ChatGPT 自動登録",
       "smsVerification": "SMS / OTP",
-      "autoLogin": "ChatGPT/Codex ログイン"
+      "autoLogin": "ChatGPT/Codex ログイン",
+      "accountChecker": "ChatGPTアカウントチェッカー"
     },
     "appName": "JnmBrowser"
   },
@@ -2045,5 +2046,28 @@
     "saving": "保存中...",
     "tabSettings": "設定",
     "settingsHint": "ネットワーク・Sub2API・SMS はここで設定。Login タブでは有効化のみ。"
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "入力",
+      "passed": "合格",
+      "deactivated": "無効化",
+      "unresolved": "未解決"
+    },
+    "credentialsLabel": "認証情報",
+    "credentialsPlaceholder": "email|password|2fa（1行に1件）",
+    "inputCount": "{{count}} 件",
+    "start": "チェック開始",
+    "running": "チェック中...",
+    "cancel": "キャンセル",
+    "noCredentials": "アカウントを入力してください",
+    "startFailed": "チェックを開始できませんでした",
+    "copied": "{{label}}アカウントをコピーしました",
+    "nothingToExport": "エクスポートするアカウントがありません",
+    "noPassed": "合格アカウントなし",
+    "noDeactivated": "無効化アカウントなし",
+    "noUnresolved": "未解決アカウントなし",
+    "exportPassed": "合格をコピー",
+    "exportDeactivated": "無効化をコピー"
   }
 }

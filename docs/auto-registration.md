@@ -1,5 +1,15 @@
 # ChatGPT Auto-Registration
 
+## Account Checker
+
+The Account Checker verifies existing ChatGPT credentials without completing the full OAuth login flow. It accepts one `email|password|2fa` credential per line, submits only the email and password, and stops as soon as a verification-code input is reached.
+
+- **Passed**: a visible, enabled OTP/2FA input is present (authenticator, email OTP, or SMS OTP).
+- **Deactivated**: the page contains both `Authentication Error` and `error_code: account_deactivated`.
+- **Unresolved**: every other outcome, including wrong credentials, Cloudflare, rate limits, timeouts, cancellation, and unknown pages.
+
+Passed and deactivated lists are stored locally and export in the same `email|password|2fa` format. The checker does not submit TOTP codes, poll email or SMS, exchange OAuth tokens, or push accounts to Sub2API.
+
 Automatically create ChatGPT accounts using Gmail CDK codes, browser automation, and anti-detect fingerprinting.
 
 ## Overview
@@ -326,7 +336,7 @@ Secondary endpoint:
 Probe helper:
 
 ```bash
-cargo run --manifest-path src-tauri/Cargo.toml --bin probe-free-trial --   --profile-id <camoufox-profile-id>   --token-file <registered_account.json>
+cargo run --manifest-path src-tauri/Cargo.toml --features probe-free-trial --bin probe-free-trial --   --profile-id <camoufox-profile-id>   --token-file <registered_account.json>
 ```
 
 ## 2FA Enablement

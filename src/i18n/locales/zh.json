@@ -190,7 +190,8 @@
       "recordings": "录制列表",
       "autoRegister": "ChatGPT 自动注册",
       "smsVerification": "短信 / OTP",
-      "autoLogin": "ChatGPT/Codex 登录"
+      "autoLogin": "ChatGPT/Codex 登录",
+      "accountChecker": "ChatGPT 账号检测"
     },
     "appName": "JnmBrowser"
   },
@@ -2045,5 +2046,28 @@
     "saving": "保存中...",
     "tabSettings": "设置",
     "settingsHint": "在此配置网络、Sub2API 和短信。登录页仅开关选项。"
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "输入",
+      "passed": "通过",
+      "deactivated": "已停用",
+      "unresolved": "未确定"
+    },
+    "credentialsLabel": "账号凭据",
+    "credentialsPlaceholder": "email|password|2fa（每行一个）",
+    "inputCount": "{{count}} 个账号",
+    "start": "开始检测",
+    "running": "检测中...",
+    "cancel": "取消",
+    "noCredentials": "请至少输入一个账号",
+    "startFailed": "启动账号检测失败",
+    "copied": "已复制{{label}}账号",
+    "nothingToExport": "没有可导出的账号",
+    "noPassed": "没有通过的账号",
+    "noDeactivated": "没有已停用的账号",
+    "noUnresolved": "没有未确定的账号",
+    "exportPassed": "复制通过账号",
+    "exportDeactivated": "复制已停用账号"
   }
 }

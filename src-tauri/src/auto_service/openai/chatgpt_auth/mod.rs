@@ -10,11 +10,11 @@ use crate::auto_service::openai::browser::{
 };
 use crate::email::{EmailService, EmailServiceError};
 
-const EMAIL_INPUT_SELECTOR: &str = r#"input[type="email"], input[name="email"], input[name="username"], input[autocomplete="email"], input[autocomplete="username"]"#;
-const PASSWORD_INPUT_SELECTOR: &str = r#"input[name="new-password"], input[type="password"], input[name="password"], input[name="current-password"], input[autocomplete="current-password"]"#;
+pub(crate) const EMAIL_INPUT_SELECTOR: &str = r#"input[type="email"], input[name="email"], input[name="username"], input[autocomplete="email"], input[autocomplete="username"]"#;
+pub(crate) const PASSWORD_INPUT_SELECTOR: &str = r#"input[name="new-password"], input[type="password"], input[name="password"], input[name="current-password"], input[autocomplete="current-password"]"#;
 const EMAIL_OTP_INPUT_SELECTOR: &str = r#"input[name="code"], input[name="otp"], input[name="emailCode"], input[autocomplete="one-time-code"], input[inputmode="numeric"]"#;
 const TOTP_INPUT_SELECTOR: &str = r#"input[name="code"], input[name="totp"], input[autocomplete="one-time-code"], input[inputmode="numeric"]"#;
-const SUBMIT_SELECTOR: &str =
+pub(crate) const SUBMIT_SELECTOR: &str =
   r#"button[type="submit"], button[data-continue], button[name="intent"]"#;
 const EMAIL_VERIFICATION_URL: &str = "https://auth.openai.com/email-verification";
 

@@ -190,7 +190,8 @@
       "recordings": "Записи",
       "autoRegister": "Авторегистрация ChatGPT",
       "smsVerification": "SMS / OTP",
-      "autoLogin": "ChatGPT/Codex Вход"
+      "autoLogin": "ChatGPT/Codex Вход",
+      "accountChecker": "Проверка аккаунтов ChatGPT"
     },
     "appName": "JnmBrowser"
   },
@@ -2045,5 +2046,28 @@
     "saving": "Сохранение...",
     "tabSettings": "Настройки",
     "settingsHint": "Сеть, Sub2API и SMS настраиваются здесь. На вкладке Login только включение."
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "Ввод",
+      "passed": "Рабочие",
+      "deactivated": "Деактивированы",
+      "unresolved": "Не определено"
+    },
+    "credentialsLabel": "Данные входа",
+    "credentialsPlaceholder": "email|password|2fa (по одному на строку)",
+    "inputCount": "Аккаунтов: {{count}}",
+    "start": "Начать проверку",
+    "running": "Проверка...",
+    "cancel": "Отмена",
+    "noCredentials": "Введите хотя бы один аккаунт",
+    "startFailed": "Не удалось запустить проверку",
+    "copied": "Аккаунты {{label}} скопированы",
+    "nothingToExport": "Нет аккаунтов для экспорта",
+    "noPassed": "Нет рабочих аккаунтов",
+    "noDeactivated": "Нет деактивированных аккаунтов",
+    "noUnresolved": "Нет неопределённых аккаунтов",
+    "exportPassed": "Копировать рабочие",
+    "exportDeactivated": "Копировать деактивированные"
   }
 }

@@ -190,7 +190,8 @@
       "recordings": "Grabaciones",
       "autoRegister": "Registro automático de ChatGPT",
       "smsVerification": "SMS / OTP",
-      "autoLogin": "ChatGPT/Codex Inicio de sesión"
+      "autoLogin": "ChatGPT/Codex Inicio de sesión",
+      "accountChecker": "Verificador de cuentas ChatGPT"
     },
     "appName": "JnmBrowser"
   },
@@ -2045,5 +2046,28 @@
     "saving": "Guardando...",
     "tabSettings": "Ajustes",
     "settingsHint": "Configure red, Sub2API y SMS aquí. La pestaña Login solo activa opciones."
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "Entrada",
+      "passed": "Aprobadas",
+      "deactivated": "Desactivadas",
+      "unresolved": "Sin resolver"
+    },
+    "credentialsLabel": "Credenciales",
+    "credentialsPlaceholder": "email|contraseña|2fa (una por línea)",
+    "inputCount": "{{count}} cuenta(s)",
+    "start": "Iniciar verificación",
+    "running": "Verificando...",
+    "cancel": "Cancelar",
+    "noCredentials": "Introduce al menos una cuenta",
+    "startFailed": "Error al iniciar la verificación",
+    "copied": "Cuentas {{label}} copiadas",
+    "nothingToExport": "No hay cuentas para exportar",
+    "noPassed": "No hay cuentas aprobadas",
+    "noDeactivated": "No hay cuentas desactivadas",
+    "noUnresolved": "No hay cuentas sin resolver",
+    "exportPassed": "Copiar aprobadas",
+    "exportDeactivated": "Copiar desactivadas"
   }
 }

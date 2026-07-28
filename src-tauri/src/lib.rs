@@ -2549,6 +2549,13 @@ pub fn run() {
       auto_service::openai::two_factor_backfill::commands::cancel_two_factor_backfill,
       auto_service::openai::two_factor_backfill::commands::list_two_factor_backfill_recovery,
       auto_service::openai::two_factor_backfill::commands::recover_two_factor_backfill_journal,
+      // OpenAI account checker (auto_service::openai::account_checker)
+      auto_service::openai::account_checker::commands::start_openai_account_check,
+      auto_service::openai::account_checker::commands::cancel_openai_account_check,
+      auto_service::openai::account_checker::commands::list_openai_account_check_results,
+      auto_service::openai::account_checker::commands::delete_openai_account_check_result,
+      auto_service::openai::account_checker::commands::export_passed_accounts,
+      auto_service::openai::account_checker::commands::export_deactivated_accounts,
       // Sub2API settings commands
       settings_manager::get_sub2api_settings_cmd,
       settings_manager::set_sub2api_settings_cmd,
