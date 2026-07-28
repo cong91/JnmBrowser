@@ -138,19 +138,35 @@ fn get_or_create_windows_ramdisk() -> Result<PathBuf, String> {
   Err("Could not create Windows RAM disk".to_string())
 }
 
-pub fn create_ephemeral_dir(profile_id: &str) -> Result<PathBuf, String> {
+/// Create a disposable runtime directory keyed by an arbitrary runtime/lease key.
+///
+/// Existing `create_ephemeral_dir(profile_id)` is a thin wrapper that uses the source
+/// profile id as the map key. Automation leases should pass `RuntimeLease.runtime_key`
+/// so concurrent overlays on the same source never share a directory.
+pub fn create_ephemeral_dir_for_key(runtime_key: &str) -> Result<PathBuf, String> {
+  let runtime_key = runtime_key.trim();
+  if runtime_key.is_empty() {
+    return Err("ephemeral runtime key must not be empty".to_string());
+  }
+  // Keep keys filesystem-safe (UUIDs and `{source}__{lease}` lease keys).
+  if runtime_key.contains(['/', '\\', '\0']) {
+    return Err(format!(
+      "ephemeral runtime key contains invalid path characters: {runtime_key}"
+    ));
+  }
+
   cleanup_orphaned_ephemeral_backups();
 
   let base = get_ephemeral_base_dir()?;
-  let dir_path = base.join(profile_id);
+  let dir_path = base.join(runtime_key);
   let mut dirs = EPHEMERAL_DIRS
     .lock()
     .map_err(|e| format!("Failed to lock ephemeral dirs: {e}"))?;
-  let previous_mapping = dirs.get(profile_id).cloned();
+  let previous_mapping = dirs.get(runtime_key).cloned();
   let mut backup_path = None;
 
   if dir_path.exists() {
-    let backup = unique_backup_path(&base, profile_id);
+    let backup = unique_backup_path(&base, runtime_key);
     rename_ephemeral_dir(&dir_path, &backup).map_err(|e| {
       format!(
         "Failed to preserve existing ephemeral dir {} before replacement: {e}",
@@ -159,7 +175,7 @@ pub fn create_ephemeral_dir(profile_id: &str) -> Result<PathBuf, String> {
     })?;
 
     if previous_mapping.as_ref() == Some(&dir_path) {
-      dirs.insert(profile_id.to_string(), backup.clone());
+      dirs.insert(runtime_key.to_string(), backup.clone());
     }
     backup_path = Some(backup);
   }
@@ -174,7 +190,7 @@ pub fn create_ephemeral_dir(profile_id: &str) -> Result<PathBuf, String> {
     #[cfg(test)]
     maybe_inject_failure(FailurePoint::AfterDirectoryCreation)?;
 
-    dirs.insert(profile_id.to_string(), dir_path.clone());
+    dirs.insert(runtime_key.to_string(), dir_path.clone());
 
     #[cfg(test)]
     maybe_inject_failure(FailurePoint::AfterRegistryInsert)?;
@@ -189,15 +205,15 @@ pub fn create_ephemeral_dir(profile_id: &str) -> Result<PathBuf, String> {
       if let Err(e) = remove_backup_dir(&backup) {
         remember_orphaned_backup(backup.clone());
         log::warn!(
-          "Created ephemeral dir for profile {profile_id}, but failed to remove preserved backup {}: {e}; scheduled exact-path cleanup",
+          "Created ephemeral dir for key {runtime_key}, but failed to remove preserved backup {}: {e}; scheduled exact-path cleanup",
           backup.display()
         );
       }
     }
 
     log::info!(
-      "Created ephemeral dir for profile {}: {}",
-      profile_id,
+      "Created ephemeral dir for key {}: {}",
+      runtime_key,
       dir_path.display()
     );
     return Ok(dir_path);
@@ -210,7 +226,7 @@ pub fn create_ephemeral_dir(profile_id: &str) -> Result<PathBuf, String> {
   };
 
   let rollback_result = rollback_ephemeral_replacement(
-    profile_id,
+    runtime_key,
     &dir_path,
     backup_path.as_deref(),
     previous_mapping,
@@ -451,20 +467,36 @@ impl FailureInjection {
   }
 }
 
-pub fn get_ephemeral_dir(profile_id: &str) -> Option<PathBuf> {
-  EPHEMERAL_DIRS.lock().ok()?.get(profile_id).cloned()
+/// Backward-compatible wrapper: map key is the source profile id.
+pub fn create_ephemeral_dir(profile_id: &str) -> Result<PathBuf, String> {
+  create_ephemeral_dir_for_key(profile_id)
 }
 
-/// Removes the mapped directory and returns whether an existing directory was deleted.
+pub fn get_ephemeral_dir_for_key(runtime_key: &str) -> Option<PathBuf> {
+  EPHEMERAL_DIRS.lock().ok()?.get(runtime_key.trim()).cloned()
+}
+
+/// Backward-compatible wrapper: map key is the source profile id.
+pub fn get_ephemeral_dir(profile_id: &str) -> Option<PathBuf> {
+  get_ephemeral_dir_for_key(profile_id)
+}
+
+/// Removes the mapped directory for `runtime_key` and returns whether an existing directory
+/// was deleted.
 ///
 /// A missing mapping or a mapping whose directory no longer exists returns `Ok(false)` after
 /// removing any stale mapping. Other deletion failures retain the mapping so cleanup can be
 /// retried against the same exact path.
-pub fn remove_ephemeral_dir(profile_id: &str) -> Result<bool, String> {
+pub fn remove_ephemeral_dir_for_key(runtime_key: &str) -> Result<bool, String> {
+  let runtime_key = runtime_key.trim();
+  if runtime_key.is_empty() {
+    return Ok(false);
+  }
+
   let mut dirs = EPHEMERAL_DIRS
     .lock()
     .map_err(|e| format!("Failed to lock ephemeral dirs: {e}"))?;
-  let Some(dir_path) = dirs.get(profile_id).cloned() else {
+  let Some(dir_path) = dirs.get(runtime_key).cloned() else {
     return Ok(false);
   };
 
@@ -478,16 +510,16 @@ pub fn remove_ephemeral_dir(profile_id: &str) -> Result<bool, String> {
 
   match std::fs::remove_dir_all(&dir_path) {
     Ok(()) => {
-      dirs.remove(profile_id);
+      dirs.remove(runtime_key);
       log::info!(
-        "Removed ephemeral dir for profile {}: {}",
-        profile_id,
+        "Removed ephemeral dir for key {}: {}",
+        runtime_key,
         dir_path.display()
       );
       Ok(true)
     }
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-      dirs.remove(profile_id);
+      dirs.remove(runtime_key);
       Ok(false)
     }
     Err(error) => Err(format!(
@@ -495,6 +527,11 @@ pub fn remove_ephemeral_dir(profile_id: &str) -> Result<bool, String> {
       dir_path.display()
     )),
   }
+}
+
+/// Backward-compatible wrapper: map key is the source profile id.
+pub fn remove_ephemeral_dir(profile_id: &str) -> Result<bool, String> {
+  remove_ephemeral_dir_for_key(profile_id)
 }
 
 /// Recover ephemeral dir mappings on startup by scanning the RAM-backed base dir.
@@ -558,6 +595,23 @@ fn cleanup_legacy_dirs() {
 }
 
 pub fn get_effective_profile_path(profile: &BrowserProfile, profiles_dir: &Path) -> PathBuf {
+  get_effective_profile_path_for_key(profile, profiles_dir, None)
+}
+
+/// Resolve the on-disk profile data path, optionally forcing a lease-scoped runtime key.
+///
+/// When `runtime_key` is `Some`, the mapped ephemeral directory for that key is preferred
+/// even if `profile.ephemeral` is false (policy-driven ephemeral overlays).
+pub fn get_effective_profile_path_for_key(
+  profile: &BrowserProfile,
+  profiles_dir: &Path,
+  runtime_key: Option<&str>,
+) -> PathBuf {
+  if let Some(key) = runtime_key.map(str::trim).filter(|k| !k.is_empty()) {
+    if let Some(dir) = get_ephemeral_dir_for_key(key) {
+      return dir;
+    }
+  }
   if profile.ephemeral {
     if let Some(dir) = get_ephemeral_dir(&profile.id.to_string()) {
       return dir;
@@ -630,6 +684,55 @@ mod tests {
       get_effective_profile_path(&persistent_profile, &profiles_dir),
       expected
     );
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn test_runtime_keys_for_same_source_are_independent() {
+    EPHEMERAL_DIRS.lock().unwrap().clear();
+
+    let source = uuid::Uuid::new_v4().to_string();
+    let key_a = format!("{source}__{}", uuid::Uuid::new_v4());
+    let key_b = format!("{source}__{}", uuid::Uuid::new_v4());
+
+    let dir_a = create_ephemeral_dir_for_key(&key_a).unwrap();
+    let dir_b = create_ephemeral_dir_for_key(&key_b).unwrap();
+    assert!(dir_a.is_dir());
+    assert!(dir_b.is_dir());
+    assert_ne!(dir_a, dir_b);
+    assert_eq!(get_ephemeral_dir_for_key(&key_a), Some(dir_a.clone()));
+    assert_eq!(get_ephemeral_dir_for_key(&key_b), Some(dir_b.clone()));
+
+    assert!(remove_ephemeral_dir_for_key(&key_a).unwrap());
+    assert!(!dir_a.exists());
+    assert!(get_ephemeral_dir_for_key(&key_a).is_none());
+    assert_eq!(get_ephemeral_dir_for_key(&key_b), Some(dir_b.clone()));
+    assert!(dir_b.is_dir());
+
+    assert!(remove_ephemeral_dir_for_key(&key_b).unwrap());
+    assert!(!dir_b.exists());
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn test_effective_path_prefers_runtime_key_even_when_not_ephemeral_flag() {
+    EPHEMERAL_DIRS.lock().unwrap().clear();
+    let profile_id = uuid::Uuid::new_v4();
+    let runtime_key = format!("{}__{}", profile_id, uuid::Uuid::new_v4());
+    let dir = create_ephemeral_dir_for_key(&runtime_key).unwrap();
+    let persistent = make_test_profile(profile_id, false);
+    let profiles_dir = std::env::temp_dir().join("test_profiles_runtime_key");
+
+    assert_eq!(
+      get_effective_profile_path_for_key(&persistent, &profiles_dir, Some(&runtime_key)),
+      dir
+    );
+    assert_eq!(
+      get_effective_profile_path(&persistent, &profiles_dir),
+      persistent.get_profile_data_path(&profiles_dir)
+    );
+
+    remove_ephemeral_dir_for_key(&runtime_key).unwrap();
   }
 
   #[test]

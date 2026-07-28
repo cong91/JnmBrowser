@@ -6,6 +6,24 @@ use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Resources owned by one runtime launch and retained until cleanup fully succeeds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeCleanupState {
+  pub process_id: Option<u32>,
+  pub browser_instance_id: Option<String>,
+  pub owned_vpn_worker_id: Option<String>,
+  pub ephemeral_runtime_key: Option<String>,
+}
+
+impl RuntimeCleanupState {
+  pub fn is_empty(&self) -> bool {
+    self.process_id.is_none()
+      && self.browser_instance_id.is_none()
+      && self.owned_vpn_worker_id.is_none()
+      && self.ephemeral_runtime_key.is_none()
+  }
+}
+
 /// Active runtime identity for one leased automation operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLease {
@@ -14,6 +32,9 @@ pub struct RuntimeLease {
   /// Unique key for ephemeral directory maps (not bare source profile id).
   pub runtime_key: String,
   pub process_id: Option<u32>,
+  pub browser_instance_id: Option<String>,
+  pub owned_vpn_worker_id: Option<String>,
+  pub ephemeral_runtime_key: Option<String>,
 }
 
 impl RuntimeLease {
@@ -24,6 +45,22 @@ impl RuntimeLease {
 
   pub fn set_process_id(&mut self, process_id: Option<u32>) {
     self.process_id = process_id;
+  }
+
+  pub fn runtime_cleanup_state(&self) -> RuntimeCleanupState {
+    RuntimeCleanupState {
+      process_id: self.process_id,
+      browser_instance_id: self.browser_instance_id.clone(),
+      owned_vpn_worker_id: self.owned_vpn_worker_id.clone(),
+      ephemeral_runtime_key: self.ephemeral_runtime_key.clone(),
+    }
+  }
+
+  pub fn set_runtime_cleanup_state(&mut self, state: RuntimeCleanupState) {
+    self.process_id = state.process_id;
+    self.browser_instance_id = state.browser_instance_id;
+    self.owned_vpn_worker_id = state.owned_vpn_worker_id;
+    self.ephemeral_runtime_key = state.ephemeral_runtime_key;
   }
 }
 
@@ -42,7 +79,7 @@ pub enum LeaseError {
 struct LeaseEntry {
   lease_id: String,
   runtime_key: String,
-  process_id: Option<u32>,
+  cleanup_state: RuntimeCleanupState,
 }
 
 /// Process-local registry of exclusive source-profile leases.
@@ -93,7 +130,7 @@ impl LeaseRegistry {
       LeaseEntry {
         lease_id: lease_id.clone(),
         runtime_key: runtime_key.clone(),
-        process_id: None,
+        cleanup_state: RuntimeCleanupState::default(),
       },
     );
     drop(by_source);
@@ -109,6 +146,9 @@ impl LeaseRegistry {
       source_profile_id: source.to_string(),
       runtime_key,
       process_id: None,
+      browser_instance_id: None,
+      owned_vpn_worker_id: None,
+      ephemeral_runtime_key: None,
     })
   }
 
@@ -141,8 +181,8 @@ impl LeaseRegistry {
     }
   }
 
-  /// Update the tracked process id for an active lease (in-memory only).
-  pub fn set_process_id(&self, lease_id: &str, process_id: Option<u32>) -> bool {
+  /// Replace all retryable cleanup identity for an active lease.
+  pub fn set_runtime_cleanup_state(&self, lease_id: &str, state: RuntimeCleanupState) -> bool {
     let source = {
       let by_lease = self
         .by_lease
@@ -160,11 +200,39 @@ impl LeaseRegistry {
       .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(entry) = by_source.get_mut(&source) {
       if entry.lease_id == lease_id {
-        entry.process_id = process_id;
+        entry.cleanup_state = state;
         return true;
       }
     }
     false
+  }
+
+  /// Snapshot retryable cleanup identity for an active lease.
+  pub fn runtime_cleanup_state(&self, lease_id: &str) -> Option<RuntimeCleanupState> {
+    let source = {
+      let by_lease = self
+        .by_lease
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+      by_lease.get(lease_id).cloned()
+    }?;
+    let by_source = self
+      .by_source
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    by_source
+      .get(&source)
+      .filter(|entry| entry.lease_id == lease_id)
+      .map(|entry| entry.cleanup_state.clone())
+  }
+
+  /// Update the tracked process id for an active lease (in-memory only).
+  pub fn set_process_id(&self, lease_id: &str, process_id: Option<u32>) -> bool {
+    let Some(mut state) = self.runtime_cleanup_state(lease_id) else {
+      return false;
+    };
+    state.process_id = process_id;
+    self.set_runtime_cleanup_state(lease_id, state)
   }
 
   /// Whether `source_profile_id` currently holds an active lease.
@@ -200,21 +268,9 @@ impl LeaseRegistry {
 
   /// Process id tracked on the active lease for `lease_id`, if any.
   pub fn process_id_for_lease(&self, lease_id: &str) -> Option<u32> {
-    let source = {
-      let by_lease = self
-        .by_lease
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-      by_lease.get(lease_id).cloned()
-    }?;
-    let by_source = self
-      .by_source
-      .lock()
-      .unwrap_or_else(|poisoned| poisoned.into_inner());
-    by_source
-      .get(&source)
-      .filter(|entry| entry.lease_id == lease_id)
-      .and_then(|entry| entry.process_id)
+    self
+      .runtime_cleanup_state(lease_id)
+      .and_then(|state| state.process_id)
   }
 
   #[cfg(test)]
@@ -326,6 +382,36 @@ mod tests {
       Some(lease.runtime_key.as_str())
     );
     assert!(!registry.set_process_id("missing", Some(1)));
+    registry.release(&lease.lease_id);
+  }
+
+  #[test]
+  fn runtime_cleanup_state_is_retained_until_explicitly_cleared() {
+    let registry = fresh_registry();
+    let mut lease = registry.try_acquire("profile-cleanup").expect("acquire");
+    let state = RuntimeCleanupState {
+      process_id: Some(6161),
+      browser_instance_id: Some("kernel-6161".to_string()),
+      owned_vpn_worker_id: Some("vpn-owned-6161".to_string()),
+      ephemeral_runtime_key: Some(lease.runtime_key.clone()),
+    };
+
+    assert!(registry.set_runtime_cleanup_state(&lease.lease_id, state.clone()));
+    lease.set_runtime_cleanup_state(state.clone());
+    assert_eq!(
+      registry.runtime_cleanup_state(&lease.lease_id),
+      Some(state.clone())
+    );
+    assert_eq!(lease.runtime_cleanup_state(), state);
+
+    let cleared = RuntimeCleanupState::default();
+    assert!(registry.set_runtime_cleanup_state(&lease.lease_id, cleared.clone()));
+    lease.set_runtime_cleanup_state(cleared.clone());
+    assert_eq!(
+      registry.runtime_cleanup_state(&lease.lease_id),
+      Some(cleared)
+    );
+    assert!(lease.runtime_cleanup_state().is_empty());
     registry.release(&lease.lease_id);
   }
 

@@ -6,6 +6,9 @@ use crate::downloaded_browsers_registry::DownloadedBrowsersRegistry;
 use crate::events;
 use crate::platform_browser;
 use crate::profile::{BrowserProfile, ProfileManager};
+use crate::profile_runtime::{
+  DataMode, FingerprintMode, LaunchPolicy, LeaseRegistry, RuntimeCleanupState, RuntimeLease,
+};
 use crate::proxy_manager::PROXY_MANAGER;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -181,6 +184,10 @@ impl<D: LaunchRollbackDispatcher> PreLaunchTransaction<D> {
     transfer(temp_pid, process_id)?;
     self.resources.proxy_pid = Some(process_id);
     Ok(())
+  }
+
+  fn owned_vpn_worker_id(&self) -> Option<&str> {
+    self.resources.vpn_worker_id.as_deref()
   }
 
   fn commit(mut self) {
@@ -417,9 +424,177 @@ fn process_ids_with_command_arg(argument: &str) -> Vec<u32> {
 fn remove_ephemeral_profile_dir(
   profile_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-  crate::ephemeral_dirs::remove_ephemeral_dir(profile_id)
+  remove_ephemeral_runtime_dir(profile_id)
+}
+
+fn remove_ephemeral_runtime_dir(
+  runtime_key: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  crate::ephemeral_dirs::remove_ephemeral_dir_for_key(runtime_key)
     .map(|_| ())
-    .map_err(|error| format!("Failed to clean up ephemeral profile directory: {error}").into())
+    .map_err(|error| format!("Failed to clean up ephemeral runtime directory: {error}").into())
+}
+
+fn should_persist_launch_metadata(policy: Option<&LaunchPolicy>) -> bool {
+  policy.is_none_or(LaunchPolicy::should_persist_launch_metadata)
+}
+
+fn should_emit_source_profile_events(policy: Option<&LaunchPolicy>) -> bool {
+  should_persist_launch_metadata(policy)
+}
+
+fn should_randomize_fingerprint(
+  policy: Option<&LaunchPolicy>,
+  profile_randomizes_on_launch: bool,
+) -> bool {
+  policy.map_or(profile_randomizes_on_launch, |policy| {
+    policy.fingerprint_mode == FingerprintMode::RandomPerLaunch
+  })
+}
+
+fn uses_ephemeral_runtime_data(profile_is_ephemeral: bool, policy: Option<&LaunchPolicy>) -> bool {
+  policy.map_or(profile_is_ephemeral, |policy| {
+    policy.data_mode == DataMode::Ephemeral
+  })
+}
+
+fn apply_runtime_network_policy(
+  profile: &BrowserProfile,
+  policy: Option<&LaunchPolicy>,
+) -> BrowserProfile {
+  let mut runtime_profile = profile.clone();
+  let Some(policy) = policy else {
+    return runtime_profile;
+  };
+
+  if policy.clear_network {
+    runtime_profile.proxy_id = None;
+    runtime_profile.vpn_id = None;
+    runtime_profile.launch_hook = None;
+  } else if let Some(proxy_id) = policy.proxy_id.as_ref() {
+    runtime_profile.proxy_id = Some(proxy_id.clone());
+    runtime_profile.vpn_id = None;
+    runtime_profile.launch_hook = None;
+  } else if let Some(vpn_id) = policy.vpn_id.as_ref() {
+    runtime_profile.proxy_id = None;
+    runtime_profile.vpn_id = Some(vpn_id.clone());
+    runtime_profile.launch_hook = None;
+  }
+
+  runtime_profile
+}
+
+fn launch_metadata_profile(
+  source_profile: &BrowserProfile,
+  launched_profile: &BrowserProfile,
+  policy: Option<&LaunchPolicy>,
+) -> BrowserProfile {
+  if policy.is_none() {
+    return launched_profile.clone();
+  }
+
+  let mut persisted_profile = source_profile.clone();
+  persisted_profile.process_id = launched_profile.process_id;
+  persisted_profile.last_launch = launched_profile.last_launch;
+  persisted_profile
+}
+
+fn validate_runtime_lease(
+  profile: &BrowserProfile,
+  policy: &LaunchPolicy,
+  lease: &RuntimeLease,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let source_profile_id = policy
+    .source_profile_id
+    .as_deref()
+    .unwrap_or(&lease.source_profile_id);
+  if source_profile_id != profile.id.to_string() || lease.source_profile_id != source_profile_id {
+    return Err(
+      format!(
+        "runtime lease source `{}` does not match launch profile `{}`",
+        lease.source_profile_id, profile.id
+      )
+      .into(),
+    );
+  }
+  if LeaseRegistry::global()
+    .holder_lease_id(source_profile_id)
+    .as_deref()
+    != Some(lease.lease_id.as_str())
+  {
+    return Err(
+      format!(
+        "runtime lease `{}` is not active for source profile `{source_profile_id}`",
+        lease.lease_id
+      )
+      .into(),
+    );
+  }
+
+  Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeCleanupStep {
+  StopProxy(u32),
+  StopCamoufoxManager {
+    profile_path: PathBuf,
+    fallback_instance_id: Option<String>,
+  },
+  StopChromiumManager {
+    profile_path: PathBuf,
+    fallback_instance_id: Option<String>,
+  },
+  ForceKillBrowser(u32),
+  StopOwnedVpnWorker(String),
+  RemoveEphemeralRuntime(String),
+}
+
+fn runtime_cleanup_plan(
+  profile: &BrowserProfile,
+  profiles_dir: &Path,
+  policy: &LaunchPolicy,
+  state: &RuntimeCleanupState,
+) -> Result<Vec<RuntimeCleanupStep>, Box<dyn std::error::Error + Send + Sync>> {
+  let mut plan = Vec::new();
+  if let Some(process_id) = state.process_id {
+    plan.push(RuntimeCleanupStep::StopProxy(process_id));
+  }
+
+  let runtime_key = state.ephemeral_runtime_key.as_deref();
+  if state.process_id.is_some() || state.browser_instance_id.is_some() {
+    let profile_path =
+      crate::ephemeral_dirs::get_effective_profile_path_for_key(profile, profiles_dir, runtime_key);
+    if profile.browser == "camoufox" || profile.browser == "firefox" {
+      plan.push(RuntimeCleanupStep::StopCamoufoxManager {
+        profile_path,
+        fallback_instance_id: state.browser_instance_id.clone(),
+      });
+    } else if crate::browser::is_chromium_browser_name(&profile.browser) {
+      plan.push(RuntimeCleanupStep::StopChromiumManager {
+        profile_path,
+        fallback_instance_id: state.browser_instance_id.clone(),
+      });
+    } else {
+      return Err(format!("Unsupported runtime browser type: {}", profile.browser).into());
+    }
+  }
+
+  if let Some(process_id) = state.process_id {
+    plan.push(RuntimeCleanupStep::ForceKillBrowser(process_id));
+  }
+  if let Some(worker_id) = state.owned_vpn_worker_id.as_ref() {
+    plan.push(RuntimeCleanupStep::StopOwnedVpnWorker(worker_id.clone()));
+  }
+  if policy.data_mode == DataMode::Ephemeral {
+    plan.push(RuntimeCleanupStep::RemoveEphemeralRuntime(
+      state
+        .ephemeral_runtime_key
+        .clone()
+        .unwrap_or_else(|| profile.id.to_string()),
+    ));
+  }
+  Ok(plan)
 }
 
 fn browser_process_ids_for_profile(profile_path: &Path) -> HashSet<u32> {
@@ -617,19 +792,75 @@ impl BrowserRunner {
     local_proxy_settings: Option<&ProxySettings>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
     self
-      .launch_browser_internal(app_handle, profile, url, local_proxy_settings, None, false)
+      .launch_browser_internal(
+        app_handle,
+        profile,
+        url,
+        local_proxy_settings,
+        None,
+        false,
+        None,
+        None,
+      )
       .await
   }
 
-  async fn launch_browser_internal(
+  pub async fn launch_browser_with_policy(
     &self,
     app_handle: tauri::AppHandle,
     profile: &BrowserProfile,
     url: Option<String>,
+    local_proxy_settings: Option<&ProxySettings>,
+    policy: &LaunchPolicy,
+    lease: &mut RuntimeLease,
+  ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
+    self
+      .launch_browser_internal(
+        app_handle,
+        profile,
+        url,
+        local_proxy_settings,
+        None,
+        false,
+        Some(policy),
+        Some(lease),
+      )
+      .await
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  async fn launch_browser_internal(
+    &self,
+    app_handle: tauri::AppHandle,
+    source_profile: &BrowserProfile,
+    url: Option<String>,
     _local_proxy_settings: Option<&ProxySettings>,
     remote_debugging_port: Option<u16>,
     headless: bool,
+    policy: Option<&LaunchPolicy>,
+    mut runtime_lease: Option<&mut RuntimeLease>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
+    if let (Some(policy), Some(lease)) = (policy, runtime_lease.as_deref()) {
+      validate_runtime_lease(source_profile, policy, lease)?;
+    } else if policy.is_some() || runtime_lease.is_some() {
+      return Err("launch policy and runtime lease must be provided together".into());
+    }
+
+    let mut runtime_profile = apply_runtime_network_policy(source_profile, policy);
+    if let Some(policy) = policy {
+      runtime_profile.ephemeral = policy.data_mode == DataMode::Ephemeral;
+    }
+    let profile = &runtime_profile;
+    let runtime_key = if uses_ephemeral_runtime_data(profile.ephemeral, policy) {
+      Some(
+        runtime_lease
+          .as_deref()
+          .map(|lease| lease.runtime_key.clone())
+          .unwrap_or_else(|| profile.id.to_string()),
+      )
+    } else {
+      None
+    };
     // Handle Camoufox / Firefox profiles using CamoufoxManager (Playwright-based)
     if profile.browser == "camoufox" || profile.browser == "firefox" {
       let profile_launch_lock = acquire_pre_launch_lock(format!("profile:{}", profile.id)).await;
@@ -730,9 +961,16 @@ impl BrowserRunner {
         camoufox_config.geoip
       );
 
+      let profile_randomizes_on_launch =
+        camoufox_config.randomize_fingerprint_on_launch == Some(true);
+      if let Some(policy) = policy {
+        camoufox_config.randomize_fingerprint_on_launch =
+          Some(policy.fingerprint_mode == FingerprintMode::RandomPerLaunch);
+      }
+
       // Check if we need to generate a new fingerprint on every launch
       let mut updated_profile = profile.clone();
-      if camoufox_config.randomize_fingerprint_on_launch == Some(true) {
+      if should_randomize_fingerprint(policy, profile_randomizes_on_launch) {
         log::info!(
           "Generating random fingerprint for Camoufox profile: {}",
           profile.name
@@ -777,12 +1015,12 @@ impl BrowserRunner {
         );
       }
 
-      // Create ephemeral dir for ephemeral profiles
-      let override_profile_path = if profile.ephemeral {
-        launch_transaction.begin_ephemeral_profile(profile.id.to_string());
-        let dir = crate::ephemeral_dirs::create_ephemeral_dir(&profile.id.to_string())
+      // Create ephemeral dir for ephemeral profiles or policy-driven runtime overlays.
+      let override_profile_path = if let Some(runtime_key) = runtime_key.as_deref() {
+        launch_transaction.begin_ephemeral_profile(runtime_key.to_string());
+        let dir = crate::ephemeral_dirs::create_ephemeral_dir_for_key(runtime_key)
           .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-        launch_transaction.own_ephemeral_profile(profile.id.to_string(), dir.clone());
+        launch_transaction.own_ephemeral_profile(runtime_key.to_string(), dir.clone());
         Some(dir)
       } else {
         None
@@ -874,53 +1112,83 @@ impl BrowserRunner {
           .map(|f| f.len())
           .unwrap_or(0)
       );
-      self.save_process_info(&updated_profile)?;
+      if should_persist_launch_metadata(policy) {
+        let persisted_profile = launch_metadata_profile(source_profile, &updated_profile, policy);
+        self.save_process_info(&persisted_profile)?;
+      }
+      if let Some(lease) = runtime_lease.as_deref_mut() {
+        let cleanup_state = RuntimeCleanupState {
+          process_id: Some(process_id),
+          browser_instance_id: Some(camoufox_result.id.clone()),
+          owned_vpn_worker_id: launch_transaction.owned_vpn_worker_id().map(str::to_owned),
+          ephemeral_runtime_key: runtime_key.clone(),
+        };
+        if !LeaseRegistry::global()
+          .set_runtime_cleanup_state(&lease.lease_id, cleanup_state.clone())
+        {
+          return Err(
+            format!(
+              "runtime lease `{}` became inactive during Camoufox launch",
+              lease.lease_id
+            )
+            .into(),
+          );
+        }
+        lease.set_runtime_cleanup_state(cleanup_state);
+      }
       launch_transaction.commit();
-      // Ensure tag suggestions include any tags from this profile
-      let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
-        let _ = tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
-      });
-      log::info!(
-        "Successfully saved profile with process info: {}",
-        updated_profile.name
-      );
-
-      // Emit profiles-changed to trigger frontend to reload profiles from disk
-      // This ensures the UI displays the newly generated fingerprint
-      if let Err(e) = events::emit_empty("profiles-changed") {
-        log::warn!("Warning: Failed to emit profiles-changed event: {e}");
-      }
-
-      log::info!(
-        "Emitting profile events for successful Camoufox launch: {}",
-        updated_profile.name
-      );
-
-      // Emit profile update event to frontend
-      if let Err(e) = events::emit("profile-updated", &updated_profile) {
-        log::warn!("Warning: Failed to emit profile update event: {e}");
-      }
-
-      // Emit minimal running changed event to frontend with a small delay
-      #[derive(Serialize)]
-      struct RunningChangedPayload {
-        id: String,
-        is_running: bool,
-      }
-
-      let payload = RunningChangedPayload {
-        id: updated_profile.id.to_string(),
-        is_running: updated_profile.process_id.is_some(),
-      };
-
-      if let Err(e) = events::emit("profile-running-changed", &payload) {
-        log::warn!("Warning: Failed to emit profile running changed event: {e}");
+      if should_persist_launch_metadata(policy) {
+        let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
+          let _ =
+            tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
+        });
+        log::info!(
+          "Successfully saved profile with process info: {}",
+          updated_profile.name
+        );
       } else {
         log::info!(
-          "Successfully emitted profile-running-changed event for Camoufox {}: running={}",
-          updated_profile.name,
-          payload.is_running
+          "Tracked Camoufox PID {} on runtime lease without saving source profile {}",
+          process_id,
+          source_profile.id
         );
+      }
+
+      if should_emit_source_profile_events(policy) {
+        // Emit profiles-changed to trigger frontend to reload profiles from disk.
+        if let Err(e) = events::emit_empty("profiles-changed") {
+          log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+        }
+
+        log::info!(
+          "Emitting profile events for successful Camoufox launch: {}",
+          updated_profile.name
+        );
+
+        if let Err(e) = events::emit("profile-updated", &updated_profile) {
+          log::warn!("Warning: Failed to emit profile update event: {e}");
+        }
+
+        #[derive(Serialize)]
+        struct RunningChangedPayload {
+          id: String,
+          is_running: bool,
+        }
+
+        let payload = RunningChangedPayload {
+          id: updated_profile.id.to_string(),
+          is_running: updated_profile.process_id.is_some(),
+        };
+
+        if let Err(e) = events::emit("profile-running-changed", &payload) {
+          log::warn!("Warning: Failed to emit profile running changed event: {e}");
+        } else {
+          log::info!(
+            "Successfully emitted profile-running-changed event for Camoufox {}: running={}",
+            updated_profile.name,
+            payload.is_running
+          );
+        }
       }
 
       return Ok(updated_profile);
@@ -1020,6 +1288,13 @@ impl BrowserRunner {
         chromium_config.proxy
       );
 
+      let profile_randomizes_on_launch =
+        chromium_config.randomize_fingerprint_on_launch == Some(true);
+      if let Some(policy) = policy {
+        chromium_config.randomize_fingerprint_on_launch =
+          Some(policy.fingerprint_mode == FingerprintMode::RandomPerLaunch);
+      }
+
       // Check if we need to generate a new fingerprint on every launch
       let mut updated_profile = profile.clone();
       if let Some(runtime_version) = self.resolve_chromium_runtime_version(&updated_profile.version)
@@ -1033,7 +1308,7 @@ impl BrowserRunner {
           updated_profile.version = runtime_version;
         }
       }
-      if chromium_config.randomize_fingerprint_on_launch == Some(true) {
+      if should_randomize_fingerprint(policy, profile_randomizes_on_launch) {
         log::info!(
           "Generating random fingerprint for Chromium profile: {}",
           profile.name
@@ -1075,12 +1350,12 @@ impl BrowserRunner {
         );
       }
 
-      // Create ephemeral dir for ephemeral profiles
-      if profile.ephemeral {
-        launch_transaction.begin_ephemeral_profile(profile.id.to_string());
-        let dir = crate::ephemeral_dirs::create_ephemeral_dir(&profile.id.to_string())
+      // Create ephemeral dir for ephemeral profiles or policy-driven runtime overlays.
+      if let Some(runtime_key) = runtime_key.as_deref() {
+        launch_transaction.begin_ephemeral_profile(runtime_key.to_string());
+        let dir = crate::ephemeral_dirs::create_ephemeral_dir_for_key(runtime_key)
           .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-        launch_transaction.own_ephemeral_profile(profile.id.to_string(), dir);
+        launch_transaction.own_ephemeral_profile(runtime_key.to_string(), dir);
       }
 
       // Launch Chromium browser
@@ -1088,8 +1363,11 @@ impl BrowserRunner {
 
       // Get profile path for Chromium
       let profiles_dir = self.profile_manager.get_profiles_dir();
-      let profile_data_path =
-        crate::ephemeral_dirs::get_effective_profile_path(&updated_profile, &profiles_dir);
+      let profile_data_path = crate::ephemeral_dirs::get_effective_profile_path_for_key(
+        &updated_profile,
+        &profiles_dir,
+        runtime_key.as_deref(),
+      );
       let profile_path_str = profile_data_path.to_string_lossy().to_string();
 
       // Install extensions if an extension group is assigned
@@ -1126,7 +1404,7 @@ impl BrowserRunner {
           &chromium_config,
           url.as_deref(),
           proxy_url,
-          profile.ephemeral,
+          runtime_key.is_some(),
           &extension_paths,
           remote_debugging_port,
           headless,
@@ -1177,51 +1455,82 @@ impl BrowserRunner {
           .map(|f| f.len())
           .unwrap_or(0)
       );
-      self.save_process_info(&updated_profile)?;
+      if should_persist_launch_metadata(policy) {
+        let persisted_profile = launch_metadata_profile(source_profile, &updated_profile, policy);
+        self.save_process_info(&persisted_profile)?;
+      }
+      if let Some(lease) = runtime_lease {
+        let cleanup_state = RuntimeCleanupState {
+          process_id: Some(process_id),
+          browser_instance_id: Some(chromium_result.id.clone()),
+          owned_vpn_worker_id: launch_transaction.owned_vpn_worker_id().map(str::to_owned),
+          ephemeral_runtime_key: runtime_key.clone(),
+        };
+        if !LeaseRegistry::global()
+          .set_runtime_cleanup_state(&lease.lease_id, cleanup_state.clone())
+        {
+          return Err(
+            format!(
+              "runtime lease `{}` became inactive during Chromium launch",
+              lease.lease_id
+            )
+            .into(),
+          );
+        }
+        lease.set_runtime_cleanup_state(cleanup_state);
+      }
       launch_transaction.commit();
-      let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
-        let _ = tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
-      });
-      log::info!(
-        "Successfully saved profile with process info: {}",
-        updated_profile.name
-      );
-
-      // Emit profiles-changed to trigger frontend to reload profiles from disk
-      if let Err(e) = events::emit_empty("profiles-changed") {
-        log::warn!("Warning: Failed to emit profiles-changed event: {e}");
-      }
-
-      log::info!(
-        "Emitting profile events for successful Chromium launch: {}",
-        updated_profile.name
-      );
-
-      // Emit profile update event to frontend
-      if let Err(e) = events::emit("profile-updated", &updated_profile) {
-        log::warn!("Warning: Failed to emit profile update event: {e}");
-      }
-
-      // Emit minimal running changed event to frontend
-      #[derive(Serialize)]
-      struct RunningChangedPayload {
-        id: String,
-        is_running: bool,
-      }
-
-      let payload = RunningChangedPayload {
-        id: updated_profile.id.to_string(),
-        is_running: updated_profile.process_id.is_some(),
-      };
-
-      if let Err(e) = events::emit("profile-running-changed", &payload) {
-        log::warn!("Warning: Failed to emit profile running changed event: {e}");
+      if should_persist_launch_metadata(policy) {
+        let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
+          let _ =
+            tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
+        });
+        log::info!(
+          "Successfully saved profile with process info: {}",
+          updated_profile.name
+        );
       } else {
         log::info!(
-          "Successfully emitted profile-running-changed event for Chromium {}: running={}",
-          updated_profile.name,
-          payload.is_running
+          "Tracked Chromium PID {} on runtime lease without saving source profile {}",
+          process_id,
+          source_profile.id
         );
+      }
+
+      if should_emit_source_profile_events(policy) {
+        if let Err(e) = events::emit_empty("profiles-changed") {
+          log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+        }
+
+        log::info!(
+          "Emitting profile events for successful Chromium launch: {}",
+          updated_profile.name
+        );
+
+        if let Err(e) = events::emit("profile-updated", &updated_profile) {
+          log::warn!("Warning: Failed to emit profile update event: {e}");
+        }
+
+        #[derive(Serialize)]
+        struct RunningChangedPayload {
+          id: String,
+          is_running: bool,
+        }
+
+        let payload = RunningChangedPayload {
+          id: updated_profile.id.to_string(),
+          is_running: updated_profile.process_id.is_some(),
+        };
+
+        if let Err(e) = events::emit("profile-running-changed", &payload) {
+          log::warn!("Warning: Failed to emit profile running changed event: {e}");
+        } else {
+          log::info!(
+            "Successfully emitted profile-running-changed event for Chromium {}: running={}",
+            updated_profile.name,
+            payload.is_running
+          );
+        }
       }
 
       return Ok(updated_profile);
@@ -1345,6 +1654,8 @@ impl BrowserRunner {
         None,
         remote_debugging_port,
         headless,
+        None,
+        None,
       )
       .await
   }
@@ -1438,6 +1749,8 @@ impl BrowserRunner {
                 internal_proxy_settings,
                 None,
                 false,
+                None,
+                None,
               )
               .await
           }
@@ -1469,6 +1782,8 @@ impl BrowserRunner {
           internal_proxy_settings,
           None,
           false,
+          None,
+          None,
         )
         .await
     }
@@ -1494,6 +1809,149 @@ impl BrowserRunner {
       .profile_manager
       .check_browser_status(app_handle, profile)
       .await
+  }
+
+  pub async fn kill_runtime_browser(
+    &self,
+    app_handle: tauri::AppHandle,
+    profile: &BrowserProfile,
+    policy: &LaunchPolicy,
+    lease: &mut RuntimeLease,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    validate_runtime_lease(profile, policy, lease)?;
+
+    let mut cleanup_state = LeaseRegistry::global()
+      .runtime_cleanup_state(&lease.lease_id)
+      .unwrap_or_else(|| lease.runtime_cleanup_state());
+    if cleanup_state.is_empty() {
+      return Ok(());
+    }
+
+    let profiles_dir = self.profile_manager.get_profiles_dir();
+    let cleanup_plan = runtime_cleanup_plan(profile, &profiles_dir, policy, &cleanup_state)?;
+
+    for step in cleanup_plan {
+      match step {
+        RuntimeCleanupStep::StopProxy(process_id) => {
+          if let Err(error) = PROXY_MANAGER
+            .stop_proxy(app_handle.clone(), process_id)
+            .await
+          {
+            log::warn!("Failed to stop runtime proxy for PID {process_id}: {error}");
+          }
+        }
+        RuntimeCleanupStep::StopCamoufoxManager {
+          profile_path,
+          fallback_instance_id,
+        } => {
+          let instance_id = match self
+            .camoufox_manager
+            .find_camoufox_by_profile(&profile_path.to_string_lossy())
+            .await
+          {
+            Ok(Some(process)) => Some(process.id),
+            Ok(None) => fallback_instance_id,
+            Err(error) => {
+              log::warn!(
+                "Failed to find runtime Camoufox manager instance for {}: {error}",
+                profile_path.display()
+              );
+              fallback_instance_id
+            }
+          };
+          if let Some(instance_id) = instance_id {
+            if let Err(error) = self
+              .camoufox_manager
+              .stop_camoufox(&app_handle, &instance_id)
+              .await
+            {
+              return Err(
+                format!("Failed to stop runtime Camoufox manager instance {instance_id}: {error}")
+                  .into(),
+              );
+            }
+            cleanup_state.browser_instance_id = None;
+          }
+        }
+        RuntimeCleanupStep::StopChromiumManager {
+          profile_path,
+          fallback_instance_id,
+        } => {
+          let instance_id = self
+            .chromium_manager
+            .find_chromium_by_profile(&profile_path.to_string_lossy())
+            .await
+            .map(|process| process.id)
+            .or(fallback_instance_id);
+          if let Some(instance_id) = instance_id {
+            self
+              .chromium_manager
+              .stop_chromium(&instance_id)
+              .await
+              .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("Failed to stop runtime Chromium manager instance {instance_id}: {error}")
+                  .into()
+              })?;
+            cleanup_state.browser_instance_id = None;
+          }
+        }
+        RuntimeCleanupStep::ForceKillBrowser(process_id) => {
+          if crate::proxy_storage::is_process_running(process_id) {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            let profile_path = {
+              let runtime_key = cleanup_state.ephemeral_runtime_key.as_deref();
+              crate::ephemeral_dirs::get_effective_profile_path_for_key(
+                profile,
+                &profiles_dir,
+                runtime_key,
+              )
+              .to_string_lossy()
+              .to_string()
+            };
+
+            #[cfg(target_os = "macos")]
+            platform_browser::macos::kill_browser_process_impl(process_id, Some(&profile_path))
+              .await?;
+            #[cfg(target_os = "windows")]
+            platform_browser::windows::kill_browser_process_impl(process_id).await?;
+            #[cfg(target_os = "linux")]
+            platform_browser::linux::kill_browser_process_impl(process_id, Some(&profile_path))
+              .await?;
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            return Err("Unsupported platform".into());
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if crate::proxy_storage::is_process_running(process_id) {
+              return Err(format!("Runtime browser process {process_id} is still running").into());
+            }
+          }
+          cleanup_state.process_id = None;
+        }
+        RuntimeCleanupStep::StopOwnedVpnWorker(worker_id) => {
+          crate::vpn_worker_runner::stop_vpn_worker(&worker_id)
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+              format!("Failed to stop runtime VPN worker {worker_id}: {error}").into()
+            })?;
+          cleanup_state.owned_vpn_worker_id = None;
+        }
+        RuntimeCleanupStep::RemoveEphemeralRuntime(runtime_key) => {
+          remove_ephemeral_runtime_dir(&runtime_key)?;
+          cleanup_state.ephemeral_runtime_key = None;
+        }
+      }
+
+      let _ =
+        LeaseRegistry::global().set_runtime_cleanup_state(&lease.lease_id, cleanup_state.clone());
+      lease.set_runtime_cleanup_state(cleanup_state.clone());
+    }
+
+    if cleanup_state.is_empty() {
+      let _ = LeaseRegistry::global()
+        .set_runtime_cleanup_state(&lease.lease_id, RuntimeCleanupState::default());
+      lease.set_runtime_cleanup_state(RuntimeCleanupState::default());
+    }
+    Ok(())
   }
 
   pub async fn kill_browser_process(
@@ -3131,17 +3589,217 @@ pub async fn open_url_with_profile(
 #[cfg(test)]
 mod tests {
   use super::{
-    acquire_pre_launch_lock, remove_ephemeral_profile_dir, BrowserRunner, LaunchKernel,
-    LaunchRollbackDispatcher, PreLaunchResources, PreLaunchTransaction,
+    acquire_pre_launch_lock, apply_runtime_network_policy, launch_metadata_profile,
+    remove_ephemeral_profile_dir, runtime_cleanup_plan, should_emit_source_profile_events,
+    should_persist_launch_metadata, should_randomize_fingerprint, uses_ephemeral_runtime_data,
+    BrowserRunner, LaunchKernel, LaunchRollbackDispatcher, PreLaunchResources,
+    PreLaunchTransaction, RuntimeCleanupStep,
   };
+  use crate::chromium_manager::ChromiumConfig;
   use crate::ephemeral_dirs::{
     create_ephemeral_dir, get_ephemeral_dir, inject_ephemeral_delete_failure,
   };
+  use crate::profile::BrowserProfile;
+  use crate::profile_runtime::{DataMode, FingerprintMode, LaunchPolicy, RuntimeCleanupState};
   use std::collections::HashSet;
   use std::path::PathBuf;
   use std::sync::{Arc, Mutex};
   use std::time::Duration;
   use tempfile::tempdir;
+
+  #[test]
+  fn runtime_policy_controls_fingerprint_generation() {
+    let mut policy = LaunchPolicy::for_source_profile("source-profile");
+    policy.fingerprint_mode = FingerprintMode::Stable;
+    assert!(!should_randomize_fingerprint(Some(&policy), true));
+
+    policy.fingerprint_mode = FingerprintMode::RandomPerLaunch;
+    assert!(should_randomize_fingerprint(Some(&policy), false));
+
+    assert!(should_randomize_fingerprint(None, true));
+    assert!(!should_randomize_fingerprint(None, false));
+  }
+
+  #[test]
+  fn non_persisting_policy_suppresses_metadata_and_source_events() {
+    let policy = LaunchPolicy::for_source_profile("source-profile");
+    assert!(!should_persist_launch_metadata(Some(&policy)));
+    assert!(!should_emit_source_profile_events(Some(&policy)));
+
+    assert!(should_persist_launch_metadata(None));
+    assert!(should_emit_source_profile_events(None));
+  }
+
+  #[test]
+  fn runtime_network_policy_only_changes_the_clone() {
+    let source = BrowserProfile {
+      proxy_id: Some("source-proxy".to_string()),
+      vpn_id: None,
+      ..BrowserProfile::default()
+    };
+    let mut vpn_policy = LaunchPolicy::for_source_profile(source.id.to_string());
+    vpn_policy.vpn_id = Some("runtime-vpn".to_string());
+
+    let runtime = apply_runtime_network_policy(&source, Some(&vpn_policy));
+    assert_eq!(runtime.proxy_id, None);
+    assert_eq!(runtime.vpn_id.as_deref(), Some("runtime-vpn"));
+    assert_eq!(source.proxy_id.as_deref(), Some("source-proxy"));
+    assert_eq!(source.vpn_id, None);
+
+    vpn_policy.clear_network = true;
+    let cleared = apply_runtime_network_policy(&source, Some(&vpn_policy));
+    assert_eq!(cleared.proxy_id, None);
+    assert_eq!(cleared.vpn_id, None);
+  }
+
+  #[test]
+  fn policy_persistence_copies_only_process_fields_to_source() {
+    let source = BrowserProfile {
+      version: "source-version".to_string(),
+      proxy_id: Some("source-proxy".to_string()),
+      chromium_config: Some(ChromiumConfig {
+        fingerprint: Some("source-fingerprint".to_string()),
+        ..ChromiumConfig::default()
+      }),
+      ephemeral: false,
+      ..BrowserProfile::default()
+    };
+    let mut launched = source.clone();
+    launched.version = "runtime-version".to_string();
+    launched.proxy_id = None;
+    launched.vpn_id = Some("runtime-vpn".to_string());
+    launched.chromium_config = Some(ChromiumConfig {
+      fingerprint: Some("runtime-fingerprint".to_string()),
+      ..ChromiumConfig::default()
+    });
+    launched.ephemeral = true;
+    launched.process_id = Some(4242);
+    launched.last_launch = Some(99);
+
+    let policy = LaunchPolicy::for_source_profile(source.id.to_string());
+    let persisted = launch_metadata_profile(&source, &launched, Some(&policy));
+    assert_eq!(persisted.version, "source-version");
+    assert_eq!(persisted.proxy_id.as_deref(), Some("source-proxy"));
+    assert_eq!(persisted.vpn_id, None);
+    assert_eq!(
+      persisted
+        .chromium_config
+        .as_ref()
+        .and_then(|config| config.fingerprint.as_deref()),
+      Some("source-fingerprint")
+    );
+    assert!(!persisted.ephemeral);
+    assert_eq!(persisted.process_id, Some(4242));
+    assert_eq!(persisted.last_launch, Some(99));
+  }
+
+  #[test]
+  fn data_mode_overrides_source_ephemeral_flag() {
+    let mut policy = LaunchPolicy::for_source_profile("source-profile");
+    policy.data_mode = DataMode::Ephemeral;
+    assert!(uses_ephemeral_runtime_data(false, Some(&policy)));
+
+    policy.data_mode = DataMode::Persistent;
+    assert!(!uses_ephemeral_runtime_data(true, Some(&policy)));
+
+    assert!(uses_ephemeral_runtime_data(true, None));
+    assert!(!uses_ephemeral_runtime_data(false, None));
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn runtime_cleanup_plan_stops_manager_before_pid_and_includes_owned_resources() {
+    let profile = BrowserProfile {
+      browser: "camoufox".to_string(),
+      ..BrowserProfile::default()
+    };
+    let policy = LaunchPolicy::for_source_profile(profile.id.to_string());
+    let runtime_key = format!("{}__cleanup-plan", profile.id);
+    let profile_path = crate::ephemeral_dirs::create_ephemeral_dir_for_key(&runtime_key).unwrap();
+    let state = RuntimeCleanupState {
+      process_id: Some(4242),
+      browser_instance_id: Some("camoufox-runtime".to_string()),
+      owned_vpn_worker_id: Some("owned-vpn-worker".to_string()),
+      ephemeral_runtime_key: Some(runtime_key.clone()),
+    };
+
+    let plan = runtime_cleanup_plan(&profile, tempdir().unwrap().path(), &policy, &state).unwrap();
+    assert_eq!(
+      plan,
+      vec![
+        RuntimeCleanupStep::StopProxy(4242),
+        RuntimeCleanupStep::StopCamoufoxManager {
+          profile_path,
+          fallback_instance_id: Some("camoufox-runtime".to_string()),
+        },
+        RuntimeCleanupStep::ForceKillBrowser(4242),
+        RuntimeCleanupStep::StopOwnedVpnWorker("owned-vpn-worker".to_string()),
+        RuntimeCleanupStep::RemoveEphemeralRuntime(runtime_key.clone()),
+      ]
+    );
+
+    crate::ephemeral_dirs::remove_ephemeral_dir_for_key(&runtime_key).unwrap();
+  }
+
+  #[test]
+  fn runtime_cleanup_plan_does_not_stop_reused_vpn_worker() {
+    let profile = BrowserProfile {
+      browser: "chromium".to_string(),
+      ..BrowserProfile::default()
+    };
+    let mut policy = LaunchPolicy::for_source_profile(profile.id.to_string());
+    policy.data_mode = DataMode::Persistent;
+    let state = RuntimeCleanupState {
+      process_id: Some(5252),
+      browser_instance_id: Some("chromium-runtime".to_string()),
+      owned_vpn_worker_id: None,
+      ephemeral_runtime_key: None,
+    };
+
+    let profiles_dir = tempdir().unwrap();
+    let plan = runtime_cleanup_plan(&profile, profiles_dir.path(), &policy, &state).unwrap();
+    assert_eq!(plan.len(), 3);
+    assert!(matches!(plan[0], RuntimeCleanupStep::StopProxy(5252)));
+    assert!(matches!(
+      &plan[1],
+      RuntimeCleanupStep::StopChromiumManager {
+        fallback_instance_id: Some(id),
+        ..
+      } if id == "chromium-runtime"
+    ));
+    assert!(matches!(
+      plan[2],
+      RuntimeCleanupStep::ForceKillBrowser(5252)
+    ));
+    assert!(!plan
+      .iter()
+      .any(|step| matches!(step, RuntimeCleanupStep::StopOwnedVpnWorker(_))));
+  }
+
+  #[test]
+  fn runtime_cleanup_retry_targets_only_residual_owned_resources() {
+    let profile = BrowserProfile {
+      browser: "chromium".to_string(),
+      ..BrowserProfile::default()
+    };
+    let policy = LaunchPolicy::for_source_profile(profile.id.to_string());
+    let state = RuntimeCleanupState {
+      process_id: None,
+      browser_instance_id: None,
+      owned_vpn_worker_id: Some("vpn-retry".to_string()),
+      ephemeral_runtime_key: Some("runtime-retry".to_string()),
+    };
+
+    let profiles_dir = tempdir().unwrap();
+    let plan = runtime_cleanup_plan(&profile, profiles_dir.path(), &policy, &state).unwrap();
+    assert_eq!(
+      plan,
+      vec![
+        RuntimeCleanupStep::StopOwnedVpnWorker("vpn-retry".to_string()),
+        RuntimeCleanupStep::RemoveEphemeralRuntime("runtime-retry".to_string()),
+      ]
+    );
+  }
 
   #[derive(Default)]
   struct FakeLaunchState {

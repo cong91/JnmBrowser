@@ -8,5 +8,5 @@ pub mod lease;
 pub mod policy;
 
 pub use guard::LeaseCleanupGuard;
-pub use lease::{LeaseError, LeaseRegistry, RuntimeLease};
+pub use lease::{LeaseError, LeaseRegistry, RuntimeCleanupState, RuntimeLease};
 pub use policy::{DataMode, FingerprintMode, LaunchPolicy};
