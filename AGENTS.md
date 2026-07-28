@@ -43,6 +43,7 @@ The action recorder lives at `src-tauri/src/recorder/`; its frontend integration
 
 - **Frontend (`src/`)** talks to Rust only via Tauri `invoke` / `listen`. Do not put browser process control or profile file I/O in React.
 - **Rust commands** are registered in `src-tauri/src/lib.rs`. New user-facing backend APIs need a command + frontend call site; dead commands fail `pnpm check-unused-commands`.
+- **Auxiliary binaries (`src-tauri/src/bin/`) are test/development harnesses only.** Keep them as thin adapters over reusable Rust modules; never leave feature logic implemented exclusively in a binary. If a workflow is first developed in a binary, move its logic into shared library code, wire the Tauri application to the same implementation, and verify both entry points before considering the feature complete.
 - **Browser kernels**: Chromium path is primarily `chromium_manager.rs`; Camoufox is `camoufox_manager.rs`. Legacy “Wayfern” naming still appears in some vars/API cache files — treat carefully when renaming.
 - **Proxy**: local `donut-proxy` binary is required for proxy features; copy via `pnpm copy-proxy-binary` before bare `cargo` runs.
 - **donut-sync**: separate NestJS app with its own `package.json` / Biome / tsc. Lint/typecheck scripts cover both trees.

@@ -5,6 +5,9 @@ use std::sync::atomic::AtomicBool;
 use thiserror::Error;
 
 use crate::auto_service::common::totp::generate_totp_now;
+use crate::auto_service::openai::browser::{
+  click_first_text, click_password_method, click_trusted_submit, fill_visible_input, ChatGptBrowser,
+};
 use crate::email::{EmailService, EmailServiceError};
 
 const EMAIL_INPUT_SELECTOR: &str = r#"input[type="email"], input[name="email"], input[name="username"], input[autocomplete="email"], input[autocomplete="username"]"#;
@@ -16,10 +19,6 @@ const SUBMIT_SELECTOR: &str =
 const EMAIL_VERIFICATION_URL: &str = "https://auth.openai.com/email-verification";
 
 // --- Timing constants (ms) — tune for speed vs reliability ------------------
-/// Interval between type_text retry attempts.
-const TYPE_RETRY_MS: u64 = 300;
-/// Wait after clicking "Continue with password" method button.
-const PASSWORD_METHOD_MS: u64 = 900;
 /// Wait after activating password login before typing credentials.
 const PASSWORD_ACTIVATE_MS: u64 = 1200;
 /// Pause after typing password to let blocked/deactivated messages appear.
@@ -354,9 +353,10 @@ async fn complete_email_otp<A: ExistingAccountAuthAdapter + Send + ?Sized>(
     let code = email_service
       .poll_verification_code_with_cancel(raw_cdk, timeout_secs, cancel_flag)
       .map_err(map_email_poll_error)?;
+    let submission = adapter.submit_email_otp(&code).await?;
     email_service.mark_verification_code_used(raw_cdk, &code);
 
-    match adapter.submit_email_otp(&code).await? {
+    match submission {
       EmailOtpSubmission::Accepted => return Ok(()),
       EmailOtpSubmission::WrongCode if attempt + 1 < policy.max_email_otp_attempts => {
         adapter.refresh_email_verification().await?;
@@ -389,94 +389,6 @@ fn map_email_poll_error(error: EmailServiceError) -> AuthError {
   }
 }
 
-#[async_trait]
-pub(crate) trait ChatGptBrowser {
-  async fn navigate(&mut self, url: &str, timeout_secs: u64) -> Result<(), String>;
-  async fn evaluate(&mut self, expression: &str, await_promise: bool) -> Result<Value, String>;
-  async fn current_url(&mut self) -> Result<String, String>;
-  async fn type_text(&mut self, selector: &str, value: &str) -> Result<(), String>;
-  async fn click_point(&mut self, x: f64, y: f64) -> Result<(), String>;
-}
-
-pub(crate) async fn click_first_visible<B: ChatGptBrowser + Send>(
-  browser: &mut B,
-  selector: &str,
-) -> Result<bool, String> {
-  let script = format!(
-    r#"(function(){{
-      for (const el of Array.from(document.querySelectorAll({selector}))) {{
-        const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) continue;
-        el.scrollIntoView({{ block: 'center', inline: 'center' }});
-        const visible = el.getBoundingClientRect();
-        return {{ found: true, x: visible.left + visible.width / 2, y: visible.top + visible.height / 2 }};
-      }}
-      return {{ found: false }};
-    }})()"#,
-    selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
-  );
-  let result = browser.evaluate(&script, false).await?;
-  let value = result.get("value").cloned().unwrap_or_default();
-  if value.get("found").and_then(Value::as_bool) != Some(true) {
-    return Ok(false);
-  }
-  let x = value
-    .get("x")
-    .and_then(Value::as_f64)
-    .ok_or_else(|| "visible control has no x coordinate".to_string())?;
-  let y = value
-    .get("y")
-    .and_then(Value::as_f64)
-    .ok_or_else(|| "visible control has no y coordinate".to_string())?;
-  browser.click_point(x, y).await?;
-  Ok(true)
-}
-
-pub(crate) async fn click_first_text<B: ChatGptBrowser + Send>(
-  browser: &mut B,
-  labels: &[&str],
-  selector: &str,
-) -> Result<bool, String> {
-  let script = format!(
-    r#"(function(){{
-      const labels = {labels};
-      for (const el of Array.from(document.querySelectorAll({selector}))) {{
-        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-        if (!labels.some((label) => text.includes(label))) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) continue;
-        el.scrollIntoView({{ block: 'center', inline: 'center' }});
-        const visible = el.getBoundingClientRect();
-        return {{ found: true, x: visible.left + visible.width / 2, y: visible.top + visible.height / 2 }};
-      }}
-      return {{ found: false }};
-    }})()"#,
-    labels = serde_json::to_string(
-      &labels
-        .iter()
-        .map(|label| label.to_ascii_lowercase())
-        .collect::<Vec<_>>()
-    )
-    .unwrap_or_else(|_| "[]".into()),
-    selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
-  );
-  let result = browser.evaluate(&script, false).await?;
-  let value = result.get("value").cloned().unwrap_or_default();
-  if value.get("found").and_then(Value::as_bool) != Some(true) {
-    return Ok(false);
-  }
-  let x = value
-    .get("x")
-    .and_then(Value::as_f64)
-    .ok_or_else(|| "text control has no x coordinate".to_string())?;
-  let y = value
-    .get("y")
-    .and_then(Value::as_f64)
-    .ok_or_else(|| "text control has no y coordinate".to_string())?;
-  browser.click_point(x, y).await?;
-  Ok(true)
-}
-
 pub(crate) struct BrowserAuthAdapter<'a, B> {
   browser: &'a mut B,
   device_id: &'a str,
@@ -485,97 +397,6 @@ pub(crate) struct BrowserAuthAdapter<'a, B> {
 impl<'a, B: ChatGptBrowser + Send> BrowserAuthAdapter<'a, B> {
   pub(crate) fn new(browser: &'a mut B, device_id: &'a str) -> Self {
     Self { browser, device_id }
-  }
-
-  async fn type_text_after_rerender(&mut self, selector: &str, value: &str) -> Result<(), String> {
-    let mut last_error = "browser input is unavailable".to_string();
-    for attempt in 0..10 {
-      match self.browser.type_text(selector, value).await {
-        Ok(()) => return Ok(()),
-        Err(error) => last_error = error,
-      }
-      match self.type_text_via_dom(selector, value).await {
-        Ok(()) => return Ok(()),
-        Err(error) => {
-          if error != "not_found" {
-            last_error = error;
-          }
-        }
-      }
-      if attempt < 9 {
-        tokio::time::sleep(std::time::Duration::from_millis(TYPE_RETRY_MS)).await;
-      }
-    }
-    Err(last_error)
-  }
-
-  async fn type_text_via_dom(&mut self, selector: &str, value: &str) -> Result<(), String> {
-    let script = format!(
-      r#"(function(){{
-        const element = document.querySelector({selector});
-        if (!element || element.disabled || element.readOnly) return {{ ok: false, reason: 'not_found' }};
-        element.focus();
-        const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-        if (descriptor && descriptor.set) descriptor.set.call(element, {value});
-        else element.value = {value};
-        element.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        element.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        element.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-        return {{ ok: String(element.value || '').trim() === String({value}).trim(), reason: 'value_not_accepted' }};
-      }})()"#,
-      selector = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
-      value = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
-    );
-    let result = self.browser.evaluate(&script, false).await?;
-    let payload = result.get("value").cloned().unwrap_or_default();
-    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
-      Ok(())
-    } else {
-      Err(
-        payload
-          .get("reason")
-          .and_then(Value::as_str)
-          .unwrap_or("value_not_accepted")
-          .to_string(),
-      )
-    }
-  }
-
-  #[allow(dead_code)]
-  async fn browser_has_selector(&mut self, selector: &str) -> Result<bool, String> {
-    let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into());
-    let script = format!("!!document.querySelector({sel_json})");
-    let result = self.browser.evaluate(&script, false).await?;
-    Ok(result.get("value").and_then(Value::as_bool) == Some(true))
-  }
-
-  async fn click_password_method_button(&mut self) -> Result<(), String> {
-    // Use JS .click() directly — more reliable than CDP coordinate click for
-    // React-managed buttons on auth.openai.com (observed: center-coordinate
-    // click via CDP sometimes does not trigger navigation).
-    let js = r#"(function(){
-      const labels = ["password", "continue with password", "sign in with password", "log in with password"];
-      for (const el of Array.from(document.querySelectorAll('button, a, [role="button"], div[role="button"]'))) {
-        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-        if (!labels.some((label) => text.includes(label))) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) continue;
-        if (el.disabled) continue;
-        try { el.focus(); el.click(); } catch(_) { el.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
-        return { found: true };
-      }
-      return { found: false };
-    })()"#;
-    match self.browser.evaluate(js, false).await {
-      Ok(result) => {
-        if result.get("value").and_then(Value::as_bool) == Some(false) {
-          return Err("password method button not found on page".into());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(PASSWORD_METHOD_MS)).await;
-        Ok(())
-      }
-      Err(e) => Err(e),
-    }
   }
 }
 
@@ -650,11 +471,12 @@ impl<B: ChatGptBrowser + Send> ExistingAccountAuthAdapter for BrowserAuthAdapter
   }
 
   async fn submit_email(&mut self, email: &str) -> Result<(), AuthError> {
-    self
-      .type_text_after_rerender(EMAIL_INPUT_SELECTOR, email)
+    fill_visible_input(self.browser, EMAIL_INPUT_SELECTOR, email, "email")
       .await
       .map_err(|_| AuthError::Unknown("could not fill email input".into()))?;
-    require_submit(self.browser).await
+    click_trusted_submit(self.browser, SUBMIT_SELECTOR, "authentication")
+      .await
+      .map_err(|_| AuthError::Unknown("authentication submit control not found".into()))
   }
 
   async fn submit_password(&mut self, password: &str) -> Result<(), AuthError> {
@@ -671,15 +493,13 @@ impl<B: ChatGptBrowser + Send> ExistingAccountAuthAdapter for BrowserAuthAdapter
       .to_ascii_lowercase();
     let is_email_verif = url.contains("email-verification") || url.contains("email-otp");
     if is_email_verif {
-      self
-        .click_password_method_button()
+      click_password_method(self.browser)
         .await
         .map_err(|_| AuthError::Unknown("could not activate password method".into()))?;
       tokio::time::sleep(std::time::Duration::from_millis(PASSWORD_ACTIVATE_MS)).await;
       return Ok(());
     }
-    self
-      .type_text_after_rerender(PASSWORD_INPUT_SELECTOR, password)
+    fill_visible_input(self.browser, PASSWORD_INPUT_SELECTOR, password, "password")
       .await
       .map_err(|_| AuthError::Unknown("could not fill password input".into()))?;
     // After typing password, let the page settle then check for blocking
@@ -705,17 +525,19 @@ impl<B: ChatGptBrowser + Send> ExistingAccountAuthAdapter for BrowserAuthAdapter
     {
       return Err(AuthError::Locked);
     }
-    require_submit(self.browser).await
+    click_trusted_submit(self.browser, SUBMIT_SELECTOR, "authentication")
+      .await
+      .map_err(|_| AuthError::Unknown("authentication submit control not found".into()))
   }
 
   async fn submit_email_otp(&mut self, code: &str) -> Result<EmailOtpSubmission, AuthError> {
-    if self
-      .browser
-      .type_text(EMAIL_OTP_INPUT_SELECTOR, code)
+    if fill_visible_input(self.browser, EMAIL_OTP_INPUT_SELECTOR, code, "email OTP")
       .await
       .is_ok()
     {
-      require_submit(self.browser).await?;
+      click_trusted_submit(self.browser, SUBMIT_SELECTOR, "authentication")
+        .await
+        .map_err(|_| AuthError::Unknown("authentication submit control not found".into()))?;
       tokio::time::sleep(std::time::Duration::from_millis(OTP_SUBMIT_MS)).await;
       let signals = self.observe().await?;
       if !matches!(classify_auth_state(&signals), AuthState::EmailOtp) {
@@ -823,12 +645,17 @@ impl<B: ChatGptBrowser + Send> ExistingAccountAuthAdapter for BrowserAuthAdapter
   }
 
   async fn submit_authenticator_totp(&mut self, code: &str) -> Result<(), AuthError> {
-    self
-      .browser
-      .type_text(TOTP_INPUT_SELECTOR, code)
+    fill_visible_input(
+      self.browser,
+      TOTP_INPUT_SELECTOR,
+      code,
+      "authenticator code",
+    )
+    .await
+    .map_err(|_| AuthError::Unknown("could not fill authenticator code input".into()))?;
+    click_trusted_submit(self.browser, SUBMIT_SELECTOR, "authentication")
       .await
-      .map_err(|_| AuthError::Unknown("could not fill authenticator code input".into()))?;
-    require_submit(self.browser).await
+      .map_err(|_| AuthError::Unknown("authentication submit control not found".into()))
   }
 }
 
@@ -868,44 +695,6 @@ fn classify_otp_api_response(
   } else {
     Ok(EmailOtpSubmission::Rejected)
   }
-}
-
-async fn require_submit<B: ChatGptBrowser + Send>(browser: &mut B) -> Result<(), AuthError> {
-  // Match auto-reg's submit_password_via_ui fallback chain:
-  //   1. button[type="submit"]
-  //   2. click by text "Continue"/"Next"/"Sign up"
-  //   3. JS form.requestSubmit()
-  if matches!(
-    click_first_visible(browser, SUBMIT_SELECTOR).await,
-    Ok(true)
-  ) {
-    return Ok(());
-  }
-  if click_first_text(
-    browser,
-    &["Continue", "Next", "Sign up", "Log in"],
-    "button, [role='button']",
-  )
-  .await
-  .unwrap_or(false)
-  {
-    return Ok(());
-  }
-  let js = r#"(function(){
-    const form = document.querySelector('form');
-    if (!form) return false;
-    if (typeof form.requestSubmit === 'function') { form.requestSubmit(); return true; }
-    form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
-    return true;
-  })()"#;
-  if let Ok(result) = browser.evaluate(js, false).await {
-    if result.get("value").and_then(Value::as_bool) == Some(true) {
-      return Ok(());
-    }
-  }
-  Err(AuthError::Unknown(
-    "authentication submit control not found".into(),
-  ))
 }
 
 #[cfg(test)]
@@ -981,6 +770,7 @@ mod tests {
     type_text_attempts: usize,
     dom_text_accepts: bool,
     dom_text_failures_remaining: usize,
+    typed_value_accepted: bool,
     evaluated: Vec<String>,
   }
 
@@ -1001,13 +791,21 @@ mod tests {
           }
         }));
       }
-      if expression.contains("Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')")
-      {
+      if expression.contains("verified: verifyDocument(document, 0)") {
+        return Ok(serde_json::json!({
+          "value": {
+            "found": true,
+            "verified": self.typed_value_accepted,
+          }
+        }));
+      }
+      if expression.contains("HTMLTextAreaElement") && expression.contains("setNativeValue") {
         if self.dom_text_failures_remaining > 0 {
           self.dom_text_failures_remaining -= 1;
           return Ok(serde_json::json!({
             "value": {
               "ok": false,
+              "verified": false,
               "reason": "not_found",
             }
           }));
@@ -1015,14 +813,15 @@ mod tests {
         return Ok(serde_json::json!({
           "value": {
             "ok": self.dom_text_accepts,
+            "verified": self.dom_text_accepts,
             "reason": "value_not_accepted",
           }
         }));
       }
-      if expression.contains("document.querySelectorAll") {
+      if expression.contains("function isReady(el)") {
         return Ok(serde_json::json!({
           "value": {
-            "found": self.submit_available,
+            "ok": self.submit_available,
             "x": 10.0,
             "y": 20.0,
           }
@@ -1104,6 +903,7 @@ mod tests {
   async fn production_email_entry_retries_after_stale_dom_replacement() {
     let mut browser = FakeBrowser {
       type_text_failures_remaining: 1,
+      typed_value_accepted: true,
       submit_available: true,
       ..FakeBrowser::default()
     };
@@ -1112,6 +912,7 @@ mod tests {
     adapter.submit_email("person@example.com").await.unwrap();
 
     assert_eq!(browser.type_text_attempts, 2);
+    assert_eq!(evaluate_count(&browser, "HTMLTextAreaElement"), 1);
   }
 
   #[tokio::test]
@@ -1127,7 +928,7 @@ mod tests {
     adapter.submit_email("person@example.com").await.unwrap();
 
     assert_eq!(browser.type_text_attempts, 1);
-    assert_eq!(evaluate_count(&browser, "HTMLInputElement.prototype"), 1);
+    assert_eq!(evaluate_count(&browser, "HTMLTextAreaElement"), 1);
   }
 
   #[tokio::test]
@@ -1144,7 +945,7 @@ mod tests {
     adapter.submit_email("person@example.com").await.unwrap();
 
     assert_eq!(browser.type_text_attempts, 3);
-    assert_eq!(evaluate_count(&browser, "HTMLInputElement.prototype"), 3);
+    assert_eq!(evaluate_count(&browser, "HTMLTextAreaElement"), 3);
   }
 
   #[tokio::test]
@@ -1163,7 +964,7 @@ mod tests {
 
     assert!(matches!(error, AuthError::Unknown(_)));
     assert_eq!(browser.type_text_attempts, 10);
-    assert_eq!(evaluate_count(&browser, "HTMLInputElement.prototype"), 10);
+    assert_eq!(evaluate_count(&browser, "HTMLTextAreaElement"), 10);
   }
 
   #[tokio::test]
@@ -1221,6 +1022,7 @@ mod tests {
   struct FakeAuthAdapter {
     observations: VecDeque<AuthSignals>,
     otp_results: VecDeque<EmailOtpSubmission>,
+    otp_error: Option<AuthError>,
     events: Vec<String>,
     submitted_otps: Vec<String>,
     submitted_totps: Vec<String>,
@@ -1253,6 +1055,9 @@ mod tests {
     async fn submit_email_otp(&mut self, code: &str) -> Result<EmailOtpSubmission, AuthError> {
       self.events.push("submit_email_otp".into());
       self.submitted_otps.push(code.to_string());
+      if let Some(error) = self.otp_error.clone() {
+        return Err(error);
+      }
       Ok(
         self
           .otp_results
@@ -1401,6 +1206,31 @@ mod tests {
     assert_eq!(adapter.submitted_otps, ["111222"]);
     assert_eq!(*email.used.lock().unwrap(), ["111222"]);
     assert_no_forbidden_collaborators(&adapter);
+  }
+
+  #[tokio::test]
+  async fn indeterminate_email_otp_submission_does_not_consume_code() {
+    let mut email_otp = signals("https://auth.openai.com/email-otp");
+    email_otp.has_email_otp_input = true;
+    let mut adapter = FakeAuthAdapter {
+      observations: VecDeque::from([email_otp]),
+      otp_error: Some(AuthError::Cloudflare),
+      ..FakeAuthAdapter::default()
+    };
+    let email = FakeEmailService::new(vec![Ok("111222")]);
+
+    let error = authenticate_existing_account(
+      &mut adapter,
+      credentials(None),
+      &email,
+      AuthPolicy::default(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, AuthError::Cloudflare);
+    assert_eq!(adapter.submitted_otps, ["111222"]);
+    assert!(email.used.lock().unwrap().is_empty());
   }
 
   #[tokio::test]

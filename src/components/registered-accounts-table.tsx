@@ -22,6 +22,7 @@ import {
   deriveSelectedAccounts,
   deriveWorkflowTargetKeys,
   getFilteredSelectionState,
+  isRegistrationAccountReadyForExport,
   pruneSelectedAccountKeys,
   setFilteredAccountSelection,
   toggleAccountSelection,
@@ -301,11 +302,12 @@ export function RegisteredAccountsTable({
     setSelected((previous) => pruneSelectedAccountKeys(previous, accounts));
   }, [accounts]);
 
-  const exportCount =
-    selectedAccounts.length > 0
-      ? selectedAccounts.length
-      : filtered.filter((a) => (a.status ?? "available") === "available")
-          .length;
+  const exportRows = useMemo(() => {
+    const candidates =
+      selectedAccounts.length > 0 ? selectedAccounts : filtered;
+    return candidates.filter(isRegistrationAccountReadyForExport);
+  }, [filtered, selectedAccounts]);
+  const exportCount = exportRows.length;
 
   const toggleReveal = (id: string) => {
     setRevealed((prev) => {
@@ -363,10 +365,7 @@ export function RegisteredAccountsTable({
   };
 
   const handleExport = async () => {
-    const rows =
-      selectedAccounts.length > 0
-        ? selectedAccounts
-        : filtered.filter((a) => (a.status ?? "available") === "available");
+    const rows = exportRows;
     if (rows.length === 0) {
       toast.error(t("registration.exportNoRows"));
       return;

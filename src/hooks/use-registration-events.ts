@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
-import { upsertRegistrationProgress } from "@/components/registration-progress-selection";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  isTerminalRegistrationProgress,
+  upsertRegistrationProgress,
+} from "@/components/registration-progress-selection";
 import type { EmailProvider } from "@/lib/email-providers";
 
 export interface RegistrationProgress {
@@ -12,7 +15,11 @@ export interface RegistrationProgress {
   step: string;
   message: string;
   timestamp: string;
-  result?: RegistrationResult | null;
+  eventKind: "account" | "batch";
+  terminal?: {
+    success: boolean;
+    statusCode: string;
+  } | null;
 }
 
 export type NetworkMode = "none" | "proxy" | "vpn" | "nord";
@@ -115,19 +122,20 @@ export function useRegistrationEvents() {
   const [accounts, setAccounts] = useState<RegistrationResult[]>([]);
   const [cdkInventory, setCdkInventory] = useState<CdkInventoryRecord[]>([]);
   const [loading, setLoading] = useState(false);
+  const listenerPromiseRef = useRef<Promise<void> | null>(null);
+  const listenerGenerationRef = useRef(0);
+  const unlistenRef = useRef<UnlistenFn | null>(null);
+  const disposedRef = useRef(false);
 
-  useEffect(() => {
-    let unlisten: UnlistenFn | undefined;
-
-    const setup = async () => {
-      unlisten = await listen<RegistrationProgress>(
+  const ensureListener = useCallback(async () => {
+    if (!listenerPromiseRef.current) {
+      const generation = ++listenerGenerationRef.current;
+      listenerPromiseRef.current = listen<RegistrationProgress>(
         "registration-progress",
         (event) => {
-          setProgressMap((prev) =>
-            upsertRegistrationProgress(prev, event.payload),
-          );
-          // Refresh inventories when a registration emits a result.
-          if (event.payload.result) {
+          const progress = event.payload;
+          setProgressMap((prev) => upsertRegistrationProgress(prev, progress));
+          if (isTerminalRegistrationProgress(progress)) {
             void invoke<RegistrationResult[]>("list_registered_accounts_cmd")
               .then(setAccounts)
               .catch(() => {});
@@ -136,20 +144,45 @@ export function useRegistrationEvents() {
               .catch(() => {});
           }
         },
-      );
-    };
+      )
+        .then((unlisten) => {
+          if (
+            disposedRef.current ||
+            generation !== listenerGenerationRef.current
+          ) {
+            unlisten();
+          } else {
+            unlistenRef.current = unlisten;
+          }
+        })
+        .catch((error) => {
+          if (generation === listenerGenerationRef.current) {
+            listenerPromiseRef.current = null;
+          }
+          throw error;
+        });
+    }
+    await listenerPromiseRef.current;
+  }, []);
 
-    setup();
+  useEffect(() => {
+    disposedRef.current = false;
+    void ensureListener().catch(() => {});
 
     return () => {
-      unlisten?.();
+      disposedRef.current = true;
+      listenerGenerationRef.current += 1;
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      listenerPromiseRef.current = null;
     };
-  }, []);
+  }, [ensureListener]);
 
   const startRegistration = useCallback(
     async (config: RegistrationConfig): Promise<string> => {
       setLoading(true);
       try {
+        await ensureListener();
         const taskId = await invoke<string>("start_auto_registration", {
           config,
         });
@@ -158,7 +191,7 @@ export function useRegistrationEvents() {
         setLoading(false);
       }
     },
-    [],
+    [ensureListener],
   );
 
   const cancelRegistration = useCallback(async (taskId: string) => {

@@ -293,6 +293,23 @@ impl CamoufoxManager {
     crate::app_dirs::profiles_dir()
   }
 
+  /// Diagnostic: registered automation instances as `id => profile_path`.
+  /// Used when an attach fails so the operator can spot path mismatches.
+  pub async fn debug_instance_paths(&self) -> Vec<(String, String, bool)> {
+    let inner = self.inner.lock().await;
+    inner
+      .instances
+      .values()
+      .map(|instance| {
+        (
+          instance.id.clone(),
+          instance.profile_path.clone().unwrap_or_default(),
+          instance.automation.is_some(),
+        )
+      })
+      .collect()
+  }
+
   async fn wait_for_camoufox_process_by_profile(
     &self,
     target_path: &std::path::Path,
@@ -729,6 +746,17 @@ impl CamoufoxManager {
     let custom_config = if let Some(existing_fingerprint) = &config.fingerprint {
       log::info!("Using existing fingerprint from profile metadata");
       existing_fingerprint.clone()
+    } else if profile.browser == "firefox" {
+      // System Firefox: generate minimal random fingerprint
+      let fp = serde_json::json!({
+        "navigator.userAgent": "",  // Firefox handles its own UA
+        "navigator.platform": "Win32",
+        "navigator.hardwareConcurrency": 8,
+        "timezone": "America/New_York",
+        "screen": { "width": 1920, "height": 1080 },
+        "media:prefersColorScheme": "light",
+      });
+      serde_json::to_string(&fp).unwrap_or_default()
     } else {
       return Err("No fingerprint provided".into());
     };

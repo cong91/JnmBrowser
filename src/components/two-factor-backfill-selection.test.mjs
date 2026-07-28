@@ -5,6 +5,7 @@ import {
   deriveSelectedAccounts,
   deriveWorkflowTargetKeys,
   getFilteredSelectionState,
+  isRegistrationAccountReadyForExport,
   isTerminalBackfillEvent,
   pruneSelectedAccountKeys,
   selectBackfillTaskProgress,
@@ -31,6 +32,39 @@ function account(overrides = {}) {
     ...overrides,
   };
 }
+
+test("registration export requires a ready free-trial account with durable 2FA", () => {
+  const ready = account({
+    freeTrialEligible: true,
+    twoFaEnabled: true,
+    totpSecret: "JBSWY3DPEHPK3PXP",
+  });
+
+  assert.equal(isRegistrationAccountReadyForExport(ready), true);
+  assert.equal(
+    isRegistrationAccountReadyForExport({ ...ready, success: false }),
+    false,
+  );
+  assert.equal(
+    isRegistrationAccountReadyForExport({
+      ...ready,
+      freeTrialEligible: false,
+    }),
+    false,
+  );
+  assert.equal(
+    isRegistrationAccountReadyForExport({ ...ready, twoFaEnabled: false }),
+    false,
+  );
+  assert.equal(
+    isRegistrationAccountReadyForExport({ ...ready, totpSecret: "" }),
+    false,
+  );
+  assert.equal(
+    isRegistrationAccountReadyForExport({ ...ready, status: "reserved" }),
+    false,
+  );
+});
 
 test("preview summary gates canary and bulk and surfaces override reasons", () => {
   assert.deepEqual(

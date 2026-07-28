@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::engine::RegistrationEngine;
+use super::execution::{prepare_registration, run_prepared_registration};
 use super::store::{
   delete_cdk_inventory, delete_registered_account, list_cdk_inventory, list_registered_accounts,
   update_registered_account_note, update_registered_account_status,
@@ -15,10 +15,7 @@ use super::types::{
 use crate::auto_service::openai::two_factor_backfill::commands::{
   start_two_factor_backfill_task, TwoFactorBackfillStartRequest,
 };
-use crate::email::build_email_service;
 use crate::settings_manager::SettingsManager;
-use crate::sms::viotp::ViotpService;
-use crate::sms::SmsService;
 
 /// The existing-account repair operation shares the Auto Registration command
 /// boundary but keeps its own backfill engine, journal and redacted events.
@@ -73,56 +70,60 @@ pub async fn start_auto_registration(
     AutoRegistrationRequest::NewAccount(config) => *config,
   };
 
-  config.validate_cdks()?;
-  config.normalize_network();
-  config.validate_network()?;
-
-  // Resolve SMS token: config override → encrypted settings store.
-  let mut sms_token = config
-    .sms_token
-    .clone()
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty());
-  if sms_token.is_none() {
+  // The command boundary may resolve VI-OTP's token from encrypted settings;
+  // all normalization and validation remains shared with the live harness.
+  let viotp_requested = config
+    .sms_provider
+    .as_deref()
+    .is_some_and(|provider| provider.trim().eq_ignore_ascii_case("viotp"));
+  if viotp_requested
+    && config
+      .sms_token
+      .as_ref()
+      .is_none_or(|token| token.trim().is_empty())
+  {
     let manager = SettingsManager::instance();
-    sms_token = manager
+    config.sms_token = manager
       .get_sms_api_token(&app_handle)
       .await
       .ok()
       .flatten()
-      .map(|s| s.trim().to_string())
-      .filter(|s| !s.is_empty());
+      .map(|token| token.trim().to_string())
+      .filter(|token| !token.is_empty());
   }
-  config.sms_token = sms_token.clone();
 
   let cancel_flag = Arc::new(AtomicBool::new(false));
-  let cancel_flag_clone = cancel_flag.clone();
-
-  let email_provider = config.email_provider;
-  let mut engine = RegistrationEngine::with_cancel_flag(config, cancel_flag);
-  let task_id = engine.task_id().to_string();
-
-  let join_handle = tokio::task::spawn_blocking(move || {
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    let email_service = build_email_service(email_provider);
-    let viotp = sms_token.map(ViotpService::new);
-    let sms_ref: Option<&dyn SmsService> = viotp.as_ref().map(|s| s as &dyn SmsService);
-    rt.block_on(async {
-      engine
-        .run(app_handle, email_service.as_ref(), sms_ref)
-        .await
-    })
-  });
-
-  task::register_task(
-    task_id.clone(),
-    task::TaskHandle {
-      cancel_flag: cancel_flag_clone,
-      join_handle,
-    },
-  );
+  let prepared = prepare_registration(config, cancel_flag.clone())?;
+  let task_id = prepared.task_id().to_string();
+  let task_id_for_log = task_id.clone();
+  task::spawn_registered(task_id.clone(), cancel_flag, move || {
+    if let Err(error) = run_prepared_registration(app_handle, prepared) {
+      log::error!("Registration task {task_id_for_log} failed to start: {error}");
+    }
+  })?;
 
   Ok(task_id)
+}
+
+/// Start multiple registration batches in parallel.
+///
+/// Each batch runs independently with its own engine, worker profile, and
+/// VPN peer pool. Starts are staggered by 2–5 seconds to avoid triggering
+/// simultaneous Cloudflare challenges. Progress can be tracked via the
+/// returned task IDs with the existing progress event stream.
+#[tauri::command]
+pub async fn start_parallel_registration(
+  app_handle: tauri::AppHandle,
+  configs: Vec<RegistrationConfig>,
+) -> Result<Vec<String>, String> {
+  super::parallel::launch_parallel_batches(app_handle, configs).await
+}
+
+/// Cancel multiple running registration tasks by their IDs.
+/// Returns the number of tasks successfully cancelled.
+#[tauri::command]
+pub fn cancel_parallel_registration(task_ids: Vec<String>) -> Result<u32, String> {
+  Ok(super::parallel::cancel_parallel_batches(&task_ids))
 }
 
 /// Cancel a running registration task.

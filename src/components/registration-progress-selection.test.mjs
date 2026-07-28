@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   isTerminalRegistrationProgress,
   registrationProgressKey,
+  registrationProgressLiveRegion,
   selectRegistrationProgressList,
   upsertRegistrationProgress,
 } from "./registration-progress-selection.ts";
@@ -16,9 +17,23 @@ function progress(overrides = {}) {
     step: "launchingBrowser",
     message: "[CDK 1/2 Alias 1/1] Launching browser...",
     timestamp: "2026-07-24T00:00:00Z",
+    eventKind: "account",
     ...overrides,
   };
 }
+
+test("registration live region escalates only terminal failures", () => {
+  assert.deepEqual(registrationProgressLiveRegion(progress()), {
+    role: "status",
+    ariaLive: "polite",
+  });
+  assert.deepEqual(
+    registrationProgressLiveRegion(
+      progress({ terminal: { success: false, statusCode: "failed" } }),
+    ),
+    { role: "alert", ariaLive: "assertive" },
+  );
+});
 
 test("registration progress preserves a distinct latest block per CDK", () => {
   let progressMap = new Map();
@@ -42,17 +57,20 @@ test("registration progress preserves a distinct latest block per CDK", () => {
   );
 });
 
-test("batch summary has a separate key, is terminal, and is not a CDK block", () => {
-  let progressMap = new Map();
-  progressMap = upsertRegistrationProgress(progressMap, progress());
+test("failed batch summary stays terminal and hidden from CDK cards", () => {
   const summary = progress({
-    step: "completed",
-    message: "Done",
-    result: null,
+    step: "failed",
+    message: "failed",
+    eventKind: "batch",
+    terminal: { success: false, statusCode: "failed" },
   });
-  progressMap = upsertRegistrationProgress(progressMap, summary);
 
   assert.equal(registrationProgressKey(summary), "task-1:summary");
   assert.equal(isTerminalRegistrationProgress(summary), true);
-  assert.deepEqual(selectRegistrationProgressList(progressMap), [progress()]);
+  assert.deepEqual(
+    selectRegistrationProgressList(
+      upsertRegistrationProgress(new Map(), summary),
+    ),
+    [],
+  );
 });

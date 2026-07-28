@@ -155,7 +155,10 @@ impl ProfileManager {
         crate::camoufox_manager::CamoufoxConfig::default()
       });
 
-      // Pass upstream proxy information to config for fingerprint generation
+      // Fingerprint generation must see the same egress the browser will use on
+      // launch. Prefer explicit proxy; otherwise start the profile VPN worker and
+      // route fingerprint geoip through its local SOCKS endpoint.
+      let mut fingerprint_vpn_worker_id: Option<String> = None;
       if let Some(proxy_id_ref) = &proxy_id {
         if let Some(proxy_settings) = PROXY_MANAGER.get_proxy_settings_by_id(proxy_id_ref) {
           // For fingerprint generation, pass upstream proxy directly with credentials if present
@@ -186,6 +189,27 @@ impl ProfileManager {
             proxy_settings.port
           );
         }
+      } else if let Some(vpn_id_ref) = &vpn_id {
+        match crate::vpn_worker_runner::start_vpn_worker(vpn_id_ref).await {
+          Ok(worker) => {
+            fingerprint_vpn_worker_id = Some(worker.id.clone());
+            if let Some(port) = worker.local_port {
+              config.proxy = Some(format!("socks5://127.0.0.1:{port}"));
+              log::info!(
+                "Using VPN worker for Camoufox fingerprint generation: vpn_id={vpn_id_ref} port={port}"
+              );
+            } else {
+              log::warn!(
+                "VPN worker started for fingerprint generation without local_port (vpn_id={vpn_id_ref})"
+              );
+            }
+          }
+          Err(e) => {
+            log::warn!(
+              "Failed to start VPN worker for Camoufox fingerprint generation (vpn_id={vpn_id_ref}): {e}"
+            );
+          }
+        }
       }
 
       // Generate fingerprint if not already provided
@@ -201,7 +225,7 @@ impl ProfileManager {
           browser: browser.clone(),
           version: version.to_string(),
           proxy_id: proxy_id.clone(),
-          vpn_id: None,
+          vpn_id: vpn_id.clone(),
           launch_hook: launch_hook.clone(),
           process_id: None,
           last_launch: None,
@@ -223,11 +247,20 @@ impl ProfileManager {
           dns_blocklist: None,
         };
 
-        match self
+        let fingerprint_result = self
           .camoufox_manager
           .generate_fingerprint_config(app_handle, &temp_profile, &config)
-          .await
-        {
+          .await;
+
+        if let Some(worker_id) = fingerprint_vpn_worker_id.as_deref() {
+          if let Err(e) = crate::vpn_worker_runner::stop_vpn_worker(worker_id).await {
+            log::warn!(
+              "Failed to stop temporary VPN worker after fingerprint generation ({worker_id}): {e}"
+            );
+          }
+        }
+
+        match fingerprint_result {
           Ok(generated_fingerprint) => {
             config.fingerprint = Some(generated_fingerprint);
             log::info!("Successfully generated fingerprint for profile: {name}");
@@ -240,6 +273,13 @@ impl ProfileManager {
         }
       } else {
         log::info!("Using provided fingerprint for Camoufox profile: {name}");
+        if let Some(worker_id) = fingerprint_vpn_worker_id.as_deref() {
+          if let Err(e) = crate::vpn_worker_runner::stop_vpn_worker(worker_id).await {
+            log::warn!(
+              "Failed to stop temporary VPN worker after fingerprint generation ({worker_id}): {e}"
+            );
+          }
+        }
       }
 
       // Clear the proxy from config after fingerprint generation
@@ -258,8 +298,9 @@ impl ProfileManager {
         crate::chromium_manager::ChromiumConfig::default()
       });
 
-      // Always ensure executable_path is set to the user's binary location
-      // Pass upstream proxy information to config for fingerprint generation
+      // Always ensure executable_path is set to the user's binary location.
+      // Fingerprint generation must use the same egress as launch (proxy or VPN).
+      let mut fingerprint_vpn_worker_id: Option<String> = None;
       if let Some(proxy_id_ref) = &proxy_id {
         if let Some(proxy_settings) = PROXY_MANAGER.get_proxy_settings_by_id(proxy_id_ref) {
           let proxy_url = if let (Some(username), Some(password)) =
@@ -289,6 +330,27 @@ impl ProfileManager {
             proxy_settings.port
           );
         }
+      } else if let Some(vpn_id_ref) = &vpn_id {
+        match crate::vpn_worker_runner::start_vpn_worker(vpn_id_ref).await {
+          Ok(worker) => {
+            fingerprint_vpn_worker_id = Some(worker.id.clone());
+            if let Some(port) = worker.local_port {
+              config.proxy = Some(format!("socks5://127.0.0.1:{port}"));
+              log::info!(
+                "Using VPN worker for Chromium fingerprint generation: vpn_id={vpn_id_ref} port={port}"
+              );
+            } else {
+              log::warn!(
+                "VPN worker started for Chromium fingerprint generation without local_port (vpn_id={vpn_id_ref})"
+              );
+            }
+          }
+          Err(e) => {
+            log::warn!(
+              "Failed to start VPN worker for Chromium fingerprint generation (vpn_id={vpn_id_ref}): {e}"
+            );
+          }
+        }
       }
 
       // Generate fingerprint if not already provided
@@ -302,7 +364,7 @@ impl ProfileManager {
           browser: browser.clone(),
           version: version.to_string(),
           proxy_id: proxy_id.clone(),
-          vpn_id: None,
+          vpn_id: vpn_id.clone(),
           launch_hook: launch_hook.clone(),
           process_id: None,
           last_launch: None,
@@ -324,11 +386,20 @@ impl ProfileManager {
           dns_blocklist: None,
         };
 
-        match self
+        let fingerprint_result = self
           .chromium_manager
           .generate_fingerprint_config(app_handle, &temp_profile, &config)
-          .await
-        {
+          .await;
+
+        if let Some(worker_id) = fingerprint_vpn_worker_id.as_deref() {
+          if let Err(e) = crate::vpn_worker_runner::stop_vpn_worker(worker_id).await {
+            log::warn!(
+              "Failed to stop temporary VPN worker after Chromium fingerprint generation ({worker_id}): {e}"
+            );
+          }
+        }
+
+        match fingerprint_result {
           Ok(generated_fingerprint) => {
             config.fingerprint = Some(generated_fingerprint);
             log::info!("Successfully generated fingerprint for Chromium profile: {name}");
@@ -341,6 +412,13 @@ impl ProfileManager {
         }
       } else {
         log::info!("Using provided fingerprint for Chromium profile: {name}");
+        if let Some(worker_id) = fingerprint_vpn_worker_id.as_deref() {
+          if let Err(e) = crate::vpn_worker_runner::stop_vpn_worker(worker_id).await {
+            log::warn!(
+              "Failed to stop temporary VPN worker after Chromium fingerprint generation ({worker_id}): {e}"
+            );
+          }
+        }
       }
 
       // Clear the proxy from config after fingerprint generation

@@ -1,5 +1,7 @@
 pub mod commands;
 pub mod engine;
+pub mod execution;
+pub mod parallel;
 pub mod sentinel;
 pub mod store;
 pub mod task;

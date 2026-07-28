@@ -630,8 +630,8 @@ impl BrowserRunner {
     remote_debugging_port: Option<u16>,
     headless: bool,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
-    // Handle Camoufox profiles using CamoufoxManager
-    if profile.browser == "camoufox" {
+    // Handle Camoufox / Firefox profiles using CamoufoxManager (Playwright-based)
+    if profile.browser == "camoufox" || profile.browser == "firefox" {
       let profile_launch_lock = acquire_pre_launch_lock(format!("profile:{}", profile.id)).await;
       let mut launch_transaction = PreLaunchTransaction::new(BrowserLaunchRollbackDispatcher {
         app_handle: app_handle.clone(),
@@ -1237,8 +1237,8 @@ impl BrowserRunner {
     url: &str,
     _internal_proxy_settings: Option<&ProxySettings>,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Handle Camoufox profiles using CamoufoxManager
-    if profile.browser == "camoufox" {
+    // Handle Camoufox / Firefox profiles using CamoufoxManager (Playwright-based)
+    if profile.browser == "camoufox" || profile.browser == "firefox" {
       // Get the profile path based on the UUID
       let profiles_dir = self.profile_manager.get_profiles_dir();
       let profile_data_path =
@@ -1501,8 +1501,8 @@ impl BrowserRunner {
     app_handle: tauri::AppHandle,
     profile: &BrowserProfile,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Handle Camoufox profiles using CamoufoxManager
-    if profile.browser == "camoufox" {
+    // Handle Camoufox / Firefox profiles using CamoufoxManager (Playwright-based)
+    if profile.browser == "camoufox" || profile.browser == "firefox" {
       // Search by profile path to find the running Camoufox instance
       let profiles_dir = self.profile_manager.get_profiles_dir();
       let profile_data_path =
@@ -3399,12 +3399,12 @@ mod tests {
     let exact = temp
       .path()
       .join("fingerprint-chromium")
-      .join("142.0.7444.175");
+      .join("148.0.7778.215");
     std::fs::create_dir_all(&exact).unwrap();
 
     let resolved =
-      BrowserRunner::resolve_chromium_runtime_version_for_root("142.0.7444.175", temp.path());
-    assert_eq!(resolved.as_deref(), Some("142.0.7444.175"));
+      BrowserRunner::resolve_chromium_runtime_version_for_root("148.0.7778.215", temp.path());
+    assert_eq!(resolved.as_deref(), Some("148.0.7778.215"));
   }
 
   #[test]
@@ -3412,10 +3412,10 @@ mod tests {
     let temp = tempdir().unwrap();
     let root = temp.path().join("fingerprint-chromium");
     std::fs::create_dir_all(root.join("141.0.0")).unwrap();
-    std::fs::create_dir_all(root.join("142.0.7444.175")).unwrap();
+    std::fs::create_dir_all(root.join("148.0.7778.215")).unwrap();
 
     let resolved = BrowserRunner::resolve_chromium_runtime_version_for_root("146.0.0", temp.path());
-    assert_eq!(resolved.as_deref(), Some("142.0.7444.175"));
+    assert_eq!(resolved.as_deref(), Some("148.0.7778.215"));
   }
 
   #[test]

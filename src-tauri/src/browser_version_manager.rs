@@ -987,40 +987,40 @@ mod tests {
 
     // Test Chromium fingerprint runtime
     let chromium_info = service
-      .get_download_info("chromium", "142.0.7444.175")
+      .get_download_info("chromium", "148.0.7778.215")
       .unwrap();
 
     #[cfg(target_os = "macos")]
     {
       assert_eq!(
         chromium_info.filename,
-        "ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"
+        "ungoogled-chromium_148.0.7778.215-1.1_macos.dmg"
       );
       assert!(chromium_info
         .url
-        .contains("ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"));
+        .contains("ungoogled-chromium_148.0.7778.215-1.1_macos.dmg"));
     }
 
     #[cfg(target_os = "linux")]
     {
       assert_eq!(
         chromium_info.filename,
-        "ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz"
+        "ungoogled-chromium-148.0.7778.215-1-x86_64_linux.tar.xz"
       );
       assert!(chromium_info
         .url
-        .contains("ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz"));
+        .contains("ungoogled-chromium-148.0.7778.215-1-x86_64_linux.tar.xz"));
     }
 
     #[cfg(target_os = "windows")]
     {
       assert_eq!(
         chromium_info.filename,
-        "ungoogled-chromium_142.0.7444.175-1.1_windows_x64.zip"
+        "ungoogled-chromium_148.0.7778.215-1.1_windows_x64.zip"
       );
       assert!(chromium_info
         .url
-        .contains("ungoogled-chromium_142.0.7444.175-1.1_windows_x64.zip"));
+        .contains("ungoogled-chromium_148.0.7778.215-1.1_windows_x64.zip"));
     }
 
     assert!(chromium_info.is_archive);
@@ -1064,54 +1064,54 @@ mod tests {
     let macos_x64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
       "macos",
       "x64",
-      "142.0.7444.175",
+      "148.0.7778.215",
     )
     .unwrap();
     assert_eq!(
       macos_x64.filename,
-      "ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"
+      "ungoogled-chromium_148.0.7778.215-1.1_macos.dmg"
     );
     assert!(macos_x64.is_archive);
 
     let macos_arm64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
       "macos",
       "arm64",
-      "142.0.7444.175",
+      "148.0.7778.215",
     )
     .unwrap();
     assert_eq!(
       macos_arm64.filename,
-      "ungoogled-chromium_142.0.7444.175-1.1_macos.dmg"
+      "ungoogled-chromium_148.0.7778.215-1.1_macos.dmg"
     );
 
     let linux_x64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
       "linux",
       "x64",
-      "142.0.7444.175",
+      "148.0.7778.215",
     )
     .unwrap();
     assert_eq!(
       linux_x64.filename,
-      "ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz"
+      "ungoogled-chromium-148.0.7778.215-1-x86_64_linux.tar.xz"
     );
     assert!(linux_x64.url.ends_with(".tar.xz"));
 
     let windows_x64 = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
       "windows",
       "x64",
-      "142.0.7444.175",
+      "148.0.7778.215",
     )
     .unwrap();
     assert_eq!(
       windows_x64.filename,
-      "ungoogled-chromium_142.0.7444.175-1.1_windows_x64.zip"
+      "ungoogled-chromium_148.0.7778.215-1.1_windows_x64.zip"
     );
     assert!(windows_x64.url.ends_with(".zip"));
 
     let linux_arm64_err = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
       "linux",
       "arm64",
-      "142.0.7444.175",
+      "148.0.7778.215",
     )
     .expect_err("linux-arm64 should currently be unsupported by manifest");
     assert!(linux_arm64_err.to_string().contains("linux-arm64"));
@@ -1119,7 +1119,7 @@ mod tests {
     let windows_arm64_err = BrowserVersionManager::fingerprint_chromium_download_info_for_platform(
       "windows",
       "arm64",
-      "142.0.7444.175",
+      "148.0.7778.215",
     )
     .expect_err("windows-arm64 should currently be unsupported by manifest");
     assert!(windows_arm64_err.to_string().contains("windows-arm64"));

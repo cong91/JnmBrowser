@@ -2524,7 +2524,9 @@ pub fn run() {
       dns_blocklist::refresh_dns_blocklists,
       // OpenAI auto-registration (auto_service::openai::register)
       auto_service::openai::register::commands::start_auto_registration,
+      auto_service::openai::register::commands::start_parallel_registration,
       auto_service::openai::register::commands::cancel_registration,
+      auto_service::openai::register::commands::cancel_parallel_registration,
       auto_service::openai::register::commands::list_registered_accounts_cmd,
       auto_service::openai::register::commands::delete_registered_account_cmd,
       auto_service::openai::register::commands::update_registered_account_status_cmd,
@@ -2652,6 +2654,9 @@ mod tests {
       "cancel_two_factor_backfill",
       "list_two_factor_backfill_recovery",
       "recover_two_factor_backfill_journal",
+      // Parallel batch registration (used by CLI + future UI)
+      "start_parallel_registration",
+      "cancel_parallel_registration",
     ];
 
     // Extract command names from the generate_handler! macro in this file

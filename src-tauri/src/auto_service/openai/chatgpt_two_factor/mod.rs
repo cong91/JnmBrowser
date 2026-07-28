@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
 
-use super::chatgpt_auth::{click_first_text, click_first_visible, ChatGptBrowser};
+use super::browser::{click_first_text, click_first_visible, ChatGptBrowser};
 use crate::auto_service::common::totp::{generate_totp_now, normalize_secret};
 
 const CHATGPT_HOME: &str = "https://chatgpt.com/";

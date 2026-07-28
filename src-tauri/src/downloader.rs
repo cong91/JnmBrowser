@@ -121,7 +121,7 @@ impl Downloader {
     _download_info: &DownloadInfo,
   ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     match browser_type {
-      BrowserType::Camoufox => {
+      BrowserType::Camoufox | BrowserType::Firefox => {
         // For Camoufox, verify the asset exists and find the correct download URL
         let releases = self
           .api_client
@@ -150,7 +150,6 @@ impl Downloader {
         Ok(asset_url)
       }
       BrowserType::Chromium => {
-        // For Chromium, get the download URL from the manifest
         let version_info = self
           .api_client
           .fetch_chromium_version_with_caching(true)
@@ -1337,7 +1336,7 @@ mod tests {
     let _data_guard = crate::app_dirs::set_test_data_dir(data_dir.path().to_path_buf());
     let _cache_guard = crate::app_dirs::set_test_cache_dir(cache_dir.path().to_path_buf());
 
-    let version = format!("142.0.7444.175-phase3-{}", std::process::id());
+    let version = format!("148.0.7778.215-phase3-{}", std::process::id());
     let dmg_path = build_test_chromium_dmg(&artifact_dir);
     let dmg_bytes = std::fs::read(&dmg_path).unwrap();
     let (manifest_url, _manifest_hits, dmg_hits, server) =

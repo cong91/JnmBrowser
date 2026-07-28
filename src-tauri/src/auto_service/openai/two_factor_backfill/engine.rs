@@ -35,6 +35,7 @@ use super::journal::{
   TwoFactorBackfillJournalState,
 };
 use super::types::TwoFactorBackfillPreviewRequest;
+use crate::auto_service::openai::browser::{attach_browser_session, BrowserSession};
 use crate::auto_service::openai::chatgpt_auth::{
   authenticate_existing_account_with_cancel, AuthError, AuthPolicy, BrowserAuthAdapter,
   ExistingAccountAuthAdapter, ExistingAccountCredentials,
@@ -1703,7 +1704,7 @@ impl Drop for BrowserCleanupGuard {
 }
 
 struct ProductionBrowserSession {
-  browser: Option<crate::auto_service::openai::register::engine::BrowserSession>,
+  browser: Option<BrowserSession>,
   device_id: String,
   cleanup: BrowserCleanupGuard,
 }
@@ -1826,11 +1827,7 @@ impl BackfillBrowserFactory<tauri::Wry> for ProductionBrowserFactory {
       }
     };
 
-    let mut attached = match crate::auto_service::openai::register::engine::attach_browser_session(
-      &launched,
-    )
-    .await
-    {
+    let mut attached = match attach_browser_session(&launched).await {
       Ok(attached) => attached,
       Err(error) => {
         if let Err(cleanup_error) = cleanup_failed_launch(app_handle, &launched, operation_id).await

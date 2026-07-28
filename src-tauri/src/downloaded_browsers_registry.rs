@@ -1116,15 +1116,15 @@ mod tests {
 
     registry.add_browser(DownloadedBrowserInfo {
       browser: "chromium".to_string(),
-      version: "142.0.7444.175".to_string(),
+      version: "148.0.7778.215".to_string(),
       file_path: PathBuf::from("/test/chromium"),
     });
 
-    assert!(registry.is_browser_registered("chromium", "142.0.7444.175"));
-    assert!(!registry.is_browser_registered("wayfern", "142.0.7444.175"));
+    assert!(registry.is_browser_registered("chromium", "148.0.7778.215"));
+    assert!(!registry.is_browser_registered("wayfern", "148.0.7778.215"));
 
     let chromium_versions = registry.get_downloaded_versions("chromium");
-    assert_eq!(chromium_versions, vec!["142.0.7444.175".to_string()]);
+    assert_eq!(chromium_versions, vec!["148.0.7778.215".to_string()]);
   }
 
   #[test]

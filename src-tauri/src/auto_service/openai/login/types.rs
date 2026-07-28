@@ -146,8 +146,10 @@ pub struct LoginConfig {
 fn default_browser_type() -> String {
   "chromium".into()
 }
+pub const DEFAULT_MAX_RETRIES: u32 = 3;
+
 fn default_max_retries() -> u32 {
-  3
+  DEFAULT_MAX_RETRIES
 }
 fn default_concurrency() -> u32 {
   1
@@ -158,7 +160,6 @@ pub fn should_rotate(success_count: u32, every_n: u32) -> bool {
   every_n > 0 && success_count > 0 && success_count.is_multiple_of(every_n)
 }
 
-const DEFAULT_SMS_SERVICE_ID: u32 = 1234;
 const DEFAULT_SMS_NETWORK: &str = "VINAPHONE";
 const DEFAULT_SMS_COUNTRY: &str = "vn";
 
@@ -174,7 +175,7 @@ impl LoginConfig {
     }
   }
 
-  /// Normalize bare proxyId / vpnId, SMS defaults, and VPN rotation.
+  /// Normalize bare proxyId / vpnId, SMS settings, and VPN rotation.
   pub fn normalize(&mut self) {
     self.sms_provider = self
       .sms_provider
@@ -182,7 +183,6 @@ impl LoginConfig {
       .map(|provider| provider.trim().to_ascii_lowercase())
       .filter(|provider| !provider.is_empty());
     if self.sms_provider.as_deref() == Some("viotp") {
-      self.sms_service_id.get_or_insert(DEFAULT_SMS_SERVICE_ID);
       if !Self::non_empty(&self.sms_network) {
         self.sms_network = Some(DEFAULT_SMS_NETWORK.into());
       }
@@ -241,8 +241,11 @@ impl LoginConfig {
       if provider != "viotp" {
         return Err(format!("Unsupported SMS provider: {provider}"));
       }
-      if self.sms_service_id.is_none() {
-        return Err("VIOTP requires smsServiceId".into());
+      if !Self::non_empty(&self.sms_token) {
+        return Err("VIOTP requires a non-empty SMS API token".into());
+      }
+      if !matches!(self.sms_service_id, Some(service_id) if service_id > 0) {
+        return Err("VIOTP requires a positive smsServiceId".into());
       }
     }
     match self.network_mode {
@@ -405,6 +408,21 @@ impl LoginResultStatus {
   }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LoginProgressEventKind {
+  #[default]
+  Account,
+  Batch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginTerminalSummary {
+  pub success: bool,
+  pub status_code: String,
+}
+
 /// Progress event payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -415,7 +433,58 @@ pub struct LoginProgress {
   pub step: LoginStep,
   pub message: String,
   pub timestamp: DateTime<Utc>,
-  pub result: Option<LoginResult>,
+  #[serde(default)]
+  pub event_kind: LoginProgressEventKind,
+  pub terminal: Option<LoginTerminalSummary>,
+}
+
+#[cfg(test)]
+mod login_progress_tests {
+  use super::*;
+
+  #[test]
+  fn serialized_progress_has_only_secret_free_fields() {
+    let progress = LoginProgress {
+      task_id: "task-1".into(),
+      credential_index: 0,
+      total_credentials: 1,
+      step: LoginStep::Completed,
+      message: "completed".into(),
+      timestamp: Utc::now(),
+      event_kind: LoginProgressEventKind::Account,
+      terminal: Some(LoginTerminalSummary {
+        success: true,
+        status_code: "completed".into(),
+      }),
+    };
+
+    let value = serde_json::to_value(progress).unwrap();
+    let mut keys: Vec<_> = value
+      .as_object()
+      .unwrap()
+      .keys()
+      .map(String::as_str)
+      .collect();
+    keys.sort_unstable();
+
+    assert_eq!(
+      keys,
+      [
+        "credentialIndex",
+        "eventKind",
+        "message",
+        "step",
+        "taskId",
+        "terminal",
+        "timestamp",
+        "totalCredentials",
+      ]
+    );
+    assert_eq!(
+      value["terminal"],
+      serde_json::json!({ "success": true, "statusCode": "completed" })
+    );
+  }
 }
 
 #[cfg(test)]
@@ -596,7 +665,7 @@ mod tests {
   }
 
   #[test]
-  fn viotp_normalize_applies_proven_live_defaults() {
+  fn viotp_normalize_preserves_explicit_service_id_and_applies_network_defaults() {
     let mut c = LoginConfig {
       credentials_text: String::new(),
       credentials: vec![LoginCredential {
@@ -615,7 +684,7 @@ mod tests {
       push_to_sub2api: false,
       sms_provider: Some(" VIOTP ".into()),
       sms_token: Some("token".into()),
-      sms_service_id: None,
+      sms_service_id: Some(4321),
       sms_network: Some(" ".into()),
       sms_country: None,
       proxy_id: None,
@@ -627,9 +696,51 @@ mod tests {
     c.normalize();
 
     assert!(c.uses_viotp());
-    assert_eq!(c.sms_service_id, Some(1234));
+    assert_eq!(c.sms_service_id, Some(4321));
     assert_eq!(c.sms_network.as_deref(), Some("VINAPHONE"));
     assert_eq!(c.sms_country.as_deref(), Some("vn"));
+  }
+
+  #[test]
+  fn viotp_validate_requires_positive_service_id_and_token() {
+    let mut c = LoginConfig {
+      credentials_text: String::new(),
+      credentials: vec![LoginCredential {
+        email: "a@x.com".into(),
+        password: "p".into(),
+        totp_secret: "secret".into(),
+      }],
+      browser_type: "chromium".into(),
+      max_retries: 1,
+      headless: false,
+      concurrency: 1,
+      sub2api_url: String::new(),
+      sub2api_api_key: String::new(),
+      sub2api_proxy_id: None,
+      sub2api_group_ids: None,
+      push_to_sub2api: false,
+      sms_provider: Some("viotp".into()),
+      sms_token: Some("token".into()),
+      sms_service_id: None,
+      sms_network: None,
+      sms_country: None,
+      proxy_id: None,
+      vpn_id: None,
+      rotate_every_n: 0,
+      network_mode: LoginNetworkMode::None,
+    };
+
+    assert!(c.validate().unwrap_err().contains("positive smsServiceId"));
+    c.sms_service_id = Some(0);
+    assert!(c.validate().unwrap_err().contains("positive smsServiceId"));
+    c.sms_service_id = Some(1);
+    c.sms_token = Some(" ".into());
+    assert!(c
+      .validate()
+      .unwrap_err()
+      .contains("non-empty SMS API token"));
+    c.sms_token = Some("token".into());
+    assert!(c.validate().is_ok());
   }
 
   #[test]

@@ -89,6 +89,21 @@ export function accountKey(account: AccountIdentity): string {
   return account.accountId.trim() || account.email.trim();
 }
 
+export function isRegistrationAccountReadyForExport(
+  account: Pick<
+    RegistrationResult,
+    "success" | "freeTrialEligible" | "twoFaEnabled" | "totpSecret" | "status"
+  >,
+): boolean {
+  return Boolean(
+    account.success &&
+      account.freeTrialEligible &&
+      account.twoFaEnabled &&
+      account.totpSecret?.trim() &&
+      account.status === "available",
+  );
+}
+
 export function toggleAccountSelection(
   selectedKeys: ReadonlySet<string>,
   account: AccountIdentity,

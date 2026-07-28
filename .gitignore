@@ -20,6 +20,10 @@
 # production
 /build
 
+# accidental Windows device-name artifacts
+/NUL
+/src-tauri/nul
+
 # misc
 **/*.DS_Store
 .env.local
@@ -63,3 +67,4 @@ nodecar/nodecar-bin
 # claude
 .claude/*
 !.claude/skills/
+.zcode/

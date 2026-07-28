@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::engine::LoginEngine;
+use super::execution::{prepare_login, run_prepared_login};
 use super::store::{
   delete_login_result, export_login_results_json, get_login_result, list_login_results,
   list_successful_login_results, save_login_result, update_login_result_fields,
@@ -11,8 +11,6 @@ use super::sub2api::Sub2ApiClient;
 use super::task;
 use super::types::{LoginConfig, LoginResult, LoginResultStatus};
 use crate::settings_manager::SettingsManager;
-use crate::sms::viotp::ViotpService;
-use crate::sms::SmsService;
 
 /// Start a new auto-login task. Returns the task_id.
 #[tauri::command]
@@ -20,69 +18,15 @@ pub async fn start_auto_login(
   app_handle: tauri::AppHandle,
   config: LoginConfig,
 ) -> Result<String, String> {
-  let mut config = config;
-  config.parse_credentials();
-  config.normalize();
-
-  // Resolve SMS token only when VIOTP is enabled: config override → encrypted settings store.
-  let mut sms_token = if config.uses_viotp() {
-    config
-      .sms_token
-      .clone()
-      .map(|s| s.trim().to_string())
-      .filter(|s| !s.is_empty())
-  } else {
-    None
-  };
-  if config.uses_viotp() && sms_token.is_none() {
-    let manager = SettingsManager::instance();
-    sms_token = manager
-      .get_sms_api_token(&app_handle)
-      .await
-      .ok()
-      .flatten()
-      .map(|s| s.trim().to_string())
-      .filter(|s| !s.is_empty());
-  }
-  config.sms_token = sms_token.clone();
-  if config.uses_viotp() && sms_token.is_none() {
-    return Err("VIOTP is enabled but no SMS API token is configured".into());
-  }
-
-  // Resolve Sub2API settings before validate so stored credentials work.
-  if config.sub2api_url.trim().is_empty() || config.sub2api_api_key.trim().is_empty() {
-    let manager = SettingsManager::instance();
-    let settings = manager.get_sub2api_settings(&app_handle).await;
-    if config.sub2api_url.trim().is_empty() {
-      config.sub2api_url = settings.0;
-    }
-    if config.sub2api_api_key.trim().is_empty() {
-      config.sub2api_api_key = settings.1;
-    }
-  }
-
-  config.validate()?;
-
   let cancel_flag = Arc::new(AtomicBool::new(false));
-  let cancel_flag_clone = cancel_flag.clone();
-
-  let mut engine = LoginEngine::with_cancel_flag(config, cancel_flag);
-  let task_id = engine.task_id().to_string();
-
-  let join_handle = tokio::task::spawn_blocking(move || {
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    let viotp = sms_token.map(ViotpService::new);
-    let sms_ref: Option<&dyn SmsService> = viotp.as_ref().map(|s| s as &dyn SmsService);
-    rt.block_on(async { engine.run(app_handle, sms_ref).await })
-  });
-
-  task::register_task(
-    task_id.clone(),
-    task::TaskHandle {
-      cancel_flag: cancel_flag_clone,
-      join_handle,
-    },
-  );
+  let prepared = prepare_login(&app_handle, config, cancel_flag.clone()).await?;
+  let task_id = prepared.task_id().to_string();
+  let task_id_for_log = task_id.clone();
+  task::spawn_registered(task_id.clone(), cancel_flag, move || {
+    if let Err(error) = run_prepared_login(app_handle, prepared) {
+      log::error!("Login task {task_id_for_log} failed to start: {error}");
+    }
+  })?;
 
   Ok(task_id)
 }

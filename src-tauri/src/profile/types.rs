@@ -135,7 +135,7 @@ where
   let browser = String::deserialize(deserializer)?;
   let browser = crate::browser::canonical_browser_name(&browser);
   match browser {
-    "chromium" | "camoufox" => Ok(browser.to_string()),
+    "chromium" | "camoufox" | "firefox" => Ok(browser.to_string()),
     _ => Err(serde::de::Error::custom(format!(
       "Unsupported browser in profile metadata: {browser}"
     ))),

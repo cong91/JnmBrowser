@@ -6,6 +6,10 @@ import { useTranslation } from "react-i18next";
 import { LuLogIn, LuRocket } from "react-icons/lu";
 import { toast } from "sonner";
 import { LoginAccountsTable } from "@/components/login-accounts-table";
+import {
+  loginProgressLiveRegion,
+  selectLoginProgressList,
+} from "@/components/login-progress-selection";
 import { SmsProviderFields } from "@/components/sms-provider-fields";
 import { Button } from "@/components/ui/button";
 import {
@@ -254,7 +258,16 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
     headless,
   ]);
 
-  const progressList = Array.from(progressMap.values());
+  const progressList = selectLoginProgressList(progressMap);
+  const batchTerminal = Array.from(progressMap.values()).find(
+    (progress) => progress.eventKind === "batch" && progress.terminal,
+  );
+
+  useEffect(() => {
+    if (activeTaskId && batchTerminal?.taskId === activeTaskId) {
+      setActiveTaskId(null);
+    }
+  }, [activeTaskId, batchTerminal]);
 
   const parseCredentials = (
     text: string,
@@ -804,38 +817,48 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
                 {t("autoLogin.noProgress")}
               </p>
             ) : (
-              progressList.map((progress) => (
-                <div
-                  key={`${progress.taskId}-${progress.credentialIndex}-${progress.step}-${progress.timestamp}`}
-                  className="rounded-lg border border-border p-3"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">
-                      {progress.credentialIndex + 1}/{progress.totalCredentials}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {progress.step}
-                    </span>
-                  </div>
-                  <p className="text-sm">{progress.message}</p>
-                  {progress.result && (
-                    <p
-                      className={`mt-1 text-xs ${
-                        progress.result.success
-                          ? "text-success"
-                          : "text-destructive"
-                      }`}
-                    >
-                      {progress.result.success
-                        ? t("autoLogin.successMessage")
-                        : progress.result.errorMessage}
-                      {progress.result.pushError
-                        ? ` · ${progress.result.pushError}`
-                        : ""}
+              progressList.map((progress) => {
+                const { role, ariaLive } = loginProgressLiveRegion(progress);
+                return (
+                  <div
+                    key={`${progress.taskId}-${progress.credentialIndex}-${progress.step}-${progress.timestamp}`}
+                    className="rounded-lg border border-border p-3"
+                    role={role}
+                    aria-live={ariaLive}
+                    aria-atomic="true"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        {progress.credentialIndex + 1}/
+                        {progress.totalCredentials}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {progress.step}
+                      </span>
+                    </div>
+                    <p className="text-sm">
+                      {progress.terminal
+                        ? progress.terminal.success
+                          ? t("autoLogin.successMessage")
+                          : t("registration.twoFactorBackfill.steps.failed")
+                        : progress.message}
                     </p>
-                  )}
-                </div>
-              ))
+                    {progress.terminal && (
+                      <p
+                        className={`mt-1 text-xs ${
+                          progress.terminal.success
+                            ? "text-success"
+                            : "text-destructive"
+                        }`}
+                      >
+                        {progress.terminal.success
+                          ? t("registration.twoFactorBackfill.steps.completed")
+                          : t("registration.twoFactorBackfill.steps.failed")}
+                      </p>
+                    )}
+                  </div>
+                );
+              })
             )}
           </TabsContent>
 

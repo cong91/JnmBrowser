@@ -3,26 +3,22 @@
 //! Usage (repo root):
 //! ```text
 //! pnpm copy-proxy-binary
-//! cargo run --manifest-path src-tauri/Cargo.toml --bin auto-login-live -- \
+//! cargo run --manifest-path src-tauri/Cargo.toml --features auto-login-live --bin auto-login-live -- \
 //!   --credential 'user@x.com|pass|TOTP' \
 //!   --browser chromium \
 //!   --sms-token VIOTP_TOKEN \
 //!   --sms-service-id 1234 \
 //!   --sms-network VINAPHONE \
-//!   --max-retries 1
+//!   --max-retries 3
 //! ```
-//!
-//! SMS is only rented if OpenAI shows the phone page. Prefer VINAPHONE + OpenAI|ChatGPT (id 1234).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use donutbrowser_lib::auto_service::openai::login::engine::LoginEngine;
+use donutbrowser_lib::auto_service::openai::login::execution::{prepare_login, run_prepared_login};
 use donutbrowser_lib::auto_service::openai::login::types::{
-  LoginConfig, LoginCredential, LoginNetworkMode,
+  LoginConfig, LoginNetworkMode, DEFAULT_MAX_RETRIES,
 };
-use donutbrowser_lib::sms::viotp::ViotpService;
-use donutbrowser_lib::sms::SmsService;
 
 struct LiveArgs {
   credential: String,
@@ -30,6 +26,7 @@ struct LiveArgs {
   max_retries: u32,
   headless: bool,
   sms_token: Option<String>,
+  use_sms_settings: bool,
   sms_service_id: Option<u32>,
   sms_network: Option<String>,
   sms_country: String,
@@ -37,189 +34,197 @@ struct LiveArgs {
   vpn_id: Option<String>,
 }
 
-fn parse_args() -> LiveArgs {
+fn parse_args() -> Result<LiveArgs, String> {
   let mut credential = std::env::var("AUTO_LOGIN_CREDENTIAL").unwrap_or_default();
   let mut browser = std::env::var("AUTO_LOGIN_BROWSER").unwrap_or_else(|_| "chromium".into());
-  let mut max_retries = 1u32;
+  let mut max_retries = DEFAULT_MAX_RETRIES;
   let mut headless = false;
   let mut sms_token = std::env::var("AUTO_LOGIN_SMS_TOKEN").ok();
+  let mut use_sms_settings = std::env::var("AUTO_LOGIN_USE_SMS_SETTINGS")
+    .ok()
+    .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
   let mut sms_service_id = std::env::var("AUTO_LOGIN_SMS_SERVICE_ID")
     .ok()
-    .and_then(|s| s.parse().ok());
+    .and_then(|value| value.parse().ok());
   let mut sms_network = std::env::var("AUTO_LOGIN_SMS_NETWORK").ok();
   let mut sms_country = std::env::var("AUTO_LOGIN_SMS_COUNTRY").unwrap_or_else(|_| "vn".into());
   let mut proxy_id = std::env::var("AUTO_LOGIN_PROXY_ID").ok();
   let mut vpn_id = std::env::var("AUTO_LOGIN_VPN_ID").ok();
 
   let mut args = std::env::args().skip(1);
-  while let Some(arg) = args.next() {
-    match arg.as_str() {
-      "--credential" => credential = args.next().unwrap_or_default(),
-      "--browser" => browser = args.next().unwrap_or(browser),
-      "--max-retries" => {
-        max_retries = args
-          .next()
-          .and_then(|v| v.parse().ok())
-          .unwrap_or(max_retries);
-      }
+  while let Some(argument) = args.next() {
+    match argument.as_str() {
+      "--credential" => credential = next_value(&mut args)?,
+      "--browser" => browser = next_value(&mut args)?,
+      "--max-retries" => max_retries = parse_u32(&next_value(&mut args)?)?,
       "--headless" => headless = true,
-      "--sms-token" => sms_token = args.next(),
-      "--sms-service-id" => {
-        sms_service_id = args.next().and_then(|v| v.parse().ok());
-      }
-      "--sms-network" => sms_network = args.next(),
-      "--sms-country" => sms_country = args.next().unwrap_or(sms_country),
-      "--proxy-id" => proxy_id = args.next(),
-      "--vpn-id" => vpn_id = args.next(),
-      other if other.starts_with("--credential=") => {
-        credential = other.trim_start_matches("--credential=").to_string();
-      }
-      other if other.starts_with("--browser=") => {
-        browser = other.trim_start_matches("--browser=").to_string();
-      }
-      other if other.starts_with("--sms-token=") => {
-        sms_token = Some(other.trim_start_matches("--sms-token=").to_string());
-      }
-      other if other.starts_with("--sms-service-id=") => {
-        sms_service_id = other.trim_start_matches("--sms-service-id=").parse().ok();
-      }
-      other if other.starts_with("--sms-network=") => {
-        sms_network = Some(other.trim_start_matches("--sms-network=").to_string());
-      }
-      other if other.starts_with("--proxy-id=") => {
-        proxy_id = Some(other.trim_start_matches("--proxy-id=").to_string());
-      }
-      other if other.starts_with("--vpn-id=") => {
-        vpn_id = Some(other.trim_start_matches("--vpn-id=").to_string());
-      }
+      "--sms-token" => sms_token = Some(next_value(&mut args)?),
+      "--use-sms-settings" => use_sms_settings = true,
+      "--sms-service-id" => sms_service_id = Some(parse_u32(&next_value(&mut args)?)?),
+      "--sms-network" => sms_network = Some(next_value(&mut args)?),
+      "--sms-country" => sms_country = next_value(&mut args)?,
+      "--proxy-id" => proxy_id = Some(next_value(&mut args)?),
+      "--vpn-id" => vpn_id = Some(next_value(&mut args)?),
       "--help" | "-h" => {
         eprintln!(
-          "Usage: auto-login-live --credential 'email|pass|totp' [--browser chromium] \
-           [--sms-token TOKEN] [--sms-service-id 1234] [--sms-network VINAPHONE] \
-           [--vpn-id ID] [--proxy-id ID] [--max-retries 1]"
+          "Usage: auto-login-live --credential ACCOUNT|PASSWORD|2FA [--browser chromium] \
+           [--sms-token TOKEN | --use-sms-settings] --sms-service-id ID \
+           [--sms-network VINAPHONE] [--vpn-id ID | --proxy-id ID] [--max-retries 3]"
         );
         std::process::exit(0);
       }
-      other => {
-        eprintln!("Unknown arg: {other}");
-        std::process::exit(2);
+      _ => {
+        let Some((option, value)) = argument.split_once('=') else {
+          return Err("invalid command line".into());
+        };
+        match option {
+          "--credential" => credential = value.to_string(),
+          "--browser" => browser = value.to_string(),
+          "--max-retries" => max_retries = parse_u32(value)?,
+          "--sms-token" => sms_token = Some(value.to_string()),
+          "--sms-service-id" => sms_service_id = Some(parse_u32(value)?),
+          "--sms-network" => sms_network = Some(value.to_string()),
+          "--sms-country" => sms_country = value.to_string(),
+          "--proxy-id" => proxy_id = Some(value.to_string()),
+          "--vpn-id" => vpn_id = Some(value.to_string()),
+          _ => return Err("invalid command line".into()),
+        }
       }
     }
   }
 
   if credential.trim().is_empty() {
-    eprintln!("Missing --credential EMAIL|PASSWORD|2FA");
-    std::process::exit(2);
+    return Err("missing credential".into());
   }
 
-  LiveArgs {
+  Ok(LiveArgs {
     credential,
     browser,
     max_retries,
     headless,
     sms_token,
+    use_sms_settings,
     sms_service_id,
     sms_network,
     sms_country,
     proxy_id,
     vpn_id,
+  })
+}
+
+fn next_value(args: &mut impl Iterator<Item = String>) -> Result<String, String> {
+  args.next().ok_or_else(|| "missing option value".into())
+}
+
+fn parse_u32(value: &str) -> Result<u32, String> {
+  value.parse().map_err(|_| "invalid unsigned integer".into())
+}
+
+fn build_config(args: LiveArgs) -> LoginConfig {
+  let network_mode = if args.vpn_id.is_some() {
+    LoginNetworkMode::Vpn
+  } else if args.proxy_id.is_some() {
+    LoginNetworkMode::Proxy
+  } else {
+    LoginNetworkMode::None
+  };
+  let sms_enabled = args.use_sms_settings || args.sms_token.is_some();
+
+  LoginConfig {
+    credentials_text: args.credential,
+    credentials: Vec::new(),
+    browser_type: args.browser,
+    max_retries: args.max_retries,
+    headless: args.headless,
+    concurrency: 1,
+    sub2api_url: String::new(),
+    sub2api_api_key: String::new(),
+    sub2api_proxy_id: None,
+    sub2api_group_ids: None,
+    push_to_sub2api: false,
+    sms_provider: sms_enabled.then(|| "viotp".into()),
+    sms_token: args.sms_token,
+    sms_service_id: args.sms_service_id,
+    sms_network: args.sms_network,
+    sms_country: Some(args.sms_country),
+    proxy_id: args.proxy_id,
+    vpn_id: args.vpn_id,
+    rotate_every_n: u32::from(matches!(network_mode, LoginNetworkMode::Vpn)),
+    network_mode,
   }
+}
+
+fn setup_failure(exit_code: i32) -> ! {
+  eprintln!("setup_error=true");
+  std::process::exit(exit_code);
 }
 
 fn main() {
   env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-  let args = parse_args();
 
-  let cred = LoginCredential::parse(&args.credential).unwrap_or_else(|| {
-    eprintln!("Invalid credential format. Use ACCOUNT|PASSWORD|2FA");
-    std::process::exit(2);
-  });
-  eprintln!(
-    "Smoke login email={} browser={} sms_service_id={:?} sms_network={:?} max_retries={}",
-    cred.email, args.browser, args.sms_service_id, args.sms_network, args.max_retries
-  );
+  let args = parse_args().unwrap_or_else(|_| setup_failure(2));
+  let config = build_config(args);
 
-  tauri::Builder::default()
+  let run_result = tauri::Builder::default()
     .setup(move |app| {
       let handle = app.handle().clone();
       tauri::async_runtime::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
-          let rt = tokio::runtime::Runtime::new().expect("runtime");
-          rt.block_on(async move {
-            let network_mode = if args.vpn_id.is_some() {
-              LoginNetworkMode::Vpn
-            } else if args.proxy_id.is_some() {
-              LoginNetworkMode::Proxy
-            } else {
-              LoginNetworkMode::None
-            };
-            let config = LoginConfig {
-              credentials_text: args.credential.clone(),
-              credentials: vec![cred],
-              browser_type: args.browser,
-              max_retries: args.max_retries,
-              headless: args.headless,
-              concurrency: 1,
-              sub2api_url: String::new(),
-              sub2api_api_key: String::new(),
-              sub2api_proxy_id: None,
-              sub2api_group_ids: None,
-              push_to_sub2api: false,
-              sms_provider: args.sms_token.as_ref().map(|_| "viotp".into()),
-              sms_token: args.sms_token.clone(),
-              sms_service_id: args.sms_service_id,
-              sms_network: args.sms_network.clone(),
-              sms_country: Some(args.sms_country.clone()),
-              proxy_id: args.proxy_id.clone(),
-              vpn_id: args.vpn_id.clone(),
-              rotate_every_n: if matches!(network_mode, LoginNetworkMode::Vpn) {
-                1
-              } else {
-                0
-              },
-              network_mode,
-            };
-            if let Err(e) = config.validate() {
-              eprintln!("config error: {e}");
-              std::process::exit(2);
-            }
+        let prepared = prepare_login(&handle, config, Arc::new(AtomicBool::new(false)))
+          .await
+          .unwrap_or_else(|_| setup_failure(2));
 
-            let cancel = Arc::new(AtomicBool::new(false));
-            let mut engine = LoginEngine::with_cancel_flag(config, cancel);
-            let viotp = args
-              .sms_token
-              .as_ref()
-              .map(|t| ViotpService::new(t.clone()));
-            let sms_ref: Option<&dyn SmsService> = viotp.as_ref().map(|s| s as &dyn SmsService);
-            engine.run(handle, sms_ref).await
-          })
-        })
-        .await
-        .expect("join");
+        std::thread::spawn(move || {
+          let results = run_prepared_login(handle, prepared).unwrap_or_else(|_| setup_failure(1));
+          let success_count = results.iter().filter(|result| result.success).count();
+          let failure_count = results.len().saturating_sub(success_count);
 
-        eprintln!("=== RESULT COUNT={} ===", result.len());
-        for (i, r) in result.iter().enumerate() {
-          eprintln!("--- account {i} ---");
-          eprintln!("success={}", r.success);
-          eprintln!("email={}", r.email);
-          eprintln!("account_id={}", r.account_id);
-          eprintln!("access_token_len={}", r.access_token.len());
-          eprintln!("refresh_token_len={}", r.refresh_token.len());
-          eprintln!("phone={}", r.phone_number);
-          eprintln!("sub2api_account_id={:?}", r.sub2api_account_id);
-          eprintln!("error={}", r.error_message);
-          eprintln!("push_error={}", r.push_error);
-          eprintln!("--- logs ---");
-          for line in &r.step_logs {
-            eprintln!("{line}");
-          }
-        }
+          eprintln!("result_count={}", results.len());
+          eprintln!("success_count={success_count}");
+          eprintln!("failure_count={failure_count}");
 
-        let ok = result.iter().any(|r| r.success);
-        std::process::exit(if ok { 0 } else { 1 });
+          std::process::exit(if failure_count == 0 && success_count > 0 {
+            0
+          } else {
+            1
+          });
+        });
       });
       Ok(())
     })
-    .run(tauri::generate_context!())
-    .expect("error while running auto-login-live");
+    .run(tauri::generate_context!());
+
+  if run_result.is_err() {
+    setup_failure(1);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn live_args(max_retries: u32) -> LiveArgs {
+    LiveArgs {
+      credential: "person@example.com|password|secret".into(),
+      browser: "chromium".into(),
+      max_retries,
+      headless: false,
+      sms_token: None,
+      use_sms_settings: false,
+      sms_service_id: None,
+      sms_network: None,
+      sms_country: "vn".into(),
+      proxy_id: None,
+      vpn_id: None,
+    }
+  }
+
+  #[test]
+  fn harness_default_matches_product_retry_policy() {
+    assert_eq!(build_config(live_args(DEFAULT_MAX_RETRIES)).max_retries, 3);
+  }
+
+  #[test]
+  fn explicit_retry_override_is_preserved() {
+    assert_eq!(build_config(live_args(7)).max_retries, 7);
+  }
 }

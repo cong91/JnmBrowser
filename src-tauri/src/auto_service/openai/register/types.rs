@@ -791,6 +791,23 @@ impl CdkInventoryRecord {
   }
 }
 
+/// Distinguishes a per-account progress event from the final task summary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RegistrationProgressEventKind {
+  #[default]
+  Account,
+  Batch,
+}
+
+/// Secret-free terminal outcome emitted after persistence has completed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationTerminalSummary {
+  pub success: bool,
+  pub status_code: String,
+}
+
 /// Progress payload emitted to the frontend via Tauri events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -802,5 +819,58 @@ pub struct RegistrationProgress {
   pub step: RegistrationStep,
   pub message: String,
   pub timestamp: DateTime<Utc>,
-  pub result: Option<RegistrationResult>,
+  #[serde(default)]
+  pub event_kind: RegistrationProgressEventKind,
+  pub terminal: Option<RegistrationTerminalSummary>,
+}
+
+#[cfg(test)]
+mod registration_progress_tests {
+  use super::*;
+
+  #[test]
+  fn serialized_progress_has_only_secret_free_fields() {
+    let progress = RegistrationProgress {
+      task_id: "task-1".into(),
+      cdk_index: 0,
+      alias_index: 0,
+      total_cdks: 1,
+      step: RegistrationStep::Completed,
+      message: "completed".into(),
+      timestamp: Utc::now(),
+      event_kind: RegistrationProgressEventKind::Account,
+      terminal: Some(RegistrationTerminalSummary {
+        success: true,
+        status_code: "completed".into(),
+      }),
+    };
+
+    let value = serde_json::to_value(progress).unwrap();
+    let mut keys: Vec<_> = value
+      .as_object()
+      .unwrap()
+      .keys()
+      .map(String::as_str)
+      .collect();
+    keys.sort_unstable();
+
+    assert_eq!(
+      keys,
+      [
+        "aliasIndex",
+        "cdkIndex",
+        "eventKind",
+        "message",
+        "step",
+        "taskId",
+        "terminal",
+        "timestamp",
+        "totalCdks",
+      ]
+    );
+    assert_eq!(
+      value["terminal"],
+      serde_json::json!({ "success": true, "statusCode": "completed" })
+    );
+  }
 }

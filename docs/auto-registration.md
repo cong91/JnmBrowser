@@ -345,9 +345,11 @@ After tokens are extracted, the engine enables ChatGPT authenticator 2FA in the 
 Token extract retries `/api/auth/session` up to 5 times with human jitter (session cookies often land after first home paint).
 
 Policy:
-- Only the 2FA step is retried (default 3 attempts) inside the same browser session
-- If 2FA still fails, the registration remains successful with `twoFaEnabled=false` and an error note
-- On success, `totpSecret` is persisted with the account for later login/automation
+- Only the 2FA step is retried (default 3 attempts) inside the same browser session.
+- A free-trial eligible account is first persisted as a non-exportable provisional `Reserved` record before 2FA starts.
+- The authenticator secret is written to the private recovery journal before remote confirmation. The account becomes `Available` only after the Security page is re-opened, authenticator is verified On, and the same secret is durably finalized in the account record.
+- If setup or persistence cannot be verified, registration returns a terminal failure and leaves the account reconciliation-safe in `Reserved`; it never reports a usable account with `twoFaEnabled=false`.
+- Accounts without the free trial remain `Invalid`; 2FA is skipped.
 
 Reference recordings: `register_1.json` / `register_2.json` (signup), `enable2FA.json` (2FA-only).
 Recipe sketch: `src-tauri/src/auto_service/openai/register/recipes/enable_2fa_recipe.json`.

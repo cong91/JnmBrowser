@@ -1182,8 +1182,8 @@ impl ApiClient {
   ///
   /// The public method name is kept for compatibility with the existing Chromium legacy
   /// call sites, but the data now comes from the JnmBrowser fingerprint-chromium
-  /// manifest. Fallback order:
-  /// remote GitHub raw -> cached manifest -> local development manifest.
+  /// manifest. Fallback / merge order:
+  /// local manifest (compare) |> remote GitHub raw -> cached manifest -> local development manifest.
   pub async fn fetch_chromium_version_with_caching(
     &self,
     no_caching: bool,
@@ -1198,6 +1198,9 @@ impl ApiClient {
         return Ok(cached_version);
       }
     }
+
+    // Load local manifest first so it can override a stale remote.
+    let local_manifest = self.load_local_fingerprint_chromium_manifest();
 
     let url = std::env::var(FINGERPRINT_CHROMIUM_MANIFEST_ENV)
       .unwrap_or_else(|_| FINGERPRINT_CHROMIUM_MANIFEST_URL.to_string());
@@ -1239,7 +1242,22 @@ impl ApiClient {
     }
 
     let version_info = match version_info {
-      Some(info) => info,
+      Some(info) => {
+        // If a local manifest exists and is newer than the remote one, prefer it.
+        if let Some(ref local) = local_manifest {
+          let local_v = VersionComponent::parse(&local.version);
+          let remote_v = VersionComponent::parse(&info.version);
+          if local_v > remote_v {
+            log::info!(
+              "Local fingerprint-chromium manifest ({}) is newer than remote ({}), using local",
+              local.version,
+              info.version
+            );
+            return Ok(local.clone());
+          }
+        }
+        info
+      }
       None => {
         let remote_error = last_err.unwrap_or_default();
         if let Some(cached_version) = self.load_cached_chromium_version() {
@@ -1248,7 +1266,7 @@ impl ApiClient {
           );
           return Ok(cached_version);
         }
-        if let Some(local_manifest) = self.load_local_fingerprint_chromium_manifest() {
+        if let Some(local_manifest) = local_manifest {
           log::warn!(
             "Using local fingerprint-chromium manifest after remote/cache failed: {remote_error}"
           );
@@ -1730,7 +1748,7 @@ mod tests {
     );
 
     let version_info = ChromiumVersionInfo {
-      version: "142.0.7444.175".to_string(),
+      version: "148.0.7778.215".to_string(),
       downloads: HashMap::from([
         (
           "linux-x64".to_string(),

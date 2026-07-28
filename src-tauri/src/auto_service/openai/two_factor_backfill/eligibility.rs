@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::auto_service::openai::register::store::is_retryable_new_registration_two_factor_failure;
 use crate::auto_service::openai::register::types::{
   AccountInventoryStatus, EmailProviderProvenance, RegistrationOutcomeReason, RegistrationResult,
   TwoFactorBackfillAccessState, TwoFactorBackfillOutcome, TwoFactorBackfillState,
@@ -115,8 +116,9 @@ fn evaluate_account(
   let invalid_free_trial_no = account.status == AccountInventoryStatus::Invalid
     && account.registration_outcome_reason == Some(RegistrationOutcomeReason::FreeTrialNo);
   let free_trial_no_override = invalid_free_trial_no && allow_free_trial_no;
+  let retryable_registration_failure = is_retryable_new_registration_two_factor_failure(account);
 
-  if !account.success && !invalid_free_trial_no {
+  if !account.success && !invalid_free_trial_no && !retryable_registration_failure {
     reasons.push(TwoFactorBackfillIneligibilityReason::RegistrationUnsuccessful);
   }
   if account.email.trim().is_empty() {
@@ -128,6 +130,7 @@ fn evaluate_account(
 
   match &account.status {
     AccountInventoryStatus::Available => {}
+    AccountInventoryStatus::Reserved if retryable_registration_failure => {}
     AccountInventoryStatus::Invalid if invalid_free_trial_no => {
       if !allow_free_trial_no {
         reasons.push(TwoFactorBackfillIneligibilityReason::FreeTrialNoOverrideRequired);
@@ -226,7 +229,8 @@ fn evaluate_account(
     account_key,
     account_id: account.account_id.clone(),
     email: account.email.clone(),
-    eligible: reasons.is_empty() && (account.success || free_trial_no_override),
+    eligible: reasons.is_empty()
+      && (account.success || free_trial_no_override || retryable_registration_failure),
     ineligibility_reasons: reasons,
     email_provider,
     email_provider_provenance,
@@ -298,6 +302,18 @@ mod tests {
       two_factor_backfill_outcome: None,
       record_revision: 7,
     }
+  }
+
+  fn retryable_new_registration_failure() -> RegistrationResult {
+    let mut value = account();
+    value.success = false;
+    value.status = AccountInventoryStatus::Reserved;
+    value.email_provider = Some(EmailProvider::Gmail123452026);
+    value.email_provider_provenance = Some(EmailProviderProvenance::RegistrationConfig);
+    value.two_factor_backfill_state = Some(TwoFactorBackfillState::Completed);
+    value.two_factor_backfill_operation_id = Some("registration-operation".into());
+    value.two_factor_backfill_outcome = Some(TwoFactorBackfillOutcome::Failed);
+    value
   }
 
   fn preview_for(
@@ -611,6 +627,51 @@ mod tests {
       missing_outcome,
       TwoFactorBackfillIneligibilityReason::BackfillCompletedOutcomeMissing,
     );
+  }
+
+  #[test]
+  fn safe_failed_new_registration_record_is_eligible() {
+    let preview = preview_for(retryable_new_registration_failure(), false);
+
+    assert!(preview.eligible);
+    assert!(preview.ineligibility_reasons.is_empty());
+    assert_eq!(preview.email_provider, Some(EmailProvider::Gmail123452026));
+    assert_eq!(
+      preview.email_provider_provenance,
+      Some(EmailProviderProvenance::RegistrationConfig)
+    );
+    assert!(!preview.requires_provider_persistence);
+  }
+
+  #[test]
+  fn ordinary_unsuccessful_reserved_record_remains_ineligible() {
+    let mut value = retryable_new_registration_failure();
+    value.registration_outcome_reason = Some(RegistrationOutcomeReason::RegistrationFailed);
+
+    let preview = preview_for(value, false);
+
+    assert!(!preview.eligible);
+    assert!(preview
+      .ineligibility_reasons
+      .contains(&TwoFactorBackfillIneligibilityReason::RegistrationUnsuccessful));
+    assert!(preview.ineligibility_reasons.contains(
+      &TwoFactorBackfillIneligibilityReason::InventoryStatusNotAvailable(
+        AccountInventoryStatus::Reserved
+      )
+    ));
+  }
+
+  #[test]
+  fn reconciliation_required_new_registration_record_requires_manual_review() {
+    let mut value = retryable_new_registration_failure();
+    value.two_factor_backfill_outcome = Some(TwoFactorBackfillOutcome::ReconciliationRequired);
+
+    let preview = preview_for(value, false);
+
+    assert!(!preview.eligible);
+    assert!(preview
+      .ineligibility_reasons
+      .contains(&TwoFactorBackfillIneligibilityReason::BackfillReconciliationRequiresManualReview));
   }
 
   #[test]

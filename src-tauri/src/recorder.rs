@@ -156,6 +156,45 @@ impl RecorderManager {
       );
     }
     let _ = app_handle.emit("recorder-session-changed", &info);
+    self.spawn_progress_emitter(app_handle, info.id);
+  }
+
+  /// Push live `event_count` updates to the UI while a session records.
+  ///
+  /// Without this the frontend only ever saw the registration snapshot
+  /// (`event_count = 0`), so an otherwise healthy recording looked like it was
+  /// capturing nothing.
+  fn spawn_progress_emitter(&self, app_handle: tauri::AppHandle, session_id: String) {
+    let inner = self.inner.clone();
+    tokio::spawn(async move {
+      let mut last_count = u64::MAX;
+      loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let info = {
+          let guard = inner.lock().await;
+          let Some(session) = guard.sessions.get(&session_id) else {
+            break;
+          };
+          let event_count = {
+            let shared = session.shared.lock().await;
+            shared.events.len() as u64
+          };
+          RecorderSessionInfo {
+            id: session.id.clone(),
+            profile_id: session.profile_id.clone(),
+            profile_name: session.profile_name.clone(),
+            browser: session.browser.clone(),
+            started_at: session.started_at,
+            event_count,
+            status: "recording".to_string(),
+          }
+        };
+        if info.event_count != last_count {
+          last_count = info.event_count;
+          let _ = app_handle.emit("recorder-session-changed", &info);
+        }
+      }
+    });
   }
 
   /// Stop a recording session, flush events to disk, and return the saved recording.

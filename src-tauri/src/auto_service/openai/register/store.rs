@@ -50,6 +50,7 @@ pub(crate) struct BackfillPatchPrecondition {
   operation_id: String,
   allow_free_trial_no: bool,
   acknowledge_legacy_access: bool,
+  finalize_new_registration: bool,
 }
 
 impl BackfillPatchPrecondition {
@@ -63,6 +64,7 @@ impl BackfillPatchPrecondition {
       operation_id: operation_id.into(),
       allow_free_trial_no,
       acknowledge_legacy_access,
+      finalize_new_registration: false,
     }
   }
 
@@ -77,6 +79,16 @@ impl BackfillPatchPrecondition {
       allow_free_trial_no,
       acknowledge_legacy_access,
     )
+  }
+
+  pub(crate) fn finalize_new_registration_enabled(operation_id: impl Into<String>) -> Self {
+    Self {
+      operation: BackfillPatchOperation::FinalizeEnabled,
+      operation_id: operation_id.into(),
+      allow_free_trial_no: false,
+      acknowledge_legacy_access: false,
+      finalize_new_registration: true,
+    }
   }
 
   pub(crate) fn finalize_failed(
@@ -129,6 +141,7 @@ impl BackfillPatchPrecondition {
       operation_id: operation_id.into(),
       allow_free_trial_no,
       acknowledge_legacy_access,
+      finalize_new_registration: false,
     }
   }
 
@@ -149,6 +162,7 @@ pub(crate) struct TwoFactorBackfillPatch {
   operation: BackfillPatchOperation,
   totp_secret: Option<String>,
   access_state: Option<TwoFactorBackfillAccessState>,
+  finalize_new_registration: bool,
 }
 
 impl TwoFactorBackfillPatch {
@@ -157,6 +171,7 @@ impl TwoFactorBackfillPatch {
       operation: BackfillPatchOperation::Start,
       totp_secret: None,
       access_state: None,
+      finalize_new_registration: false,
     }
   }
 
@@ -165,6 +180,16 @@ impl TwoFactorBackfillPatch {
       operation: BackfillPatchOperation::FinalizeEnabled,
       totp_secret: Some(totp_secret.into()),
       access_state: None,
+      finalize_new_registration: false,
+    }
+  }
+
+  pub(crate) fn finalize_new_registration_enabled(totp_secret: impl Into<String>) -> Self {
+    Self {
+      operation: BackfillPatchOperation::FinalizeEnabled,
+      totp_secret: Some(totp_secret.into()),
+      access_state: None,
+      finalize_new_registration: true,
     }
   }
 
@@ -177,6 +202,7 @@ impl TwoFactorBackfillPatch {
       operation: BackfillPatchOperation::FinalizeFailed,
       totp_secret: None,
       access_state: Some(TwoFactorBackfillAccessState::Locked),
+      finalize_new_registration: false,
     }
   }
 
@@ -193,6 +219,7 @@ impl TwoFactorBackfillPatch {
       operation,
       totp_secret: None,
       access_state: None,
+      finalize_new_registration: false,
     }
   }
 
@@ -368,6 +395,14 @@ impl CredentialStore {
     let existing = source_key
       .as_deref()
       .and_then(|source_key| self.accounts.get(source_key));
+    if let Some(existing) = existing {
+      if result.record_revision < existing.record_revision {
+        return Err(format!(
+          "Registered account revision conflict for {key}: incoming {}, current {}",
+          result.record_revision, existing.record_revision
+        ));
+      }
+    }
     let key_changed = source_key
       .as_deref()
       .is_some_and(|source_key| source_key != key);
@@ -711,6 +746,14 @@ impl CredentialStore {
       let Some(mut account) = self.get(id) else {
         continue;
       };
+      if status == AccountInventoryStatus::Available
+        && account.status != AccountInventoryStatus::Available
+        && !is_available_inventory_ready(&account)
+      {
+        return Err(format!(
+          "Registered account {id} cannot be marked available until registration and 2FA are complete"
+        ));
+      }
       account.status = status.clone();
       if let Some(ref note) = note {
         account.note.clone_from(note);
@@ -980,6 +1023,65 @@ fn validate_owned_backfill_operation(
   Ok(())
 }
 
+fn has_complete_backfill_credentials(account: &RegistrationResult) -> bool {
+  !account.email.trim().is_empty()
+    && !account.password.trim().is_empty()
+    && !account.cdk.trim().is_empty()
+}
+
+fn has_complete_email_provider(account: &RegistrationResult) -> bool {
+  matches!(
+    (account.email_provider, account.email_provider_provenance),
+    (Some(_), Some(_))
+  )
+}
+
+fn is_new_registration_two_factor_base(account: &RegistrationResult) -> bool {
+  account.record_revision >= 1
+    && !account.success
+    && account.free_trial_eligible
+    && account.status == AccountInventoryStatus::Reserved
+    && account.registration_outcome_reason == Some(RegistrationOutcomeReason::Registered)
+    && has_complete_backfill_credentials(account)
+    && has_complete_email_provider(account)
+    && account.two_factor_backfill_access_state == Some(TwoFactorBackfillAccessState::Accessible)
+    && account.two_factor_backfill_exclusion.is_none()
+    && !account.two_fa_enabled
+    && account.totp_secret.trim().is_empty()
+}
+
+pub(crate) fn is_retryable_new_registration_two_factor_failure(
+  account: &RegistrationResult,
+) -> bool {
+  is_new_registration_two_factor_base(account)
+    && account.two_factor_backfill_state == Some(TwoFactorBackfillState::Completed)
+    && account.two_factor_backfill_outcome == Some(TwoFactorBackfillOutcome::Failed)
+}
+
+fn is_in_progress_new_registration_two_factor(account: &RegistrationResult) -> bool {
+  is_new_registration_two_factor_base(account)
+    && account.two_factor_backfill_state == Some(TwoFactorBackfillState::InProgress)
+    && account.two_factor_backfill_outcome.is_none()
+}
+
+fn validate_nonempty_totp_secret(patch: &TwoFactorBackfillPatch) -> Result<(), String> {
+  if patch
+    .totp_secret
+    .as_deref()
+    .is_none_or(|secret| secret.trim().is_empty())
+  {
+    return Err("Enabling 2FA requires a non-empty TOTP secret".into());
+  }
+  Ok(())
+}
+
+fn is_available_inventory_ready(account: &RegistrationResult) -> bool {
+  account.success
+    && account.free_trial_eligible
+    && account.two_fa_enabled
+    && !account.totp_secret.trim().is_empty()
+}
+
 fn validate_backfill_precondition(
   account: &RegistrationResult,
   precondition: &BackfillPatchPrecondition,
@@ -990,6 +1092,9 @@ fn validate_backfill_precondition(
   }
   if patch.operation != precondition.operation {
     return Err("2FA backfill patch operation does not match its precondition".into());
+  }
+  if patch.finalize_new_registration != precondition.finalize_new_registration {
+    return Err("2FA backfill registration-finalize policy does not match its precondition".into());
   }
 
   if matches!(
@@ -1011,29 +1116,45 @@ fn validate_backfill_precondition(
     return Ok(());
   }
 
+  if precondition.finalize_new_registration {
+    validate_owned_backfill_operation(account, precondition)?;
+    if !is_in_progress_new_registration_two_factor(account) {
+      return Err(
+        "2FA registration-finalize precondition failed: provisional record is not eligible".into(),
+      );
+    }
+    validate_nonempty_totp_secret(patch)?;
+    return Ok(());
+  }
+
   let invalid_free_trial_no = account.status == AccountInventoryStatus::Invalid
     && account.registration_outcome_reason == Some(RegistrationOutcomeReason::FreeTrialNo);
   let allowed_free_trial_no = invalid_free_trial_no && precondition.allow_free_trial_no;
-  if !account.success && !allowed_free_trial_no {
+  let retryable_registration_failure = precondition.operation == BackfillPatchOperation::Start
+    && is_retryable_new_registration_two_factor_failure(account);
+  let in_progress_registration_retry = precondition.operation
+    == BackfillPatchOperation::FinalizeEnabled
+    && is_in_progress_new_registration_two_factor(account);
+  if !account.success
+    && !allowed_free_trial_no
+    && !retryable_registration_failure
+    && !in_progress_registration_retry
+  {
     return Err("2FA backfill precondition failed: registration was unsuccessful".into());
   }
-  if account.email.trim().is_empty()
-    || account.password.trim().is_empty()
-    || account.cdk.trim().is_empty()
-  {
+  if !has_complete_backfill_credentials(account) {
     return Err("2FA backfill precondition failed: account credentials are incomplete".into());
   }
   match account.status {
     AccountInventoryStatus::Available => {}
     AccountInventoryStatus::Invalid if allowed_free_trial_no => {}
+    AccountInventoryStatus::Reserved
+      if retryable_registration_failure || in_progress_registration_retry => {}
     _ => {
       return Err("2FA backfill precondition failed: inventory status is not eligible".into());
     }
   }
-  if !matches!(
-    (account.email_provider, account.email_provider_provenance),
-    (Some(_), Some(_))
-  ) {
+  if !has_complete_email_provider(account) {
     return Err("2FA backfill precondition failed: email provider provenance is missing".into());
   }
   if account.two_fa_enabled || !account.totp_secret.trim().is_empty() {
@@ -1069,13 +1190,7 @@ fn validate_backfill_precondition(
     },
     BackfillPatchOperation::FinalizeEnabled => {
       validate_owned_backfill_operation(account, precondition)?;
-      if patch
-        .totp_secret
-        .as_deref()
-        .is_none_or(|secret| secret.trim().is_empty())
-      {
-        return Err("Enabling 2FA requires a non-empty TOTP secret".into());
-      }
+      validate_nonempty_totp_secret(patch)?;
     }
     BackfillPatchOperation::FinalizeFailed
     | BackfillPatchOperation::FinalizeCancelled
@@ -1105,10 +1220,18 @@ fn apply_backfill_patch(
       account.two_factor_backfill_outcome = None;
     }
     BackfillPatchOperation::FinalizeEnabled => {
+      let promote_new_registration = precondition.finalize_new_registration
+        || is_in_progress_new_registration_two_factor(account);
       let secret = patch
         .totp_secret
         .filter(|secret| !secret.trim().is_empty())
         .ok_or_else(|| "Enabling 2FA requires a non-empty TOTP secret".to_string())?;
+      if promote_new_registration {
+        account.success = true;
+        account.status = AccountInventoryStatus::Available;
+        account.error_message.clear();
+        account.note.clear();
+      }
       account.two_fa_enabled = true;
       account.totp_secret = secret;
       apply_terminal_backfill_outcome(
@@ -1852,6 +1975,26 @@ mod tests {
     account
   }
 
+  fn new_registration_provisional(account_id: &str, operation_id: &str) -> RegistrationResult {
+    let mut account = backfill_ready_result(account_id);
+    account.success = false;
+    account.status = AccountInventoryStatus::Reserved;
+    account.error_message = "2FA setup pending".into();
+    account.note = "two_factor_pending".into();
+    account.two_factor_backfill_state = Some(TwoFactorBackfillState::InProgress);
+    account.two_factor_backfill_operation_id = Some(operation_id.into());
+    account.two_factor_backfill_outcome = None;
+    account.record_revision = 1;
+    account
+  }
+
+  fn retryable_new_registration_failure(account_id: &str) -> RegistrationResult {
+    let mut account = new_registration_provisional(account_id, "registration-operation");
+    account.two_factor_backfill_state = Some(TwoFactorBackfillState::Completed);
+    account.two_factor_backfill_outcome = Some(TwoFactorBackfillOutcome::Failed);
+    account
+  }
+
   fn precondition_for(
     operation: BackfillPatchOperation,
     operation_id: &str,
@@ -2431,6 +2574,31 @@ mod tests {
   }
 
   #[test]
+  fn stale_save_cannot_overwrite_newer_revision_in_memory_or_on_disk() {
+    let temp = TempDir::new().unwrap();
+    let original = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+
+    let mut current = original.clone();
+    current.record_revision += 1;
+    current.note = "newer-note".into();
+    store.save(&current).unwrap();
+    let disk_before = fs::read(account_file(&temp, "account-1")).unwrap();
+
+    let mut stale = original;
+    stale.note = "stale-note".into();
+    let error = store.save(&stale).unwrap_err();
+
+    assert!(error.contains("revision conflict"));
+    assert_eq!(store.get("account-1").unwrap().note, "newer-note");
+    assert_eq!(
+      fs::read(account_file(&temp, "account-1")).unwrap(),
+      disk_before
+    );
+  }
+
+  #[test]
   fn status_and_note_updates_increment_revision_and_preserve_credentials() {
     let temp = TempDir::new().unwrap();
     let original = registration_result("account-1");
@@ -2493,6 +2661,247 @@ mod tests {
     store.fail_next_account_write(AtomicWriteFailureStage::Write);
     assert!(store.update_note("account-1", "not-saved".into()).is_err());
     assert_eq!(store.get("account-1").unwrap().note, "original-note");
+  }
+
+  #[test]
+  fn new_registration_finalize_promotes_owned_provisional_record() {
+    let temp = TempDir::new().unwrap();
+    let operation_id = "registration-operation";
+    let original = new_registration_provisional("account-1", operation_id);
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+
+    let updated = store
+      .compare_and_update(
+        "account-1",
+        original.record_revision,
+        BackfillPatchPrecondition::finalize_new_registration_enabled(operation_id),
+        TwoFactorBackfillPatch::finalize_new_registration_enabled("JBSWY3DPEHPK3PXP"),
+      )
+      .unwrap();
+
+    assert!(updated.success);
+    assert_eq!(updated.status, AccountInventoryStatus::Available);
+    assert!(updated.two_fa_enabled);
+    assert_eq!(updated.totp_secret, "JBSWY3DPEHPK3PXP");
+    assert_eq!(updated.error_message, "");
+    assert_eq!(updated.note, "");
+    assert_eq!(
+      updated.two_factor_backfill_state,
+      Some(TwoFactorBackfillState::Completed)
+    );
+    assert_eq!(
+      updated.two_factor_backfill_outcome,
+      Some(TwoFactorBackfillOutcome::Enabled)
+    );
+    assert_eq!(
+      updated.two_factor_backfill_operation_id.as_deref(),
+      Some(operation_id)
+    );
+    assert_eq!(updated.record_revision, original.record_revision + 1);
+  }
+
+  #[test]
+  fn new_registration_finalize_rejects_wrong_owner_revision_status_reason_and_empty_secret() {
+    let operation_id = "registration-operation";
+
+    let wrong_owner = new_registration_provisional("account-1", "other-operation");
+    assert!(assert_cas_rejection_preserves(
+      wrong_owner,
+      BackfillPatchPrecondition::finalize_new_registration_enabled(operation_id),
+      TwoFactorBackfillPatch::finalize_new_registration_enabled("JBSWY3DPEHPK3PXP"),
+    )
+    .contains("operation ownership"));
+
+    let temp = TempDir::new().unwrap();
+    let original = new_registration_provisional("account-1", operation_id);
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&original).unwrap();
+    assert!(store
+      .compare_and_update(
+        "account-1",
+        original.record_revision + 1,
+        BackfillPatchPrecondition::finalize_new_registration_enabled(operation_id),
+        TwoFactorBackfillPatch::finalize_new_registration_enabled("JBSWY3DPEHPK3PXP"),
+      )
+      .unwrap_err()
+      .contains("revision conflict"));
+
+    let mut wrong_status = new_registration_provisional("account-1", operation_id);
+    wrong_status.status = AccountInventoryStatus::Invalid;
+    assert!(assert_cas_rejection_preserves(
+      wrong_status,
+      BackfillPatchPrecondition::finalize_new_registration_enabled(operation_id),
+      TwoFactorBackfillPatch::finalize_new_registration_enabled("JBSWY3DPEHPK3PXP"),
+    )
+    .contains("provisional record"));
+
+    let mut wrong_reason = new_registration_provisional("account-1", operation_id);
+    wrong_reason.registration_outcome_reason = Some(RegistrationOutcomeReason::FreeTrialNo);
+    assert!(assert_cas_rejection_preserves(
+      wrong_reason,
+      BackfillPatchPrecondition::finalize_new_registration_enabled(operation_id),
+      TwoFactorBackfillPatch::finalize_new_registration_enabled("JBSWY3DPEHPK3PXP"),
+    )
+    .contains("provisional record"));
+
+    let empty_secret = new_registration_provisional("account-1", operation_id);
+    assert!(assert_cas_rejection_preserves(
+      empty_secret,
+      BackfillPatchPrecondition::finalize_new_registration_enabled(operation_id),
+      TwoFactorBackfillPatch::finalize_new_registration_enabled("  "),
+    )
+    .contains("non-empty TOTP secret"));
+  }
+
+  #[test]
+  fn registration_terminal_patches_keep_owned_provisional_reserved_without_secret() {
+    let operation_id = "registration-operation";
+    for (operation, expected_outcome) in [
+      (
+        BackfillPatchOperation::FinalizeFailed,
+        TwoFactorBackfillOutcome::Failed,
+      ),
+      (
+        BackfillPatchOperation::FinalizeCancelled,
+        TwoFactorBackfillOutcome::Cancelled,
+      ),
+      (
+        BackfillPatchOperation::FinalizeReconciliationRequired,
+        TwoFactorBackfillOutcome::ReconciliationRequired,
+      ),
+    ] {
+      let temp = TempDir::new().unwrap();
+      let original = new_registration_provisional("account-1", operation_id);
+      let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+      store.save(&original).unwrap();
+
+      let updated = store
+        .compare_and_update(
+          "account-1",
+          original.record_revision,
+          precondition_for(operation, operation_id, false),
+          patch_for(operation),
+        )
+        .unwrap();
+
+      assert!(!updated.success);
+      assert_eq!(updated.status, AccountInventoryStatus::Reserved);
+      assert!(!updated.two_fa_enabled);
+      assert!(updated.totp_secret.is_empty());
+      assert_eq!(updated.two_factor_backfill_outcome, Some(expected_outcome));
+    }
+  }
+
+  #[test]
+  fn available_status_transition_requires_complete_successful_two_factor_record() {
+    let mutations: [fn(&mut RegistrationResult); 4] = [
+      |account| account.success = false,
+      |account| account.free_trial_eligible = false,
+      |account| account.two_fa_enabled = false,
+      |account| account.totp_secret.clear(),
+    ];
+    for mutation in mutations {
+      let temp = TempDir::new().unwrap();
+      let mut account = backfill_ready_result("account-1");
+      account.status = AccountInventoryStatus::Reserved;
+      account.two_fa_enabled = true;
+      account.totp_secret = "JBSWY3DPEHPK3PXP".into();
+      mutation(&mut account);
+      let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+      store.save(&account).unwrap();
+
+      let error = store
+        .update_status(
+          &["account-1".into()],
+          AccountInventoryStatus::Available,
+          None,
+        )
+        .unwrap_err();
+
+      assert!(error.contains("cannot be marked available"));
+      assert_eq!(
+        store.get("account-1").unwrap().status,
+        AccountInventoryStatus::Reserved
+      );
+    }
+  }
+
+  #[test]
+  fn legacy_available_record_can_be_loaded_and_re_saved_without_migration() {
+    let temp = TempDir::new().unwrap();
+    let legacy = registration_result("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&legacy).unwrap();
+
+    assert!(store.get("account-1").is_some());
+    assert_eq!(
+      store
+        .update_status(
+          &["account-1".into()],
+          AccountInventoryStatus::Available,
+          Some("legacy-note".into()),
+        )
+        .unwrap(),
+      1
+    );
+    assert_eq!(store.get("account-1").unwrap().note, "legacy-note");
+  }
+
+  #[test]
+  fn safe_failed_registration_is_startable_and_backfill_success_promotes_it() {
+    let temp = TempDir::new().unwrap();
+    let failed = retryable_new_registration_failure("account-1");
+    let mut store = CredentialStore::with_base_dir(temp.path()).unwrap();
+    store.save(&failed).unwrap();
+
+    let started = store
+      .compare_and_update(
+        "account-1",
+        failed.record_revision,
+        BackfillPatchPrecondition::start("backfill-operation", false, false),
+        TwoFactorBackfillPatch::start(),
+      )
+      .unwrap();
+    assert!(!started.success);
+    assert_eq!(started.status, AccountInventoryStatus::Reserved);
+    assert_eq!(
+      started.two_factor_backfill_state,
+      Some(TwoFactorBackfillState::InProgress)
+    );
+
+    let enabled = store
+      .compare_and_update(
+        "account-1",
+        started.record_revision,
+        BackfillPatchPrecondition::finalize_enabled("backfill-operation", false, false),
+        TwoFactorBackfillPatch::finalize_enabled("JBSWY3DPEHPK3PXP"),
+      )
+      .unwrap();
+
+    assert!(enabled.success);
+    assert_eq!(enabled.status, AccountInventoryStatus::Available);
+    assert!(enabled.two_fa_enabled);
+    assert_eq!(enabled.totp_secret, "JBSWY3DPEHPK3PXP");
+    assert_eq!(enabled.error_message, "");
+    assert_eq!(enabled.note, "");
+    assert_eq!(
+      enabled.two_factor_backfill_outcome,
+      Some(TwoFactorBackfillOutcome::Enabled)
+    );
+  }
+
+  #[test]
+  fn ordinary_unsuccessful_reserved_record_is_not_startable() {
+    let mut account = retryable_new_registration_failure("account-1");
+    account.registration_outcome_reason = Some(RegistrationOutcomeReason::RegistrationFailed);
+
+    assert!(assert_cas_rejection_preserves(
+      account,
+      BackfillPatchPrecondition::start("backfill-operation", false, false),
+      TwoFactorBackfillPatch::start(),
+    )
+    .contains("unsuccessful"));
   }
 
   #[test]

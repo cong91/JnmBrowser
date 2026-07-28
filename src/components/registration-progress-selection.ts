@@ -1,24 +1,23 @@
 import type { RegistrationProgress } from "@/hooks/use-registration-events";
 
+export function registrationProgressLiveRegion(progress: RegistrationProgress) {
+  const failed = progress.terminal?.success === false;
+  return {
+    role: failed ? ("alert" as const) : ("status" as const),
+    ariaLive: failed ? ("assertive" as const) : ("polite" as const),
+  };
+}
+
 export function isTerminalRegistrationProgress(
   progress: RegistrationProgress,
 ): boolean {
-  return (
-    progress.result != null ||
-    progress.step === "completed" ||
-    progress.step === "failed"
-  );
+  return progress.terminal != null;
 }
 
 export function isRegistrationBatchSummary(
   progress: RegistrationProgress,
 ): boolean {
-  return (
-    progress.result == null &&
-    progress.step === "completed" &&
-    progress.cdkIndex === 0 &&
-    progress.aliasIndex === 0
-  );
+  return progress.eventKind === "batch";
 }
 
 export function registrationProgressKey(

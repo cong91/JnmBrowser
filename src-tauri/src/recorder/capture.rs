@@ -72,9 +72,43 @@ pub async fn get_chromium_cdp_port(profile: &BrowserProfile) -> Result<u16, Stri
   ))
 }
 
+/// Rank a CDP target for recording. Higher wins.
+///
+/// Internal surfaces (`chrome://`, `devtools://`, `about:`) must never be
+/// selected: scripts cannot be injected into them, so the recorder would arm
+/// against a page that can never produce an event while the user's real tab
+/// goes unwatched.
+fn page_target_score(target: &serde_json::Value) -> u8 {
+  if target.get("type").and_then(|v| v.as_str()) != Some("page") {
+    return 0;
+  }
+  let url = target.get("url").and_then(|v| v.as_str()).unwrap_or("");
+  if url.starts_with("http://") || url.starts_with("https://") {
+    3
+  } else if url.starts_with("file://") {
+    2
+  } else if url.starts_with("chrome://")
+    || url.starts_with("devtools://")
+    || url.starts_with("about:")
+    || url.starts_with("chrome-extension://")
+  {
+    0
+  } else {
+    1
+  }
+}
+
+fn pick_page_target(targets: &[serde_json::Value]) -> Option<&serde_json::Value> {
+  targets
+    .iter()
+    .filter(|target| page_target_score(target) > 0)
+    .max_by_key(|target| page_target_score(target))
+}
+
 pub async fn get_page_ws_url(port: u16) -> Result<String, String> {
   let url = format!("http://127.0.0.1:{port}/json");
   let client = reqwest::Client::new();
+  let mut saw_only_internal = false;
   for attempt in 0..15 {
     if attempt > 0 {
       tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -86,16 +120,22 @@ pub async fn get_page_ws_url(port: u16) -> Result<String, String> {
       .await
     {
       if let Ok(targets) = resp.json::<Vec<serde_json::Value>>().await {
-        if let Some(ws_url) = targets
-          .iter()
-          .find(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+        if let Some(ws_url) = pick_page_target(&targets)
           .and_then(|t| t.get("webSocketDebuggerUrl"))
           .and_then(|v| v.as_str())
         {
           return Ok(ws_url.to_string());
         }
+        saw_only_internal = targets
+          .iter()
+          .any(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"));
       }
     }
+  }
+  if saw_only_internal {
+    return Err(
+      "Only internal browser pages are open (new tab / devtools). Open the site you want to record, then start recording.".to_string(),
+    );
   }
   Err("Failed to get CDP page WebSocket URL".to_string())
 }
@@ -119,6 +159,26 @@ pub async fn get_current_url_chromium(ws_url: &str) -> String {
       .to_string(),
     Err(_) => String::new(),
   }
+}
+
+/// Extract a readable message from a `Runtime.evaluate` result that threw.
+///
+/// Returns `None` when the evaluation completed normally.
+fn js_exception_text(result: &serde_json::Value) -> Option<String> {
+  let details = result.get("exceptionDetails")?;
+  let message = details
+    .get("exception")
+    .and_then(|e| e.get("description"))
+    .and_then(|v| v.as_str())
+    .or_else(|| {
+      details
+        .get("exception")
+        .and_then(|e| e.get("value"))
+        .and_then(|v| v.as_str())
+    })
+    .or_else(|| details.get("text").and_then(|v| v.as_str()))
+    .unwrap_or("unknown JS exception");
+  Some(message.chars().take(300).collect())
 }
 
 async fn send_cdp_oneshot(
@@ -147,6 +207,62 @@ async fn send_cdp_oneshot(
             return Err(format!("CDP error for {method}: {error}"));
           }
           return Ok(resp.get("result").cloned().unwrap_or(serde_json::json!({})));
+        }
+      }
+      Ok(Some(Ok(_))) => continue,
+      Ok(Some(Err(e))) => return Err(format!("WebSocket error: {e}")),
+      Ok(None) => return Err("WebSocket closed".to_string()),
+      Err(_) => return Err(format!("Timeout waiting for {method}")),
+    }
+  }
+}
+
+type ChromiumWs =
+  tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Send one CDP command and wait for its response.
+///
+/// Protocol notifications observed while waiting are buffered into
+/// `pending_events` so the caller can process them instead of dropping them.
+async fn send_chromium_cmd(
+  ws: &mut ChromiumWs,
+  cmd_id: &mut u64,
+  pending_events: &mut Vec<serde_json::Value>,
+  method: &str,
+  params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+  *cmd_id += 1;
+  let id = *cmd_id;
+  let cmd = serde_json::json!({ "id": id, "method": method, "params": params });
+  ws.send(Message::Text(cmd.to_string().into()))
+    .await
+    .map_err(|e| format!("Failed to send {method}: {e}"))?;
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+  loop {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+      return Err(format!("Timeout waiting for {method}"));
+    }
+    match tokio::time::timeout(remaining, ws.next()).await {
+      Ok(Some(Ok(Message::Text(text)))) => {
+        let resp: serde_json::Value = serde_json::from_str(text.as_str()).unwrap_or_default();
+        if resp.get("id") == Some(&serde_json::json!(id)) {
+          if let Some(error) = resp.get("error") {
+            return Err(format!("CDP error for {method}: {error}"));
+          }
+          let result = resp.get("result").cloned().unwrap_or(serde_json::json!({}));
+          // A JS throw inside Runtime.evaluate is NOT a CDP protocol error:
+          // the command succeeds and reports `exceptionDetails`. Ignoring it
+          // let the recorder arm while the injected script had installed
+          // nothing, producing a session that captured zero events with no
+          // surfaced error.
+          if let Some(detail) = js_exception_text(&result) {
+            return Err(format!("{method} raised a JS exception: {detail}"));
+          }
+          return Ok(result);
+        }
+        if resp.get("method").is_some() {
+          pending_events.push(resp);
         }
       }
       Ok(Some(Ok(_))) => continue,
@@ -187,48 +303,6 @@ pub async fn run_chromium_recorder(
   let mut cmd_id: u64 = 0;
   let mut pending_events: Vec<serde_json::Value> = Vec::new();
 
-  async fn send_cmd(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-      tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    cmd_id: &mut u64,
-    pending_events: &mut Vec<serde_json::Value>,
-    method: &str,
-    params: serde_json::Value,
-  ) -> Result<serde_json::Value, String> {
-    *cmd_id += 1;
-    let id = *cmd_id;
-    let cmd = serde_json::json!({ "id": id, "method": method, "params": params });
-    ws.send(Message::Text(cmd.to_string().into()))
-      .await
-      .map_err(|e| format!("Failed to send {method}: {e}"))?;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-      if remaining.is_zero() {
-        return Err(format!("Timeout waiting for {method}"));
-      }
-      match tokio::time::timeout(remaining, ws.next()).await {
-        Ok(Some(Ok(Message::Text(text)))) => {
-          let resp: serde_json::Value = serde_json::from_str(text.as_str()).unwrap_or_default();
-          if resp.get("id") == Some(&serde_json::json!(id)) {
-            if let Some(error) = resp.get("error") {
-              return Err(format!("CDP error for {method}: {error}"));
-            }
-            return Ok(resp.get("result").cloned().unwrap_or(serde_json::json!({})));
-          }
-          if resp.get("method").is_some() {
-            pending_events.push(resp);
-          }
-        }
-        Ok(Some(Ok(_))) => continue,
-        Ok(Some(Err(e))) => return Err(format!("WebSocket error: {e}")),
-        Ok(None) => return Err("WebSocket closed".to_string()),
-        Err(_) => return Err(format!("Timeout waiting for {method}")),
-      }
-    }
-  }
-
   let script = recorder_script();
   let setup = [
     ("Page.enable", serde_json::json!({})),
@@ -244,7 +318,7 @@ pub async fn run_chromium_recorder(
   ];
 
   for (method, params) in setup {
-    if let Err(e) = send_cmd(
+    if let Err(e) = send_chromium_cmd(
       &mut ws_stream,
       &mut cmd_id,
       &mut pending_events,
@@ -254,6 +328,37 @@ pub async fn run_chromium_recorder(
     .await
     {
       let msg = format!("Recorder setup failed ({method}) for {profile_id}: {e}");
+      set_last_error(&shared, msg.clone()).await;
+      notify(&mut ready_tx, Err(msg));
+      return;
+    }
+  }
+
+  // Confirm the injector is actually live in the page. Without this the task
+  // would report "armed" whenever the CDP commands succeeded, even though the
+  // page had no listeners attached.
+  match send_chromium_cmd(
+    &mut ws_stream,
+    &mut cmd_id,
+    &mut pending_events,
+    "Runtime.evaluate",
+    serde_json::json!({
+      "expression": RECORDER_PRESENCE_EXPRESSION,
+      "returnByValue": true
+    }),
+  )
+  .await
+  {
+    Ok(result) => {
+      if result.pointer("/result/value").and_then(|v| v.as_bool()) != Some(true) {
+        let msg = format!("Recorder script did not install in the page for profile {profile_id}");
+        set_last_error(&shared, msg.clone()).await;
+        notify(&mut ready_tx, Err(msg));
+        return;
+      }
+    }
+    Err(e) => {
+      let msg = format!("Recorder presence check failed for {profile_id}: {e}");
       set_last_error(&shared, msg.clone()).await;
       notify(&mut ready_tx, Err(msg));
       return;
@@ -289,10 +394,67 @@ pub async fn run_chromium_recorder(
           None => break,
         }
       }
+      _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+        // Console delivery is not guaranteed on every Chromium build/page, so
+        // also drain the in-page buffer the injector dual-writes into. Events
+        // are removed by the drain call itself, so this cannot double-count
+        // against the console path.
+        if let Err(e) = drain_chromium_page_buffer(
+          &mut ws_stream,
+          &mut cmd_id,
+          &mut pending_events,
+          &shared,
+        )
+        .await
+        {
+          log::debug!("Recorder: Chromium drain error for {profile_id}: {e}");
+        }
+        for event in pending_events.drain(..) {
+          handle_cdp_console_event(&shared, &event).await;
+        }
+      }
     }
   }
 
+  // Final drain so events produced just before stop are not lost.
+  if let Err(e) =
+    drain_chromium_page_buffer(&mut ws_stream, &mut cmd_id, &mut pending_events, &shared).await
+  {
+    log::debug!("Recorder: Chromium final drain failed for {profile_id}: {e}");
+  }
+
   log::info!("Recorder: Chromium capture stopped for profile {profile_id}");
+}
+
+/// Drain the in-page recorder buffer over CDP and push parsed events.
+async fn drain_chromium_page_buffer(
+  ws_stream: &mut ChromiumWs,
+  cmd_id: &mut u64,
+  pending_events: &mut Vec<serde_json::Value>,
+  shared: &Arc<AsyncMutex<crate::recorder::RecorderShared>>,
+) -> Result<usize, String> {
+  let result = send_chromium_cmd(
+    ws_stream,
+    cmd_id,
+    pending_events,
+    "Runtime.evaluate",
+    serde_json::json!({
+      "expression": RECORDER_DRAIN_EXPRESSION,
+      "returnByValue": true
+    }),
+  )
+  .await?;
+
+  let mut drained = 0usize;
+  if let Some(items) = result.pointer("/result/value").and_then(|v| v.as_array()) {
+    for item in items {
+      if let Some(event) = parse_tagged_console_message(item.as_str().unwrap_or("")) {
+        push_event(shared, event).await;
+        drained += 1;
+      }
+    }
+  }
+  Ok(drained)
 }
 
 async fn handle_cdp_console_event(
@@ -320,8 +482,21 @@ async fn handle_cdp_console_event(
   }
 }
 
-/// Expression that drains the in-page recorder buffer (Camoufox poll path).
-const CAMOUFOX_DRAIN_EXPRESSION: &str = r#"(function() {
+/// Expression that reports whether the injected recorder is live in the page.
+const RECORDER_PRESENCE_EXPRESSION: &str = r#"(function() {
+  try {
+    return !!window.__jnmbrowserRecorderInstalled
+      && typeof window.__jnmbrowserRecorderDrain === 'function';
+  } catch (_e) {
+    return false;
+  }
+})()"#;
+
+/// Expression that drains the in-page recorder buffer. Used by both kernels:
+/// Camoufox polls it because Playwright console events are unreliable here, and
+/// Chromium polls it so a page that suppresses or drops `console` reporting
+/// still yields events.
+const RECORDER_DRAIN_EXPRESSION: &str = r#"(function() {
   try {
     if (typeof window.__jnmbrowserRecorderDrain === 'function') {
       return window.__jnmbrowserRecorderDrain();
@@ -407,7 +582,7 @@ async fn drain_camoufox_page_buffer(
   shared: &Arc<AsyncMutex<crate::recorder::RecorderShared>>,
 ) -> Result<usize, String> {
   let value = page
-    .eval::<serde_json::Value>(CAMOUFOX_DRAIN_EXPRESSION)
+    .eval::<serde_json::Value>(RECORDER_DRAIN_EXPRESSION)
     .await
     .map_err(|e| format!("Failed to drain Camoufox recorder buffer: {e}"))?;
 
@@ -733,8 +908,71 @@ mod tests {
   }
 
   #[test]
+  fn test_page_target_prefers_real_site_over_internal_pages() {
+    let targets = vec![
+      serde_json::json!({
+        "type": "page",
+        "url": "chrome://new-tab-page-third-party/",
+        "webSocketDebuggerUrl": "ws://internal"
+      }),
+      serde_json::json!({
+        "type": "page",
+        "url": "https://chatgpt.com/",
+        "webSocketDebuggerUrl": "ws://real"
+      }),
+    ];
+
+    let picked = pick_page_target(&targets).expect("a target");
+    assert_eq!(
+      picked.get("webSocketDebuggerUrl").and_then(|v| v.as_str()),
+      Some("ws://real")
+    );
+  }
+
+  #[test]
+  fn test_internal_and_non_page_targets_are_rejected() {
+    for target in [
+      serde_json::json!({ "type": "page", "url": "chrome://newtab/" }),
+      serde_json::json!({ "type": "page", "url": "devtools://devtools/bundled/x.html" }),
+      serde_json::json!({ "type": "page", "url": "about:blank" }),
+      serde_json::json!({ "type": "service_worker", "url": "https://chatgpt.com/sw.js" }),
+    ] {
+      assert_eq!(page_target_score(&target), 0, "must reject {target}");
+    }
+    assert!(pick_page_target(&[serde_json::json!({
+      "type": "page",
+      "url": "chrome://newtab/"
+    })])
+    .is_none());
+  }
+
+  #[test]
+  fn test_js_exception_is_reported_not_swallowed() {
+    let threw = serde_json::json!({
+      "result": { "type": "object" },
+      "exceptionDetails": {
+        "text": "Uncaught",
+        "exception": { "description": "TypeError: x is not a function" }
+      }
+    });
+    assert_eq!(
+      js_exception_text(&threw).as_deref(),
+      Some("TypeError: x is not a function")
+    );
+
+    let ok = serde_json::json!({ "result": { "type": "boolean", "value": true } });
+    assert!(js_exception_text(&ok).is_none());
+  }
+
+  #[test]
+  fn test_presence_expression_checks_installed_guard_and_drain() {
+    assert!(RECORDER_PRESENCE_EXPRESSION.contains("__jnmbrowserRecorderInstalled"));
+    assert!(RECORDER_PRESENCE_EXPRESSION.contains("__jnmbrowserRecorderDrain"));
+  }
+
+  #[test]
   fn test_drain_expression_targets_buffer() {
-    assert!(CAMOUFOX_DRAIN_EXPRESSION.contains("__jnmbrowserRecorderDrain"));
-    assert!(CAMOUFOX_DRAIN_EXPRESSION.contains("__jnmbrowserRecorderBuffer"));
+    assert!(RECORDER_DRAIN_EXPRESSION.contains("__jnmbrowserRecorderDrain"));
+    assert!(RECORDER_DRAIN_EXPRESSION.contains("__jnmbrowserRecorderBuffer"));
   }
 }
