@@ -1,7 +1,7 @@
 //! One-shot binary to download and install the latest fingerprint-chromium.
 //!
 //! ```text
-//! cargo run --manifest-path src-tauri/Cargo.toml --bin download-chromium
+//! cargo run --manifest-path src-tauri/Cargo.toml --features download-chromium --bin download-chromium
 //! ```
 
 use std::fs;

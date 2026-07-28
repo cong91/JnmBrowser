@@ -2,7 +2,7 @@
 //!
 //! Usage (from repo root):
 //! ```text
-//! cargo run --manifest-path src-tauri/Cargo.toml --bin twofa-backfill-live -- \
+//! cargo run --manifest-path src-tauri/Cargo.toml --features twofa-backfill-live --bin twofa-backfill-live -- \
 //!   --account-key ACCOUNT_ID --browser chromium --network none --mode canary
 //! ```
 

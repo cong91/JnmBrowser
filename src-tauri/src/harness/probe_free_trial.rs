@@ -1,7 +1,7 @@
 //! Probe ChatGPT free-trial related endpoints from an authenticated browser page.
 //!
 //! ```text
-//! cargo run --manifest-path src-tauri/Cargo.toml --bin probe-free-trial -- \
+//! cargo run --manifest-path src-tauri/Cargo.toml --features probe-free-trial --bin probe-free-trial -- \
 //!   --profile-id 2d31c07b-df06-4630-9081-433b16baa26c \
 //!   --token-file "C:/Users/PC/AppData/Local/JnmBrowser/registered_accounts/02051674-b3c3-4dd7-9dab-66371d96241f.json"
 //! ```

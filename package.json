@@ -18,6 +18,8 @@
     "lint:rust": "cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings -D clippy::all && cargo fmt --all",
     "lint:spell": "typos .",
     "tauri": "tauri",
+    "tauri:build:win": "tauri build --bundles nsis",
+    "tauri:dev": "tauri dev",
     "shadcn:add": "pnpm dlx shadcn@latest add",
     "prepare": "husky && husky install",
     "format:rust": "cd src-tauri && cargo clippy --fix --allow-dirty --all-targets --all-features -- -D warnings -D clippy::all && cargo fmt --all",

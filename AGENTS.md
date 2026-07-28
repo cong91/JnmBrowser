@@ -3,7 +3,7 @@
 **JnmBrowser** (a.k.a. DonutBrowser) — an open-source anti-detect browser built with Tauri v2 + Next.js.
 - Tauri binary: `JnmBrowser`, Rust lib: `donutbrowser_lib`
 - Product identifier: `com.jnmbrowser`
-- Current version: 0.22.10
+- Current version: 0.22.11
 - License: AGPL-3.0
 - Package manager: **pnpm** (Node 23 via `.nvmrc` / `.node-version`)
 
@@ -41,16 +41,18 @@ The action recorder lives at `src-tauri/src/recorder/`; its frontend integration
 
 ## Architecture boundaries
 
-- **Frontend (`src/`)** talks to Rust only via Tauri `invoke` / `listen`. Do not put browser process control or profile file I/O in React.
+- **Frontend (`src/`)** keeps browser process control and profile file I/O in Rust. Cross the backend boundary through Tauri `invoke` / `listen` / `emit` or an explicitly permitted Tauri plugin API; do not reimplement backend ownership in React.
 - **Rust commands** are registered in `src-tauri/src/lib.rs`. New user-facing backend APIs need a command + frontend call site; dead commands fail `pnpm check-unused-commands`.
-- **Auxiliary binaries (`src-tauri/src/bin/`) are test/development harnesses only.** Keep them as thin adapters over reusable Rust modules; never leave feature logic implemented exclusively in a binary. If a workflow is first developed in a binary, move its logic into shared library code, wire the Tauri application to the same implementation, and verify both entry points before considering the feature complete.
+- **Auxiliary binaries** are split by role. Production `donut-proxy` / `donut-daemon` sidecars live under `src-tauri/src/sidecar/`; feature-gated development/test runners live under `src-tauri/src/harness/`. Harnesses must remain thin adapters over reusable Rust modules; never leave feature logic implemented exclusively in a harness.
 - **Browser kernels**: Chromium path is primarily `chromium_manager.rs`; Camoufox is `camoufox_manager.rs`. Legacy “Wayfern” naming still appears in some vars/API cache files — treat carefully when renaming.
-- **Proxy**: local `donut-proxy` binary is required for proxy features; copy via `pnpm copy-proxy-binary` before bare `cargo` runs.
+- **Sidecars**: `pnpm copy-proxy-binary` stages both `donut-proxy` and `donut-daemon` for Tauri dev/build and proxy-dependent Cargo flows. On Windows it may stop running app/sidecar processes to release file locks, so close JnmBrowser first.
 - **donut-sync**: separate NestJS app with its own `package.json` / Biome / tsc. Lint/typecheck scripts cover both trees.
 - **Sensitive areas — read first**:
   - Action recorder: `src-tauri/src/recorder/`, frontend hooks like `use-recorder-session.ts`
   - Account automation: `src-tauri/src/auto_service/`, `docs/auto-registration.md`, `docs/research/codex-login-flow-research.md`
-  - Sync: `src-tauri/src/sync/`, `docs/self-hosting-donut-sync.md`
+  - Sync and stored secrets: `src-tauri/src/sync/encryption.rs`, `src-tauri/build.rs`, `docs/self-hosting-donut-sync.md`
+  - VPN secrets and worker lifecycle: `src-tauri/src/vpn/storage.rs`, `src-tauri/src/vpn_worker_runner.rs`
+  - Sidecar packaging: `src-tauri/src/sidecar/`, `scripts/tauri-before-build.mjs`, `scripts/tauri-before-bundle.mjs`
   - MCP: `src-tauri/src/mcp_server.rs` (+ root MCP plan docs when working from a plan)
 
 ## Build and Dev Commands
@@ -77,6 +79,51 @@ The action recorder lives at `src-tauri/src/recorder/`; its frontend integration
 - JS linting uses **Biome 2.x** (not ESLint/Prettier) — `biome.json`
 - Rust linting: `cargo clippy --all-targets --all-features -- -D warnings -D clippy::all`
 - Spellcheck: [typos](https://github.com/crate-ci/typos); allowlist in `_typos.toml` (locale JSON + camoufox data excluded)
+
+## Core Coding Contract
+
+- Read repository instructions, relevant docs, configs, tests, and nearby code before editing.
+- Prefer established patterns and the smallest correct diff; preserve public APIs, data shapes, migrations, and external side effects unless explicitly approved.
+- Do not add dependencies, frameworks, broad refactors, or generated churn unless the task requires them.
+- Run the repository's actual formatter, linter, typecheck, tests, and build checks relevant to the change.
+- Self-review the full diff, including untracked files, and remove debug leftovers before completion.
+- Report skipped or failed verification with the exact reason; never claim unverified success.
+
+## Coding Standards (apply strictly)
+
+- **Source:** LLM Wiki cross-language cookbook at `C:/Users/mrc/Documents/projects/agent-wiki`; reopen it through the `obsidian` skill when deeper guidance is needed.
+- One file is one responsibility. If a file name needs "and", "or", or a slash to describe it honestly, split by concern; keep types, behavior, and tests together when they serve the same concern.
+- Any one of these six signals requires a split proposal: multi-role identity; section-header navigation across unrelated top-level sections; unrelated code piling onto the primary concern; imports spanning unrelated domains; repeated unrelated edits in different sections; or a god class/function/file handling multiple input domains or output shapes.
+- Split at the natural responsibility boundary, not a mechanical line count. Do not create catch-all `utils`, `helpers`, `common`, `misc`, or `shared` modules, grab-bag exports, or giant regression files disconnected from source boundaries.
+- Repository conventions override generic guidance; TypeScript and Rust cookbooks may strengthen these rules but never weaken them.
+- Before finalizing, scan every touched file for the six signals. If one fires, surface a named split proposal in the same turn and pause for the user to decide; do not silently refactor or silently leave the violation.
+- If the user declines, record the rationale as a short file-head `ai-note`. If approved, split in the same pass when practical, run the relevant checks, and report the new boundaries.
+- TypeScript boundaries must keep public types explicit, validate runtime-unsafe inputs, and avoid unjustified `any`, assertion chains, and non-null assertions.
+- Rust APIs must make ownership and mutation explicit, encode invariants in types where practical, isolate and justify `unsafe`, and avoid `unwrap`/`expect` as error design in library paths.
+
+## Selected Guideline Packs
+
+- **Strong matches:** repo-local `.claude/skills/jnm-*`; local TypeScript and Rust deep cookbooks; `react-best-practices` for React/Next.js performance work; `security-and-hardening` for auth, secrets, API, filesystem, and external-input work.
+- **Rule translation:** use Biome rather than ESLint/Prettier; keep Tauri process and file operations in Rust; validate network and credential boundaries; avoid broad barrels and abstractions that obscure ownership.
+- **Source notes:** `queries/coding-standards-cross-language-cookbook.md`, `queries/coding-standards-programming-languages-cookbook.md`, `queries/coding-standards-programming-languages-typescript-cookbook.md`, and `queries/coding-standards-programming-languages-rust-cookbook.md` in the wiki vault above.
+
+## Code Example
+
+Follow the existing Tauri listener lifecycle from `src/hooks/use-extension-events.ts`:
+
+```ts
+let unlisten: (() => void) | undefined;
+
+const setup = async () => {
+  await loadAll();
+  unlisten = await listen("extensions-changed", () => {
+    void loadAll();
+  });
+};
+
+void setup();
+return () => unlisten?.();
+```
 
 ## Code Quality
 
@@ -115,7 +162,7 @@ The action recorder lives at `src-tauri/src/recorder/`; its frontend integration
 
 ## Rust / test gotchas
 
-- **Proxy binary**: `prebuild` / `pretauri:dev` / `precargo` call `copy-proxy-binary.mjs`. Bare `cargo` needs `pnpm copy-proxy-binary` first.
+- **Sidecar prerequisite**: `prebuild` / `pretauri:dev` / `precargo` call `copy-proxy-binary.mjs`. Run `pnpm copy-proxy-binary` before Tauri dev/build and proxy-dependent bare Cargo flows; close JnmBrowser first on Windows because staging may stop processes to release locks.
 - **Tauri v2**: schema `https://schema.tauri.app/config/2`. Do not use Tauri v1 APIs.
 - **Dev port**: frontend is `12341`, not 3000. Tauri `devUrl` matches this.
 - **Data dir isolation**: prefer `JNMBROWSER_DATA_DIR` (fallback `DONUTBROWSER_*`) for process-level isolation. Lib-only `app_dirs::set_test_data_dir` is `#[cfg(test)]` on the **lib** crate — **integration tests** in `src-tauri/tests/` cannot call it; use the env var + `serial_test::serial` (env is process-global).

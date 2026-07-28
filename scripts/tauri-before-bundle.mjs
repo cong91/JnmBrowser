@@ -1,13 +1,9 @@
 // Work around Tauri CLI 2.10.x NSIS bundler bug where it incorrectly
-// resolves the .zcode directory (project-level ZCode agent data) as a
-// binary file named .zcode.exe in the target/release directory.
+// resolves the project-level `.zcode` directory as `target/release/.zcode.exe`
+// and fails `metadata()` if the file is absent.
 //
-// The bundler tries `std::fs::metadata("target/release/.zcode.exe")` and
-// fails with os error 2 if the file is absent.
-//
-// Fix: create a tiny valid PE placeholder so the bundler can stat it.
-// This file is NOT included in the final installer — it only satisfies
-// the bundler's file-existence check.
+// This placeholder is not included in the installer. Development harnesses
+// live outside src/bin so Tauri does not discover or package them.
 
 import { copyFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";

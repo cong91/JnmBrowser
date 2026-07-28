@@ -5347,80 +5347,79 @@ impl RegistrationEngine {
     );
     // Two-step flow: ChatGPT sometimes shows name-only first, then birth step.
     // Fill name, click Continue, wait, re-detect. Then fall through to normal birth fill.
-	    let (age_str, birth_str, month_str, day_str, year_str, mut birth_mode) =
-      if birth_mode.is_none()
-        && age_sel.is_none()
-        && birth_sel.is_none()
-        && month_sel.is_none()
-        && (first_sel.is_some() || full_sel.is_some())
-      {
-        self.log("UI About You: name-only step — filling name then waiting for birth step");
-        self.human_pause(400, 800).await;
-        if let (Some(first_sel), Some(last_sel)) = (first_sel, last_sel) {
-          self
-            .fill_about_you_field(session, first_sel, first_name, "first name")
-            .await?;
-          self.human_pause(300, 600).await;
-          self
-            .fill_about_you_field(session, last_sel, last_name, "last name")
-            .await?;
-        } else if let Some(full_sel) = full_sel {
-          let full_name = format!("{first_name} {last_name}");
-          self
-            .fill_about_you_field(session, full_sel, &full_name, "full name")
-            .await?;
+    let (age_str, birth_str, month_str, day_str, year_str, mut birth_mode) = if birth_mode.is_none()
+      && age_sel.is_none()
+      && birth_sel.is_none()
+      && month_sel.is_none()
+      && (first_sel.is_some() || full_sel.is_some())
+    {
+      self.log("UI About You: name-only step — filling name then waiting for birth step");
+      self.human_pause(400, 800).await;
+      if let (Some(first_sel), Some(last_sel)) = (first_sel, last_sel) {
+        self
+          .fill_about_you_field(session, first_sel, first_name, "first name")
+          .await?;
+        self.human_pause(300, 600).await;
+        self
+          .fill_about_you_field(session, last_sel, last_name, "last name")
+          .await?;
+      } else if let Some(full_sel) = full_sel {
+        let full_name = format!("{first_name} {last_name}");
+        self
+          .fill_about_you_field(session, full_sel, &full_name, "full name")
+          .await?;
+      }
+      self.human_pause(300, 700).await;
+      let mut clicked = false;
+      for label in &["Continue", "Next", "Submit"] {
+        if self.click_by_text(session, label, "button").await.is_ok() {
+          clicked = true;
+          break;
         }
-        self.human_pause(300, 700).await;
-        let mut clicked = false;
-        for label in &["Continue", "Next", "Submit"] {
-          if self.click_by_text(session, label, "button").await.is_ok() {
-            clicked = true;
-            break;
-          }
-        }
-        if !clicked {
-          let _ = self
-            .click_selector(
-              session,
-              r#"button[type="submit"]"#,
-              "about-you step1 submit",
-            )
-            .await;
-        }
-        self.human_pause(1800, 2500).await;
-        // Re-detect form — birth fields should now be present. Convert to
-        // owned Strings so they outlive the temporary serde_json::Value.
-        let redetect: serde_json::Value = session
-          .evaluate(detect_js, false)
-          .await
-          .map(|v| v.get("value").cloned().unwrap_or_default())
-          .unwrap_or_default();
-        let a = redetect["ageSel"].as_str().map(String::from);
-        let b = redetect["birthSel"].as_str().map(String::from);
-        let m = redetect["monthSel"].as_str().map(String::from);
-        let d = redetect["daySel"].as_str().map(String::from);
-        let y = redetect["yearSel"].as_str().map(String::from);
-        let mode = resolve_about_you_birth_mode(
-          a.is_some(),
-          b.is_some(),
-          m.is_some() && d.is_some() && y.is_some(),
-        );
-        if mode.is_none() {
-          snapshot_about_you_page(session, "detect-birth-missing-after-name-step").await;
-          return Err("birth fields not found after name step on About You form".into());
-        }
-        self.log("UI About You: birth step detected after name fill");
-        (a, b, m, d, y, mode)
-      } else {
-        (
-          age_sel.map(String::from),
-          birth_sel.map(String::from),
-          month_sel.map(String::from),
-          day_sel.map(String::from),
-          year_sel.map(String::from),
-          birth_mode,
-        )
-      };
+      }
+      if !clicked {
+        let _ = self
+          .click_selector(
+            session,
+            r#"button[type="submit"]"#,
+            "about-you step1 submit",
+          )
+          .await;
+      }
+      self.human_pause(1800, 2500).await;
+      // Re-detect form — birth fields should now be present. Convert to
+      // owned Strings so they outlive the temporary serde_json::Value.
+      let redetect: serde_json::Value = session
+        .evaluate(detect_js, false)
+        .await
+        .map(|v| v.get("value").cloned().unwrap_or_default())
+        .unwrap_or_default();
+      let a = redetect["ageSel"].as_str().map(String::from);
+      let b = redetect["birthSel"].as_str().map(String::from);
+      let m = redetect["monthSel"].as_str().map(String::from);
+      let d = redetect["daySel"].as_str().map(String::from);
+      let y = redetect["yearSel"].as_str().map(String::from);
+      let mode = resolve_about_you_birth_mode(
+        a.is_some(),
+        b.is_some(),
+        m.is_some() && d.is_some() && y.is_some(),
+      );
+      if mode.is_none() {
+        snapshot_about_you_page(session, "detect-birth-missing-after-name-step").await;
+        return Err("birth fields not found after name step on About You form".into());
+      }
+      self.log("UI About You: birth step detected after name fill");
+      (a, b, m, d, y, mode)
+    } else {
+      (
+        age_sel.map(String::from),
+        birth_sel.map(String::from),
+        month_sel.map(String::from),
+        day_sel.map(String::from),
+        year_sel.map(String::from),
+        birth_mode,
+      )
+    };
     // Fallback: if still no birth fields, treat any visible input as age
     if birth_mode.is_none() && any_input_sel.is_some() {
       birth_mode = Some(AboutYouBirthMode::Age);
