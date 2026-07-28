@@ -37,9 +37,8 @@ fn main() {
   if std::env::var("JNMBROWSER_DATA_DIR").is_err()
     && std::env::var("DONUTBROWSER_DATA_DIR").is_err()
   {
-    if let Some(local_app_data) = std::env::var("LOCALAPPDATA").ok() {
-      let default_data =
-        std::path::PathBuf::from(local_app_data).join("JnmBrowser");
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+      let default_data = std::path::PathBuf::from(local_app_data).join("JnmBrowser");
       if default_data.exists() {
         std::env::set_var("JNMBROWSER_DATA_DIR", &default_data);
         eprintln!("[setup] JNMBROWSER_DATA_DIR={}", default_data.display());
@@ -61,9 +60,12 @@ fn main() {
 
   // Replace spaces between quoted args with newlines for multi-account support
   let credentials_text = credentials_text.replace(" |", "\n").replace("| ", "|");
-  
+
   eprintln!("=== Account Checker Live Test ===");
-  let account_count = credentials_text.lines().filter(|line| !line.trim().is_empty()).count();
+  let account_count = credentials_text
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .count();
   eprintln!("Checking {account_count} account(s)...");
   eprintln!();
 

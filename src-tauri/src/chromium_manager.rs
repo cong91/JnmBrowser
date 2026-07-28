@@ -1709,7 +1709,7 @@ mod tests {
     let profile = test_profile();
     let raw = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
     let normalized = ChromiumManager::normalize_user_agent_for_runtime(raw, &profile);
-    assert!(normalized.contains("Chrome/142.0.0.0"));
+    assert!(normalized.contains("Chrome/148.0.0.0"));
     assert!(!normalized.contains("Chrome/146.0.0.0"));
   }
 
@@ -1728,7 +1728,7 @@ mod tests {
 
     assert_eq!(
       params["userAgent"],
-      "Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36"
+      "Mozilla/5.0 Chrome/148.0.0.0 Safari/537.36"
     );
     assert_eq!(params["acceptLanguage"], "zh-HK,zh");
     assert_eq!(params["platform"], "MacIntel");

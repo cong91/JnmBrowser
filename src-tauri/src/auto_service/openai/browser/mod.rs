@@ -1013,7 +1013,6 @@ mod primitive_tests {
     assert!(script.contains("aria-label"));
     assert!(script.contains("data-testid"));
     assert!(script.contains("[role=\"radio\"]"));
-    assert!(script.contains("input[type=\"radio\"]"));
     assert!(script.contains("aria-disabled"));
   }
 

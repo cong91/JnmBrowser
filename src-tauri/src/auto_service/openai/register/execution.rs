@@ -190,7 +190,7 @@ mod tests {
   #[test]
   fn shared_preparation_rejects_unknown_browser() {
     let mut config = base_config();
-    config.browser_type = "firefox".into();
+    config.browser_type = "edge".into();
 
     assert!(normalize_and_validate_registration(&mut config)
       .unwrap_err()

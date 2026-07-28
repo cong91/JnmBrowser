@@ -967,9 +967,9 @@ mod tests {
     let empty_result = BrowserType::from_str("");
     assert!(empty_result.is_err(), "Empty string should return error");
 
-    assert!(
-      BrowserType::from_str("firefox").is_err(),
-      "Removed browser types should return error"
+    assert_eq!(
+      BrowserType::from_str("firefox").expect("firefox should be valid"),
+      BrowserType::Firefox
     );
     assert!(
       BrowserType::from_str("wayfern").is_err(),

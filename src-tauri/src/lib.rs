@@ -38,6 +38,7 @@ mod ip_utils;
 mod platform_browser;
 pub mod profile;
 mod profile_importer;
+pub mod profile_runtime;
 mod proxy_manager;
 pub mod proxy_runner;
 pub mod proxy_server;
