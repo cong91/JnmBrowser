@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  AutomationDataMode,
+  AutomationFingerprintMode,
+} from "@/components/automation-profile-policy";
 import {
   isTerminalRegistrationProgress,
   upsertRegistrationProgress,
@@ -29,6 +33,8 @@ export type { EmailProvider };
 export interface RegistrationConfig {
   cdks: string[];
   profileId?: string;
+  dataMode: AutomationDataMode;
+  fingerprintMode: AutomationFingerprintMode;
   proxyId?: string;
   /** WireGuard VPN config id from Proxies & VPNs (preferred over Nord CLI) */
   vpnId?: string;

@@ -5,6 +5,12 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuLogIn, LuRocket } from "react-icons/lu";
 import { toast } from "sonner";
+import {
+  type AutomationProfilePolicy,
+  automationProfilePolicyPayload,
+  DEFAULT_AUTOMATION_PROFILE_POLICY,
+} from "@/components/automation-profile-policy";
+import { AutomationProfilePolicyFields } from "@/components/automation-profile-policy-fields";
 import { LoginAccountsTable } from "@/components/login-accounts-table";
 import {
   loginProgressLiveRegion,
@@ -64,6 +70,9 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
   const [vpnId, setVpnId] = useState("");
   const [rotateEveryN, setRotateEveryN] = useState(1);
   const [browserType, setBrowserType] = useState("chromium");
+  const [profilePolicy, setProfilePolicy] = useState<AutomationProfilePolicy>({
+    ...DEFAULT_AUTOMATION_PROFILE_POLICY,
+  });
   const [maxRetries, setMaxRetries] = useState(3);
   const [headless, setHeadless] = useState(false);
   // none | proxy | vpn (inventory WireGuard / Nord conf). Prefer VPN over Nord CLI.
@@ -325,6 +334,7 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       const taskId = await startLogin({
         credentialsText,
         credentials,
+        ...automationProfilePolicyPayload(profilePolicy),
         browserType: browserType as "chromium" | "camoufox",
         maxRetries,
         headless,
@@ -348,8 +358,8 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       });
       setActiveTaskId(taskId);
       setActiveTab("progress");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+    } catch {
+      toast.error(t("registration.twoFactorBackfill.backendError"));
     }
   };
 
@@ -358,8 +368,8 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
     try {
       await cancelLogin(activeTaskId);
       toast.success(t("common.buttons.cancel"));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+    } catch {
+      toast.error(t("registration.twoFactorBackfill.backendError"));
     }
   };
 
@@ -432,6 +442,7 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       const taskId = await startLogin({
         credentialsText: text,
         credentials,
+        ...automationProfilePolicyPayload(profilePolicy),
         browserType: browserType as "chromium" | "camoufox",
         maxRetries,
         headless,
@@ -455,8 +466,8 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       setActiveTaskId(taskId);
       setActiveTab("progress");
       toast.success(t("autoLogin.retryStarted", { count: credentials.length }));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+    } catch {
+      toast.error(t("registration.twoFactorBackfill.backendError"));
     }
   };
 
@@ -540,6 +551,15 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
                   />
                 </div>
               </div>
+
+              <AutomationProfilePolicyFields
+                idPrefix="auto-login"
+                browserType={browserType}
+                value={profilePolicy}
+                onChange={setProfilePolicy}
+                disabled={loading || Boolean(activeTaskId)}
+                active={open}
+              />
 
               <div className="space-y-2">
                 <Label>{t("registration.networkMode")}</Label>

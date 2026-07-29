@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  AutomationDataMode,
+  AutomationFingerprintMode,
+} from "@/components/automation-profile-policy";
 import {
   type BackfillProgressState,
   isTerminalBackfillEvent,
@@ -57,6 +61,9 @@ export interface TwoFactorBackfillPreviewRequest {
   selectedAccountKeys: string[];
   allowFreeTrialNo: boolean;
   acknowledgeLegacyAccess: boolean;
+  profileId?: string;
+  dataMode: AutomationDataMode;
+  fingerprintMode: AutomationFingerprintMode;
   browser: BackfillBrowser;
   network: BackfillNetworkConfig;
 }

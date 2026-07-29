@@ -4,7 +4,12 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuCheck, LuCircle, LuX } from "react-icons/lu";
 import { toast } from "sonner";
-
+import {
+  type AutomationProfilePolicy,
+  accountCheckerProfilePolicyPayload,
+  DEFAULT_AUTOMATION_PROFILE_POLICY,
+} from "@/components/automation-profile-policy";
+import { AutomationProfilePolicyFields } from "@/components/automation-profile-policy-fields";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,9 +17,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useAccountCheckerEvents } from "@/hooks/use-account-checker-events";
+import { useVpnEvents } from "@/hooks/use-vpn-events";
 
 interface Props {
   open: boolean;
@@ -34,8 +47,13 @@ export function AccountCheckerDialog({ open, onOpenChange }: Props) {
     exportDeactivated,
     deleteResult,
   } = useAccountCheckerEvents();
+  const { vpnConfigs, isLoading: isLoadingVpns } = useVpnEvents();
 
   const [credentialsText, setCredentialsText] = useState("");
+  const [vpnId, setVpnId] = useState("");
+  const [profilePolicy, setProfilePolicy] = useState<AutomationProfilePolicy>({
+    ...DEFAULT_AUTOMATION_PROFILE_POLICY,
+  });
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
@@ -54,7 +72,13 @@ export function AccountCheckerDialog({ open, onOpenChange }: Props) {
       return;
     }
     setRunning(true);
-    const taskId = await startCheck(credentialsText);
+    const taskId = await startCheck({
+      credentialsText,
+      ...accountCheckerProfilePolicyPayload(profilePolicy),
+      vpnId: vpnId || undefined,
+      browserType: "chromium",
+      headless: false,
+    });
     if (!taskId) {
       toast.error(t("accountChecker.startFailed"));
       setRunning(false);
@@ -145,6 +169,49 @@ export function AccountCheckerDialog({ open, onOpenChange }: Props) {
             <div className="text-xs text-muted-foreground">
               {t("accountChecker.inputCount", { count: credentialCount })}
             </div>
+            <AutomationProfilePolicyFields
+              idPrefix="account-checker"
+              browserType="chromium"
+              value={profilePolicy}
+              onChange={setProfilePolicy}
+              disabled={running}
+              active={open}
+            />
+            <div className="space-y-2">
+              <label
+                htmlFor="account-checker-vpn"
+                className="text-sm font-medium"
+              >
+                {t("registration.vpn")}
+              </label>
+              <Select
+                value={vpnId || "__rotating-vpn__"}
+                onValueChange={(value) =>
+                  setVpnId(value === "__rotating-vpn__" ? "" : value)
+                }
+                disabled={running || isLoadingVpns}
+              >
+                <SelectTrigger id="account-checker-vpn">
+                  <SelectValue
+                    placeholder={
+                      isLoadingVpns
+                        ? t("registration.vpnLoading")
+                        : t("registration.vpnPlaceholder")
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__rotating-vpn__">
+                    {t("common.labels.default")}
+                  </SelectItem>
+                  {vpnConfigs.map((vpn) => (
+                    <SelectItem key={vpn.id} value={vpn.id}>
+                      {vpn.name} ({vpn.vpn_type})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="flex gap-2">
               <Button
                 onClick={handleStart}
@@ -234,6 +301,8 @@ function ResultList({
   emptyText: string;
   onDelete: (email: string) => void;
 }) {
+  const { t } = useTranslation();
+
   if (results.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 py-8 text-muted-foreground">
@@ -261,7 +330,7 @@ function ResultList({
             onClick={() => {
               onDelete(r.email);
             }}
-            aria-label="Delete"
+            aria-label={t("common.buttons.delete")}
           >
             <LuX className="h-4 w-4" />
           </Button>

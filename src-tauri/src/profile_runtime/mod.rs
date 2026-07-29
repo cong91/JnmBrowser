@@ -10,3 +10,8 @@ pub mod policy;
 pub use guard::LeaseCleanupGuard;
 pub use lease::{LeaseError, LeaseRegistry, RuntimeCleanupState, RuntimeLease};
 pub use policy::{DataMode, FingerprintMode, LaunchPolicy};
+
+#[tauri::command]
+pub fn list_automation_leased_profile_ids() -> Vec<String> {
+  LeaseRegistry::global().active_source_profile_ids()
+}

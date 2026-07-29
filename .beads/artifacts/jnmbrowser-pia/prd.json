@@ -130,7 +130,7 @@
         "Manually verify profile list refresh, stale-profile rejection, translated validation/error states, keyboard access, and incompatible concurrency behavior.",
         "Run pnpm check-unused-commands."
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": [
           "Account Checker profile reuse vertical slice",

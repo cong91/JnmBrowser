@@ -10,6 +10,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuCheck, LuX } from "react-icons/lu";
 import {
+  type AutomationProfilePolicy,
+  automationProfilePolicyPayload,
+  DEFAULT_AUTOMATION_PROFILE_POLICY,
+} from "@/components/automation-profile-policy";
+import { AutomationProfilePolicyFields } from "@/components/automation-profile-policy-fields";
+import {
   backfillReasonCode,
   summarizeBackfillPreview,
 } from "@/components/two-factor-backfill-selection";
@@ -255,6 +261,9 @@ export function TwoFactorBackfillDialog({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [mode, setMode] = useState<BackfillMode>("canary");
   const [browser, setBrowser] = useState<BackfillBrowser>("chromium");
+  const [profilePolicy, setProfilePolicy] = useState<AutomationProfilePolicy>({
+    ...DEFAULT_AUTOMATION_PROFILE_POLICY,
+  });
   const [networkMode, setNetworkMode] = useState<NetworkMode>("none");
   const [proxyId, setProxyId] = useState("");
   const [vpnId, setVpnId] = useState("");
@@ -292,6 +301,7 @@ export function TwoFactorBackfillDialog({
           selectedAccountKeys,
           allowFreeTrialNo: allowFreeTrial,
           acknowledgeLegacyAccess: acknowledgeLegacy,
+          ...automationProfilePolicyPayload(profilePolicy),
           browser,
           network: networkConfig,
         });
@@ -316,7 +326,7 @@ export function TwoFactorBackfillDialog({
         }
       }
     },
-    [browser, networkConfig, preview, selectedAccountKeys],
+    [browser, networkConfig, preview, profilePolicy, selectedAccountKeys],
   );
 
   useEffect(() => {
@@ -388,6 +398,7 @@ export function TwoFactorBackfillDialog({
         selectedAccountKeys,
         allowFreeTrialNo,
         acknowledgeLegacyAccess,
+        ...automationProfilePolicyPayload(profilePolicy),
         browser,
         network: networkConfig,
         mode,
@@ -477,6 +488,17 @@ export function TwoFactorBackfillDialog({
                     { value: "chromium", label: t("browser.chromium") },
                     { value: "camoufox", label: t("browser.camoufox") },
                   ]}
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <AutomationProfilePolicyFields
+                  idPrefix="twofa-backfill"
+                  browserType={browser}
+                  value={profilePolicy}
+                  onChange={setProfilePolicy}
+                  disabled={running}
+                  active={open}
                 />
               </div>
 

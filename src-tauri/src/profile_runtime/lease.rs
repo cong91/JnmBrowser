@@ -244,6 +244,17 @@ impl LeaseRegistry {
     by_source.contains_key(source_profile_id.trim())
   }
 
+  /// Snapshot leased source profile ids for read-only UI availability state.
+  pub fn active_source_profile_ids(&self) -> Vec<String> {
+    let by_source = self
+      .by_source
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut profile_ids = by_source.keys().cloned().collect::<Vec<_>>();
+    profile_ids.sort();
+    profile_ids
+  }
+
   /// Active holder lease id for a source profile, if any.
   pub fn holder_lease_id(&self, source_profile_id: &str) -> Option<String> {
     let by_source = self
@@ -356,6 +367,26 @@ mod tests {
     let b = registry.try_acquire("src-b").expect("b");
     assert!(registry.is_leased("src-a"));
     assert!(registry.is_leased("src-b"));
+    registry.release(&a.lease_id);
+    registry.release(&b.lease_id);
+  }
+
+  #[test]
+  #[serial]
+  fn active_source_profile_ids_are_sorted_and_secret_free() {
+    let registry = fresh_registry();
+    let b = registry.try_acquire("profile-b").expect("b");
+    let a = registry.try_acquire("profile-a").expect("a");
+
+    assert_eq!(
+      registry.active_source_profile_ids(),
+      vec!["profile-a".to_string(), "profile-b".to_string()]
+    );
+    assert!(!registry
+      .active_source_profile_ids()
+      .iter()
+      .any(|profile_id| profile_id == &a.lease_id || profile_id == &b.lease_id));
+
     registry.release(&a.lease_id);
     registry.release(&b.lease_id);
   }

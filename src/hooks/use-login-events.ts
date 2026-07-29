@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  AutomationDataMode,
+  AutomationFingerprintMode,
+} from "@/components/automation-profile-policy";
 import { upsertLoginProgress } from "@/components/login-progress-selection";
 
 export interface LoginProgress {
@@ -45,6 +49,9 @@ export type LoginNetworkMode = "none" | "proxy" | "vpn" | "nord";
 export interface LoginConfig {
   credentialsText: string;
   credentials: Array<{ email: string; password: string; totpSecret: string }>;
+  profileId?: string;
+  dataMode: AutomationDataMode;
+  fingerprintMode: AutomationFingerprintMode;
   browserType: "chromium" | "camoufox";
   maxRetries: number;
   headless: boolean;

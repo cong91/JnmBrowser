@@ -88,3 +88,15 @@ Started: 2026-07-28
 - Preserved generated-worker creation, exact operation-name/ephemeral ownership checks, deletion, stale recovery, canary/bulk gates, journals, CAS ownership, cancellation, and secret-free progress/recovery payloads unchanged.
 - Verification: 2FA Backfill 100 passed; full `cargo test --lib` 965 passed; all-targets/all-features clippy, Rust formatting, unused-command check, and diff check passed.
 - PRD `backend-5` complete; next: Wave 7 Task 7 (frontend policy controls and Tauri wiring).
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 7
+
+- Added one shared automation profile-policy contract and field group across Account Checker, Auto Registration, Auto Login, and 2FA Backfill. Select values are profile UUIDs; generated workers remain the default.
+- Added the read-only `list_automation_leased_profile_ids` command, which returns only sorted source profile IDs. Running and leased profiles are disabled, and stale or newly unavailable selections are cleared without exposing lease/task/runtime IDs.
+- Wired `profileId`/`sourceProfileId`, `dataMode`, `fingerprintMode`, and compatible network fields through all four start payloads; Account Checker supports an optional fixed VPN while preserving default rotation.
+- Registration clamps and disables concurrency at one for a selected source profile. Camoufox selection forces persistent data and disables ephemeral mode. Auto Login retries preserve the selected runtime policy, and 2FA preview/start requests use identical policy fields.
+- Preserved listener-before-invoke ordering for Checker, Registration, Login, and 2FA Backfill; new helper and ordering tests cover defaults, payload mapping, UUID normalization, concurrency, and StrictMode listener setup.
+- Production-export browser verification used a pre-document mocked Tauri bridge with stopped/running/leased Chromium profiles and stopped Camoufox. All four dialogs rendered without page errors; running/leased options were disabled; keyboard `Enter` opened selectors; UUID policy payloads reached Tauri; Camoufox forced persistent mode; Registration concurrency stayed one; and 2FA preview/start policy payloads matched.
+- Responsive verification at 390×844 found no horizontal clipping in Checker, Registration, Login, or 2FA Backfill. Registration's below-fold concurrency control remained reachable through its internal vertical scroll; the 2FA footer and selected-account summary remained visible.
+- Verification: `pnpm test:frontend` 28 passed; `pnpm lint:js` passed 157 root and 12 donut-sync files with TypeScript clean; `pnpm check-unused-commands` 1 passed; `cargo test --manifest-path src-tauri/Cargo.toml --lib profile_runtime::` 15 passed; scoped diff checks passed.
+- PRD `frontend-1` complete; next: Wave 8 Task 8 (seven-locale policy terminology and lifecycle documentation).

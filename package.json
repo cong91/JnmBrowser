@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "test": "pnpm test:frontend && pnpm test:rust:unit && pnpm test:sync-e2e",
-    "test:frontend": "node --experimental-strip-types --test src/components/auto-service-listener-order.test.mjs src/components/login-account-selection.test.mjs src/components/login-progress-selection.test.mjs src/components/two-factor-backfill-selection.test.mjs src/components/registration-progress-selection.test.mjs",
+    "test:frontend": "node --experimental-strip-types --test src/components/automation-profile-policy.test.mjs src/components/auto-service-listener-order.test.mjs src/components/login-account-selection.test.mjs src/components/login-progress-selection.test.mjs src/components/two-factor-backfill-selection.test.mjs src/components/registration-progress-selection.test.mjs",
     "test:rust": "cd src-tauri && cargo test",
     "test:rust:unit": "cd src-tauri && cargo test --lib && cargo test --test donut_proxy_integration && cargo test --test vpn_integration",
     "test:sync-e2e": "node scripts/sync-test-harness.mjs",

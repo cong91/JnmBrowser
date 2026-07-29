@@ -22,6 +22,16 @@ export interface AccountCheckResult {
   createdAt: string;
 }
 
+export interface AccountCheckConfig {
+  credentialsText: string;
+  sourceProfileId?: string;
+  dataMode: "ephemeral" | "persistent";
+  fingerprintMode: "randomPerLaunch" | "stable";
+  vpnId?: string;
+  browserType: string;
+  headless: boolean;
+}
+
 export function useAccountCheckerEvents() {
   const [progressMap, setProgressMap] = useState<Map<string, CheckProgress>>(
     new Map(),
@@ -72,11 +82,11 @@ export function useAccountCheckerEvents() {
   }, [refreshResults]);
 
   const startCheck = useCallback(
-    async (credentialsText: string): Promise<string | null> => {
+    async (config: AccountCheckConfig): Promise<string | null> => {
       await ensureListener();
       try {
         const taskId = await invoke<string>("start_openai_account_check", {
-          credentialsText,
+          config,
         });
         setActiveTaskId(taskId);
         return taskId;

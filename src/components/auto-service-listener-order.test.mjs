@@ -32,6 +32,22 @@ async function assertStrictModeListenerGeneration(path) {
   assert.match(source, /listenerGenerationRef\.current \+= 1;/);
 }
 
+test("account checker listener is ready before task start", async () => {
+  await assertListenerBeforeInvoke(
+    "../hooks/use-account-checker-events.ts",
+    "startCheck",
+    "start_openai_account_check",
+  );
+});
+
+test("two-factor backfill listener is ready before task start", async () => {
+  await assertListenerBeforeInvoke(
+    "../hooks/use-two-factor-backfill-events.ts",
+    "start",
+    "start_auto_registration",
+  );
+});
+
 test("registration listener is ready before task start", async () => {
   await assertListenerBeforeInvoke(
     "../hooks/use-registration-events.ts",
