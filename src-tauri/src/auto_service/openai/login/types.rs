@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::profile_runtime::{DataMode, FingerprintMode};
+
 /// Parsed credential line: ACCOUNT|PASSWORD|2FA
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +70,18 @@ pub struct LoginConfig {
   /// Parsed credentials (populated from credentials_text if empty).
   #[serde(default)]
   pub credentials: Vec<LoginCredential>,
+
+  /// Existing profile to reuse. When omitted, the exact stable Auto Login worker is used.
+  #[serde(default)]
+  pub profile_id: Option<String>,
+
+  /// Runtime browser-data policy.
+  #[serde(default)]
+  pub data_mode: DataMode,
+
+  /// Runtime fingerprint policy.
+  #[serde(default)]
+  pub fingerprint_mode: FingerprintMode,
 
   /// Browser engine: "chromium" or "camoufox"
   #[serde(default = "default_browser_type")]
@@ -492,6 +506,45 @@ mod tests {
   use super::*;
 
   #[test]
+  fn login_config_defaults_to_generated_ephemeral_random_runtime_policy() {
+    let config: LoginConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password"
+    }))
+    .unwrap();
+
+    assert_eq!(config.profile_id, None);
+    assert_eq!(
+      config.data_mode,
+      crate::profile_runtime::DataMode::Ephemeral
+    );
+    assert_eq!(
+      config.fingerprint_mode,
+      crate::profile_runtime::FingerprintMode::RandomPerLaunch
+    );
+  }
+
+  #[test]
+  fn login_config_accepts_explicit_runtime_policy() {
+    let config: LoginConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password",
+      "profileId": "profile-id",
+      "dataMode": "persistent",
+      "fingerprintMode": "stable"
+    }))
+    .unwrap();
+
+    assert_eq!(config.profile_id.as_deref(), Some("profile-id"));
+    assert_eq!(
+      config.data_mode,
+      crate::profile_runtime::DataMode::Persistent
+    );
+    assert_eq!(
+      config.fingerprint_mode,
+      crate::profile_runtime::FingerprintMode::Stable
+    );
+  }
+
+  #[test]
   fn parse_credential_full() {
     let c = LoginCredential::parse("user@example.com|password123|JBSWY3DPEHPK3PXP").unwrap();
     assert_eq!(c.email, "user@example.com");
@@ -546,6 +599,9 @@ mod tests {
     let config = LoginConfig {
       credentials_text: String::new(),
       credentials: vec![],
+      profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       browser_type: "chromium".into(),
       max_retries: 3,
       headless: false,
@@ -577,6 +633,9 @@ mod tests {
         password: "p".into(),
         totp_secret: String::new(),
       }],
+      profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       browser_type: "chromium".into(),
       max_retries: 3,
       headless: false,
@@ -608,6 +667,9 @@ mod tests {
         password: "p".into(),
         totp_secret: String::new(),
       }],
+      profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       browser_type: "chromium".into(),
       max_retries: 3,
       headless: false,
@@ -639,6 +701,9 @@ mod tests {
         password: "p".into(),
         totp_secret: String::new(),
       }],
+      profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       browser_type: "chromium".into(),
       max_retries: 1,
       headless: false,
@@ -673,6 +738,9 @@ mod tests {
         password: "p".into(),
         totp_secret: "secret".into(),
       }],
+      profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       browser_type: "chromium".into(),
       max_retries: 1,
       headless: false,
@@ -710,6 +778,9 @@ mod tests {
         password: "p".into(),
         totp_secret: "secret".into(),
       }],
+      profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       browser_type: "chromium".into(),
       max_retries: 1,
       headless: false,
@@ -752,6 +823,9 @@ mod tests {
         password: "p".into(),
         totp_secret: "secret".into(),
       }],
+      profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       browser_type: "chromium".into(),
       max_retries: 1,
       headless: false,

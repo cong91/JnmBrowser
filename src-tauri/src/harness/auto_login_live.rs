@@ -19,6 +19,7 @@ use donutbrowser_lib::auto_service::openai::login::execution::{prepare_login, ru
 use donutbrowser_lib::auto_service::openai::login::types::{
   LoginConfig, LoginNetworkMode, DEFAULT_MAX_RETRIES,
 };
+use donutbrowser_lib::profile_runtime::{DataMode, FingerprintMode};
 
 struct LiveArgs {
   credential: String,
@@ -133,6 +134,9 @@ fn build_config(args: LiveArgs) -> LoginConfig {
   LoginConfig {
     credentials_text: args.credential,
     credentials: Vec::new(),
+    profile_id: None,
+    data_mode: DataMode::Ephemeral,
+    fingerprint_mode: FingerprintMode::RandomPerLaunch,
     browser_type: args.browser,
     max_retries: args.max_retries,
     headless: args.headless,

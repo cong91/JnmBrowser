@@ -66,3 +66,14 @@ Started: 2026-07-28
 - Preserved generated-worker creation/ordinary launch/deletion behavior; deletion now requires matching task ownership. Parallel batch requests now prepare every config and lease before spawning the first task.
 - Verification: Registration 131 passed; `profile_runtime::` 14 passed; `browser_runner::` 20 passed; full `cargo test --lib` 942 passed; focused all-features lib clippy, Rust formatting, unused-command check, and diff check passed. Existing-account 2FA dispatch tests remain green inside the Registration suite.
 - PRD `backend-3` complete; next: Wave 5 Task 5 (Auto Login migration).
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 5
+
+- Added Auto Login `profileId`, `dataMode`, and `fingerprintMode` request defaults while preserving current frontend payload compatibility.
+- Moved worker resolution to synchronous preparation: explicit profiles are validated read-only, while the no-profile path reuses only the exact `auto-login-worker-{browser}` profile or creates that exact stable worker once under a preparation lease.
+- Added fail-fast profile-ID leases before task publication; same-profile starts are rejected immediately and prepared-task drop releases the lease before execution begins.
+- Removed broad `auto-login-worker-*` matching and all profile fingerprint/proxy/VPN mutation calls; selected and stable default workers launch through task-local BrowserRunner policy overlays.
+- Added policy-aware launch, failed-launch rollback synchronization, Camoufox/CDP attach-failure cleanup, per-login runtime cleanup, final guarded reconciliation, lease-after-cleanup release, and deferred batch terminal events.
+- Auto Login retains both selected profiles and its exact stable default worker; no profile deletion path remains in the engine.
+- Verification: Auto Login 68 passed; full `cargo test --lib` 955 passed; focused all-features lib clippy, Rust formatting, unused-command check, and diff check passed. Unused-command bin targets emitted only the existing Windows `LNK4075` linker warning.
+- PRD `backend-4` complete; next: Wave 6 Task 6 (2FA Backfill migration).

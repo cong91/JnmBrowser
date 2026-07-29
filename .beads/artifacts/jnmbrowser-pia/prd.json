@@ -82,7 +82,7 @@
         "Verify stable-worker default behavior remains available when no profile is selected and does not select a different user's profile by name alone.",
         "Verify task-local network/fingerprint settings do not persist to the selected source profile."
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": [
           "Shared runtime launch policy and profile lease",

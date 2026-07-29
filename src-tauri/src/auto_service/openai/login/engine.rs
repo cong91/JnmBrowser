@@ -20,6 +20,8 @@ use super::types::{
   LoginProgressEventKind, LoginResult, LoginResultStatus, LoginStep, LoginTerminalSummary,
 };
 use super::{oauth, pkce, safe_browser_url_for_log};
+use crate::profile::BrowserProfile;
+use crate::profile_runtime::{LaunchPolicy, RuntimeLease};
 use crate::sms::{poll_otp_with_cancel, NumberRequest, SmsService};
 
 type CdpWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -900,8 +902,10 @@ pub struct LoginEngine {
   used_phones: HashSet<String>,
   /// Reused worker profile for this engine (one slot for sequential batch).
   worker_profile_id: Option<String>,
-  /// True when we created the worker and must delete it at batch end.
-  owns_worker_profile: bool,
+  /// Read-only worker snapshot resolved before task publication.
+  worker_profile: Option<BrowserProfile>,
+  /// Full-lifecycle lease for the prepared worker.
+  runtime_lease: Option<RuntimeLease>,
 }
 
 impl LoginEngine {
@@ -913,12 +917,62 @@ impl LoginEngine {
       logs: Vec::new(),
       used_phones: HashSet::new(),
       worker_profile_id: None,
-      owns_worker_profile: false,
+      worker_profile: None,
+      runtime_lease: None,
     }
+  }
+
+  pub fn install_worker_runtime(&mut self, profile: BrowserProfile, lease: RuntimeLease) {
+    self.worker_profile_id = Some(profile.id.to_string());
+    self.worker_profile = Some(profile);
+    self.runtime_lease = Some(lease);
+  }
+
+  pub fn worker_runtime(&self) -> Option<(BrowserProfile, LaunchPolicy, RuntimeLease)> {
+    let profile = self.worker_profile.clone()?;
+    let lease = self.runtime_lease.clone()?;
+    let policy = self.launch_policy_for_worker(&profile.id.to_string());
+    Some((profile, policy, lease))
+  }
+
+  fn launch_policy_for_worker(&self, profile_id: &str) -> LaunchPolicy {
+    let mut policy = LaunchPolicy::for_source_profile(profile_id);
+    policy.data_mode = self.config.data_mode;
+    policy.fingerprint_mode = self.config.fingerprint_mode;
+    match self.config.network_mode {
+      LoginNetworkMode::Proxy => policy.proxy_id = self.config.proxy_id.clone(),
+      LoginNetworkMode::Vpn => policy.vpn_id = self.config.effective_vpn_id(),
+      LoginNetworkMode::None | LoginNetworkMode::Nord => policy.clear_network = true,
+    }
+    policy
   }
 
   pub fn task_id(&self) -> &str {
     &self.task_id
+  }
+
+  pub fn emit_deferred_batch_terminal(
+    &self,
+    app_handle: &tauri::AppHandle,
+    results: &[LoginResult],
+    cleanup_succeeded: bool,
+  ) {
+    let ok = results.iter().filter(|result| result.success).count();
+    let fail = results.len().saturating_sub(ok);
+    self.emit_batch_terminal(
+      app_handle,
+      if cleanup_succeeded {
+        "completed"
+      } else {
+        "failed"
+      },
+      self.config.credentials.len() as u32,
+      cleanup_succeeded && fail == 0 && ok > 0,
+    );
+  }
+
+  fn should_emit_batch_terminal_in_run(&self) -> bool {
+    self.runtime_lease.is_none()
   }
 
   #[allow(dead_code)]
@@ -1287,14 +1341,13 @@ impl LoginEngine {
       }
     }
 
-    // Batch end: delete only auto-created worker profile (never user profiles).
-    self.dispose_worker_profile(&app_handle).await;
-
     let ok = results.iter().filter(|r| r.success).count();
     let fail = results.iter().filter(|r| !r.success).count();
     let msg = format!("Done: {ok} logged in, {fail} failed");
 
-    self.emit_batch_terminal(&app_handle, &msg, total, fail == 0 && ok > 0);
+    if self.should_emit_batch_terminal_in_run() {
+      self.emit_batch_terminal(&app_handle, &msg, total, fail == 0 && ok > 0);
+    }
 
     results
   }
@@ -4043,84 +4096,6 @@ impl LoginEngine {
     }
   }
 
-  /// Attach proxy or inventory VPN to the worker profile (mutually exclusive).
-  async fn apply_network_to_worker(
-    &mut self,
-    app_handle: &tauri::AppHandle,
-    mut found: crate::profile::BrowserProfile,
-  ) -> Result<crate::profile::BrowserProfile, String> {
-    match self.config.network_mode {
-      LoginNetworkMode::Proxy => {
-        if let Some(proxy_id) = self.config.proxy_id.as_ref() {
-          if found.proxy_id.as_deref() != Some(proxy_id.as_str()) || found.vpn_id.is_some() {
-            match crate::profile::ProfileManager::instance()
-              .update_profile_proxy(
-                app_handle.clone(),
-                &found.id.to_string(),
-                Some(proxy_id.clone()),
-              )
-              .await
-            {
-              Ok(updated) => {
-                found = updated;
-                self.log(&format!("Worker profile proxy set to {proxy_id}"));
-              }
-              Err(e) => {
-                self.log(&format!(
-                  "Warning: failed to set worker proxy_id={proxy_id}: {e}"
-                ));
-              }
-            }
-          }
-        }
-      }
-      LoginNetworkMode::Vpn => {
-        if let Some(vpn_id) = self.config.effective_vpn_id() {
-          if found.vpn_id.as_deref() != Some(vpn_id.as_str()) || found.proxy_id.is_some() {
-            match crate::profile::ProfileManager::instance()
-              .update_profile_vpn(
-                app_handle.clone(),
-                &found.id.to_string(),
-                Some(vpn_id.clone()),
-              )
-              .await
-            {
-              Ok(updated) => {
-                found = updated;
-                self.log(&format!("Worker profile VPN set to {vpn_id}"));
-              }
-              Err(e) => {
-                self.log(&format!(
-                  "Warning: failed to set worker vpn_id={vpn_id}: {e}"
-                ));
-              }
-            }
-          }
-        }
-      }
-      LoginNetworkMode::None | LoginNetworkMode::Nord => {
-        // Clear residual network bindings so direct/Nord-CLI runs don't inherit old VPN/proxy.
-        if found.proxy_id.is_some() {
-          if let Ok(updated) = crate::profile::ProfileManager::instance()
-            .update_profile_proxy(app_handle.clone(), &found.id.to_string(), None)
-            .await
-          {
-            found = updated;
-          }
-        }
-        if found.vpn_id.is_some() {
-          if let Ok(updated) = crate::profile::ProfileManager::instance()
-            .update_profile_vpn(app_handle.clone(), &found.id.to_string(), None)
-            .await
-          {
-            found = updated;
-          }
-        }
-      }
-    }
-    Ok(found)
-  }
-
   /// Mid-batch WireGuard peer hop (same approach as auto-reg): keep PrivateKey,
   /// pick a new Nord peer, rewrite inventory conf, restart vpn-worker.
   async fn rotate_wireguard_peer(&mut self, vpn_id: &str) -> Result<(String, String), String> {
@@ -4240,244 +4215,71 @@ impl LoginEngine {
     Ok(true)
   }
 
-  /// Ensure one reusable worker profile for the whole batch.
-  /// Creates only when missing; reuses already-created auto-login workers of the same browser.
-  async fn ensure_worker_profile(
-    &mut self,
-    app_handle: &tauri::AppHandle,
-  ) -> Result<crate::profile::BrowserProfile, String> {
-    use crate::browser::BrowserType;
-    use crate::profile::manager::create_browser_profile_with_group;
-
-    // Already have a worker for this engine — reload latest metadata.
-    if let Some(id) = self.worker_profile_id.clone() {
-      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-        if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
-          return Ok(found);
-        }
-      }
-      self.log(&format!(
-        "Worker profile {id} missing from store — will recreate"
-      ));
-      self.worker_profile_id = None;
-      self.owns_worker_profile = false;
+  /// Return the worker snapshot resolved and leased before task publication.
+  fn ensure_worker_profile(&self) -> Result<BrowserProfile, String> {
+    let profile = self
+      .worker_profile
+      .clone()
+      .ok_or_else(|| "Auto Login worker runtime was not installed before execution".to_string())?;
+    if self.worker_profile_id.as_deref() != Some(profile.id.to_string().as_str())
+      || self.runtime_lease.is_none()
+    {
+      return Err("Auto Login worker runtime state is incomplete".to_string());
     }
-
-    let browser_str = if self.config.browser_type.eq_ignore_ascii_case("camoufox") {
-      "camoufox"
-    } else if self.config.browser_type.eq_ignore_ascii_case("firefox") {
-      "firefox"
-    } else {
-      "chromium"
-    };
-
-    // Prefer the stable auto-login worker for this browser (cross-batch reuse).
-    // Exact name first, then any auto-login-worker-* of the same browser.
-    let stable_name = format!("auto-login-worker-{browser_str}");
-    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-      if let Some(mut found) = profiles.into_iter().find(|p| {
-        p.browser.eq_ignore_ascii_case(browser_str)
-          && (p.name.eq_ignore_ascii_case(&stable_name) || p.name.starts_with("auto-login-worker-"))
-      }) {
-        if found.browser.eq_ignore_ascii_case("camoufox") {
-          let mut cfg = found.camoufox_config.clone().unwrap_or_default();
-          if cfg.randomize_fingerprint_on_launch != Some(true) {
-            cfg.randomize_fingerprint_on_launch = Some(true);
-            found.camoufox_config = Some(cfg.clone());
-            if let Err(e) = crate::profile::ProfileManager::instance()
-              .update_camoufox_config(app_handle.clone(), &found.id.to_string(), cfg)
-              .await
-            {
-              self.log(&format!(
-                "Warning: failed to enable Camoufox FP renew on worker: {e}"
-              ));
-            }
-          }
-        } else if found.browser.eq_ignore_ascii_case("chromium") {
-          let mut cfg = found.chromium_config.clone().unwrap_or_default();
-          if cfg.randomize_fingerprint_on_launch != Some(true) {
-            cfg.randomize_fingerprint_on_launch = Some(true);
-            found.chromium_config = Some(cfg.clone());
-            if let Err(e) = crate::profile::ProfileManager::instance()
-              .update_chromium_config(app_handle.clone(), &found.id.to_string(), cfg)
-              .await
-            {
-              self.log(&format!(
-                "Warning: failed to enable Chromium FP renew on worker: {e}"
-              ));
-            }
-          }
-        }
-
-        // Attach proxy or VPN to the reused worker (mutually exclusive).
-        found = self.apply_network_to_worker(app_handle, found).await?;
-
-        self.log(&format!(
-          "Reusing existing auto-login worker: {} ({}) browser={} version={}",
-          found.name, found.id, found.browser, found.version
-        ));
-        // Existing worker was created earlier — keep it after this batch too.
-        self.worker_profile_id = Some(found.id.to_string());
-        self.owns_worker_profile = false;
-        return Ok(found);
-      }
-    }
-
-    let mut version = String::new();
-    let mut release_type = "stable".to_string();
-
-    // Prefer an installed version from any existing profile of the same browser.
-    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-      if let Some(found) = profiles
-        .into_iter()
-        .find(|p| p.browser.eq_ignore_ascii_case(browser_str) && !p.version.is_empty())
-      {
-        version = found.version;
-        if !found.release_type.is_empty() {
-          release_type = found.release_type;
-        }
-        self.log(&format!(
-          "Using installed {browser_str} version from existing profile: {version}"
-        ));
-      }
-    }
-
-    // Fallback: downloaded browsers registry (critical for chromium — empty version
-    // resolves to binaries/fingerprint-chromium/ and fails to find chrome.exe).
-    if version.is_empty() {
-      let registry = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
-      let mut versions = registry.get_downloaded_versions(browser_str);
-      versions.sort_by(|a, b| {
-        crate::api_client::VersionComponent::parse(b)
-          .cmp(&crate::api_client::VersionComponent::parse(a))
-      });
-      if let Some(v) = versions.into_iter().next() {
-        version = v;
-        self.log(&format!(
-          "Using installed {browser_str} version from registry: {version}"
-        ));
-      }
-    }
-
-    if version.is_empty() && browser_str == "camoufox" {
-      version = "v135.0.1-beta.24".into();
-      self.log(&format!("Using default Camoufox version: {version}"));
-    }
-    if version.is_empty() {
-      return Err(format!(
-        "No downloaded {browser_str} version found. Install the browser in JnmBrowser first."
-      ));
-    }
-
-    let browser =
-      BrowserType::from_str(browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
-
-    // One stable worker name per browser type (reused across batches).
-    let profile_name = stable_name;
-
-    let camoufox_config = if browser_str == "camoufox" {
-      Some(crate::camoufox_manager::CamoufoxConfig {
-        fingerprint: None,
-        randomize_fingerprint_on_launch: Some(true),
-        geoip: Some(serde_json::Value::Bool(true)),
-        ..Default::default()
-      })
-    } else {
-      None
-    };
-    let chromium_config = if browser_str == "chromium" {
-      Some(crate::chromium_manager::ChromiumConfig {
-        fingerprint: None,
-        randomize_fingerprint_on_launch: Some(true),
-        ..Default::default()
-      })
-    } else {
-      None
-    };
-
-    let (create_proxy_id, create_vpn_id) = match self.config.network_mode {
-      LoginNetworkMode::Proxy => (self.config.proxy_id.clone(), None),
-      LoginNetworkMode::Vpn => (None, self.config.effective_vpn_id()),
-      _ => (None, None),
-    };
-
-    let mut created = create_browser_profile_with_group(
-      app_handle.clone(),
-      profile_name,
-      browser.as_str().to_string(),
-      version,
-      release_type,
-      create_proxy_id,
-      create_vpn_id,
-      camoufox_config,
-      chromium_config,
-      None,
-      true, // ephemeral worker: data dir wiped on kill, metadata reused
-      None,
-      None,
-    )
-    .await
-    .map_err(|e| format!("Create worker profile: {e}"))?;
-
-    // Persist randomize flags so relaunches keep renewing fingerprints.
-    if created.browser.eq_ignore_ascii_case("camoufox") {
-      let mut cfg = created.camoufox_config.clone().unwrap_or_default();
-      cfg.randomize_fingerprint_on_launch = Some(true);
-      created.camoufox_config = Some(cfg);
-    } else if created.browser.eq_ignore_ascii_case("chromium") {
-      let mut cfg = created.chromium_config.clone().unwrap_or_default();
-      cfg.randomize_fingerprint_on_launch = Some(true);
-      created.chromium_config = Some(cfg.clone());
-      if let Err(e) = crate::profile::ProfileManager::instance()
-        .update_chromium_config(app_handle.clone(), &created.id.to_string(), cfg)
-        .await
-      {
-        self.log(&format!(
-          "Warning: failed to persist Chromium randomize flag: {e}"
-        ));
-      }
-    }
-
-    // Keep the worker after batch so later auto-login runs reuse it (no storage spam).
-    self.worker_profile_id = Some(created.id.to_string());
-    self.owns_worker_profile = false;
-    self.log(&format!(
-      "Created reusable worker profile {} (id={}) browser={} — relaunch renews fingerprint + data",
-      created.name, created.id, created.browser
-    ));
-
-    Ok(created)
+    Ok(profile)
   }
 
-  /// Launch the reused worker profile and attach CDP / Playwright.
+  /// Launch the prepared worker profile and attach CDP / Playwright.
   async fn launch_browser(
     &mut self,
     app_handle: &tauri::AppHandle,
   ) -> Result<(crate::profile::BrowserProfile, BrowserSession), String> {
     use crate::browser_runner::BrowserRunner;
 
-    let worker = self.ensure_worker_profile(app_handle).await?;
+    let worker = self.ensure_worker_profile()?;
     self.log(&format!(
-      "Launching worker {} ({}) — fingerprint renew + fresh ephemeral dir",
+      "Launching worker {} ({}) with configured runtime policy",
       worker.name, worker.id
     ));
 
-    let launched = BrowserRunner::instance()
-      .launch_browser(
+    let policy = self.launch_policy_for_worker(&worker.id.to_string());
+    let mut lease = self
+      .runtime_lease
+      .take()
+      .ok_or_else(|| "Auto Login worker lease is missing".to_string())?;
+    let launch_result = BrowserRunner::instance()
+      .launch_browser_with_policy(
         app_handle.clone(),
         &worker,
         Some("about:blank".into()),
         None,
+        &policy,
+        &mut lease,
       )
-      .await
-      .map_err(|e| format!("Launch: {e}"))?;
+      .await;
+    self.runtime_lease = Some(lease);
+    let launched = match launch_result {
+      Ok(launched) => launched,
+      Err(error) => {
+        if let Err(cleanup_error) = self.kill_browser_only(app_handle, &worker).await {
+          return Err(format!(
+            "Launch: {error}; failed-launch cleanup also failed: {cleanup_error}"
+          ));
+        }
+        return Err(format!("Launch: {error}"));
+      }
+    };
 
     sleep(std::time::Duration::from_secs(2)).await;
 
     let browser_str = launched.browser.as_str();
-    let profile_path = crate::ephemeral_dirs::get_effective_profile_path(
+    let profile_path = crate::ephemeral_dirs::get_effective_profile_path_for_key(
       &launched,
       &crate::profile::ProfileManager::instance().get_profiles_dir(),
+      self
+        .runtime_lease
+        .as_ref()
+        .and_then(|lease| lease.ephemeral_runtime_key.as_deref()),
     );
     let profile_path_str = profile_path.to_string_lossy().to_string();
 
@@ -4508,20 +4310,39 @@ impl LoginEngine {
           Err(e) => last_err = e.to_string(),
         }
       }
-      return Err(format!(
-        "Failed to attach Camoufox Playwright page for {profile_path_str}: {last_err}"
-      ));
+      let error =
+        format!("Failed to attach Camoufox Playwright page for {profile_path_str}: {last_err}");
+      if let Err(cleanup_error) = self.kill_browser_only(app_handle, &launched).await {
+        return Err(format!(
+          "{error}; browser cleanup after attach failure also failed: {cleanup_error}"
+        ));
+      }
+      return Err(error);
     }
 
     // Chromium: wait for CDP port then open debugger websocket.
     // Prefer PID lookup: ephemeral path can race with status checks.
-    let cdp_port = self
-      .wait_for_cdp_port(&launched.browser, &profile_path_str, launched.process_id)
-      .await?;
-    self.log(&format!("CDP port ready: {cdp_port}"));
-    let ws_url = get_page_ws_url(cdp_port).await?;
-    let cdp = CdpConnection::connect(&ws_url).await?;
-    Ok((launched, BrowserSession::Cdp(cdp)))
+    let attach_result = async {
+      let cdp_port = self
+        .wait_for_cdp_port(&launched.browser, &profile_path_str, launched.process_id)
+        .await?;
+      self.log(&format!("CDP port ready: {cdp_port}"));
+      let ws_url = get_page_ws_url(cdp_port).await?;
+      let cdp = CdpConnection::connect(&ws_url).await?;
+      Ok::<BrowserSession, String>(BrowserSession::Cdp(cdp))
+    }
+    .await;
+    match attach_result {
+      Ok(session) => Ok((launched, session)),
+      Err(error) => {
+        if let Err(cleanup_error) = self.kill_browser_only(app_handle, &launched).await {
+          return Err(format!(
+            "{error}; browser cleanup after attach failure also failed: {cleanup_error}"
+          ));
+        }
+        Err(error)
+      }
+    }
   }
 
   async fn wait_for_cdp_port(
@@ -4567,10 +4388,17 @@ impl LoginEngine {
   ) -> Result<(), String> {
     use crate::browser_runner::BrowserRunner;
 
-    match BrowserRunner::instance()
-      .kill_browser_process(app_handle.clone(), profile)
-      .await
-    {
+    let policy = self.launch_policy_for_worker(&profile.id.to_string());
+    let mut lease = self
+      .runtime_lease
+      .take()
+      .ok_or_else(|| "Auto Login worker lease is missing".to_string())?;
+    let cleanup_result = BrowserRunner::instance()
+      .kill_runtime_browser(app_handle.clone(), profile, &policy, &mut lease)
+      .await;
+    self.runtime_lease = Some(lease);
+
+    match cleanup_result {
       Ok(()) => {
         self.log(&format!(
           "Browser killed for worker profile {} ({})",
@@ -4586,39 +4414,6 @@ impl LoginEngine {
         self.log(&msg);
         Err(msg)
       }
-    }
-  }
-
-  /// Delete the auto-created worker only when this engine owns it.
-  /// Cross-batch workers are kept on disk for reuse (`owns_worker_profile = false`).
-  async fn dispose_worker_profile(&mut self, app_handle: &tauri::AppHandle) {
-    let Some(id) = self.worker_profile_id.take() else {
-      return;
-    };
-    if !self.owns_worker_profile {
-      self.log(&format!(
-        "Keeping reusable auto-login worker profile on disk: {id}"
-      ));
-      return;
-    }
-    self.owns_worker_profile = false;
-
-    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-      if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
-        // Best-effort: dispose proceeds regardless so the profile metadata is
-        // removed. Kill failure is logged inside kill_browser_only.
-        let _ = self.kill_browser_only(app_handle, &found).await;
-      }
-    }
-
-    sleep(std::time::Duration::from_millis(500)).await;
-
-    if let Err(e) = crate::profile::ProfileManager::instance().delete_profile(app_handle, &id) {
-      self.log(&format!(
-        "Warning: failed to delete worker profile {id}: {e}"
-      ));
-    } else {
-      self.log(&format!("Worker profile deleted: {id}"));
     }
   }
 }
@@ -4650,6 +4445,99 @@ async fn get_page_ws_url(port: u16) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn selected_login_policy_is_task_local_and_not_owned() {
+    let mut config: LoginConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password",
+      "dataMode": "persistent",
+      "fingerprintMode": "stable",
+      "networkMode": "proxy",
+      "proxyId": "proxy-task"
+    }))
+    .unwrap();
+    config.parse_credentials();
+    config.normalize();
+    let engine = LoginEngine::with_cancel_flag(config, Arc::new(AtomicBool::new(false)));
+
+    let policy = engine.launch_policy_for_worker("selected-profile");
+
+    assert_eq!(
+      policy.source_profile_id.as_deref(),
+      Some("selected-profile")
+    );
+    assert_eq!(
+      policy.data_mode,
+      crate::profile_runtime::DataMode::Persistent
+    );
+    assert_eq!(
+      policy.fingerprint_mode,
+      crate::profile_runtime::FingerprintMode::Stable
+    );
+    assert_eq!(policy.proxy_id.as_deref(), Some("proxy-task"));
+    assert_eq!(policy.vpn_id, None);
+    assert!(!policy.clear_network);
+    assert!(!policy.owns_generated_worker);
+    assert!(!policy.persist_process_to_source);
+  }
+
+  #[test]
+  fn direct_login_policy_clears_stored_network() {
+    let mut config: LoginConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password"
+    }))
+    .unwrap();
+    config.parse_credentials();
+    config.normalize();
+    let engine = LoginEngine::with_cancel_flag(config, Arc::new(AtomicBool::new(false)));
+
+    let policy = engine.launch_policy_for_worker("worker-profile");
+
+    assert!(policy.clear_network);
+    assert_eq!(policy.proxy_id, None);
+    assert_eq!(policy.vpn_id, None);
+  }
+
+  #[test]
+  fn prepared_worker_runtime_is_installed_without_delete_ownership() {
+    let mut config: LoginConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password"
+    }))
+    .unwrap();
+    config.parse_credentials();
+    config.normalize();
+    let profile = crate::profile::BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "selected".to_string(),
+      browser: "chromium".to_string(),
+      version: "1.0.0".to_string(),
+      ..crate::profile::BrowserProfile::default()
+    };
+    let registry = crate::profile_runtime::LeaseRegistry::new();
+    let lease = registry
+      .try_acquire(&profile.id.to_string())
+      .expect("worker lease");
+    let mut engine = LoginEngine::with_cancel_flag(config, Arc::new(AtomicBool::new(false)));
+
+    engine.install_worker_runtime(profile.clone(), lease.clone());
+
+    assert_eq!(
+      engine.worker_profile_id.as_deref(),
+      Some(profile.id.to_string().as_str())
+    );
+    assert_eq!(
+      engine.worker_profile.as_ref().map(|item| item.id),
+      Some(profile.id)
+    );
+    assert_eq!(
+      engine
+        .runtime_lease
+        .as_ref()
+        .map(|item| item.lease_id.as_str()),
+      Some(lease.lease_id.as_str())
+    );
+    registry.release(&lease.lease_id);
+  }
 
   #[test]
   fn browser_url_log_removes_query_fragment_and_userinfo() {
