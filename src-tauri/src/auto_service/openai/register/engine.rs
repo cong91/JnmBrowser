@@ -37,6 +37,8 @@ use crate::auto_service::openai::two_factor_backfill::journal::{
   PersistedBackfillAccountPatch, TwoFactorBackfillJournal, TwoFactorBackfillJournalState,
 };
 use crate::email::{EmailService, EmailServiceError};
+use crate::profile::BrowserProfile;
+use crate::profile_runtime::{LaunchPolicy, RuntimeLease};
 use crate::sms::{poll_otp_with_cancel, NumberRequest, SmsService, SmsServiceError};
 
 /// Write structural About You diagnostics without screenshots, field values,
@@ -1703,6 +1705,10 @@ pub struct RegistrationEngine {
   logs: Vec<String>,
   /// Reused worker profile id for this engine instance (one per concurrent CDK slot).
   worker_profile_id: Option<String>,
+  /// Read-only selected source profile resolved before task publication.
+  selected_profile: Option<BrowserProfile>,
+  /// Task-level selected-profile lease cloned into serial CDK slots for launch/cleanup.
+  runtime_lease: Option<RuntimeLease>,
   /// True when this engine created the worker and must delete it when the CDK finishes.
   owns_worker_profile: bool,
   /// Optional CDK index suffix for concurrent worker profile names.
@@ -1730,6 +1736,8 @@ impl RegistrationEngine {
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
       worker_profile_id: None,
+      selected_profile: None,
+      runtime_lease: None,
       owns_worker_profile: false,
       worker_slot: 0,
       ephemeral_vpn_ids: Vec::new(),
@@ -1749,6 +1757,8 @@ impl RegistrationEngine {
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
       worker_profile_id: None,
+      selected_profile: None,
+      runtime_lease: None,
       owns_worker_profile: false,
       worker_slot: 0,
       ephemeral_vpn_ids: Vec::new(),
@@ -1758,6 +1768,44 @@ impl RegistrationEngine {
       challenged_peer_public_keys: Vec::new(),
       rate_limiter: super::parallel::RateLimiter::new(),
     }
+  }
+
+  pub fn install_selected_runtime(&mut self, profile: BrowserProfile, lease: RuntimeLease) {
+    self.worker_profile_id = Some(profile.id.to_string());
+    self.selected_profile = Some(profile);
+    self.runtime_lease = Some(lease);
+    self.owns_worker_profile = false;
+  }
+
+  pub fn selected_runtime(&self) -> Option<(BrowserProfile, LaunchPolicy, RuntimeLease)> {
+    let profile = self.selected_profile.clone()?;
+    let lease = self.runtime_lease.clone()?;
+    let policy = self.launch_policy_for_worker(&profile.id.to_string(), false);
+    Some((profile, policy, lease))
+  }
+
+  fn launch_policy_for_worker(
+    &self,
+    profile_id: &str,
+    owns_generated_worker: bool,
+  ) -> LaunchPolicy {
+    let mut policy = if owns_generated_worker {
+      LaunchPolicy::for_generated_worker()
+    } else {
+      LaunchPolicy::for_source_profile(profile_id)
+    };
+    policy.source_profile_id = Some(profile_id.to_string());
+    policy.data_mode = self.config.data_mode;
+    policy.fingerprint_mode = self.config.fingerprint_mode;
+    policy.owns_generated_worker = owns_generated_worker;
+    policy.persist_process_to_source = owns_generated_worker;
+
+    match self.config.network_mode {
+      NetworkMode::Proxy => policy.proxy_id = self.config.effective_proxy_id(),
+      NetworkMode::Vpn => policy.vpn_id = self.worker_vpn_id(),
+      NetworkMode::None | NetworkMode::Nord => policy.clear_network = true,
+    }
+    policy
   }
 
   /// Fork a per-CDK engine that shares cancel/task/config but owns its own worker + logs.
@@ -1775,7 +1823,9 @@ impl RegistrationEngine {
       task_id: self.task_id.clone(),
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
-      worker_profile_id: None,
+      worker_profile_id: self.worker_profile_id.clone(),
+      selected_profile: self.selected_profile.clone(),
+      runtime_lease: self.runtime_lease.clone(),
       owns_worker_profile: false,
       worker_slot,
       ephemeral_vpn_ids: Vec::new(), // only root owns cleanup
@@ -2087,6 +2137,31 @@ impl RegistrationEngine {
       }),
     };
     let _ = app_handle.emit("registration-progress", payload);
+  }
+
+  pub fn emit_deferred_batch_terminal(
+    &self,
+    app_handle: &tauri::AppHandle,
+    result: &RegistrationResult,
+    cleanup_succeeded: bool,
+  ) {
+    let success = result.success && cleanup_succeeded;
+    let step = if success {
+      RegistrationStep::Completed
+    } else {
+      RegistrationStep::Failed
+    };
+    self.emit_batch_terminal(
+      app_handle,
+      step,
+      if success { "completed" } else { "failed" },
+      self.config.cdks.len() as u32,
+      success,
+    );
+  }
+
+  fn should_emit_batch_terminal_in_run(&self) -> bool {
+    self.runtime_lease.is_none()
   }
 
   #[allow(dead_code)]
@@ -2416,13 +2491,15 @@ impl RegistrationEngine {
       } else {
         RegistrationStep::Failed
       };
-      self.emit_batch_terminal(
-        &app_handle,
-        terminal_step,
-        &msg,
-        total_cdks,
-        batch_result.success,
-      );
+      if self.should_emit_batch_terminal_in_run() {
+        self.emit_batch_terminal(
+          &app_handle,
+          terminal_step,
+          &msg,
+          total_cdks,
+          batch_result.success,
+        );
+      }
       self.cleanup_ephemeral_vpn_pool().await;
       return batch_result;
     }
@@ -2563,13 +2640,15 @@ impl RegistrationEngine {
     } else {
       RegistrationStep::Failed
     };
-    self.emit_batch_terminal(
-      &app_handle,
-      terminal_step,
-      &msg,
-      total_cdks,
-      batch_result.success,
-    );
+    if self.should_emit_batch_terminal_in_run() {
+      self.emit_batch_terminal(
+        &app_handle,
+        terminal_step,
+        &msg,
+        total_cdks,
+        batch_result.success,
+      );
+    }
     batch_result
   }
 
@@ -6961,6 +7040,11 @@ impl RegistrationEngine {
       Ok(session) => session,
       Err(error) => {
         self.log(&format!("Attach automation session failed: {error}"));
+        if let Err(cleanup_error) = self.kill_browser_only(app_handle, &profile).await {
+          return Err(format!(
+            "{error}; browser cleanup after attach failure also failed: {cleanup_error}"
+          ));
+        }
         return Err(error);
       }
     };
@@ -6980,12 +7064,23 @@ impl RegistrationEngine {
     use crate::browser::BrowserType;
     use crate::profile::manager::create_browser_profile_with_group;
 
-    // Already have a worker for this engine — reload latest metadata.
+    // Already have a worker for this engine — selected profiles use the validated
+    // in-memory snapshot; generated workers reload latest metadata from disk.
     if let Some(id) = self.worker_profile_id.clone() {
+      if let Some(profile) = self.selected_profile.as_ref() {
+        if profile.id.to_string() == id {
+          return Ok(profile.clone());
+        }
+      }
       if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
         if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
           return Ok(found);
         }
+      }
+      if self.selected_profile.is_some() {
+        return Err(format!(
+          "Selected worker profile {id} is no longer available"
+        ));
       }
       self.log(&format!(
         "Worker profile {id} missing from store — will recreate"
@@ -6994,101 +7089,8 @@ impl RegistrationEngine {
       self.owns_worker_profile = false;
     }
 
-    // Prefer an existing user-selected profile as the worker (reuse, not template-only).
-    if let Some(profile_id) = self.config.profile_id.as_ref() {
-      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-        if let Some(mut found) = profiles
-          .into_iter()
-          .find(|p| p.id.to_string() == *profile_id)
-        {
-          // Ensure relaunches renew fingerprint even when reusing a user profile.
-          if found.browser.eq_ignore_ascii_case("camoufox") {
-            let mut cfg = found.camoufox_config.clone().unwrap_or_default();
-            if cfg.randomize_fingerprint_on_launch != Some(true) {
-              cfg.randomize_fingerprint_on_launch = Some(true);
-              found.camoufox_config = Some(cfg.clone());
-              if let Err(e) = crate::profile::ProfileManager::instance()
-                .update_camoufox_config(app_handle.clone(), &found.id.to_string(), cfg)
-                .await
-              {
-                self.log(&format!(
-                  "Warning: failed to enable Camoufox FP renew on worker: {e}"
-                ));
-              }
-            }
-          } else if found.browser.eq_ignore_ascii_case("chromium") {
-            let mut cfg = found.chromium_config.clone().unwrap_or_default();
-            if cfg.randomize_fingerprint_on_launch != Some(true) {
-              cfg.randomize_fingerprint_on_launch = Some(true);
-              found.chromium_config = Some(cfg.clone());
-              if let Err(e) = crate::profile::ProfileManager::instance()
-                .update_chromium_config(app_handle.clone(), &found.id.to_string(), cfg)
-                .await
-              {
-                self.log(&format!(
-                  "Warning: failed to enable Chromium FP renew on worker: {e}"
-                ));
-              }
-            }
-          }
-
-          // Align network attachment with batch/slot config (vpn preferred, else proxy).
-          if let Some(vpn_id) = self.worker_vpn_id() {
-            if found.vpn_id.as_deref() != Some(vpn_id.as_str()) {
-              match crate::profile::ProfileManager::instance()
-                .update_profile_vpn(
-                  app_handle.clone(),
-                  &found.id.to_string(),
-                  Some(vpn_id.clone()),
-                )
-                .await
-              {
-                Ok(updated) => {
-                  found = updated;
-                  self.log(&format!("Worker profile VPN set to {vpn_id}"));
-                }
-                Err(e) => {
-                  self.log(&format!(
-                    "Warning: failed to set worker vpn_id={vpn_id}: {e}"
-                  ));
-                }
-              }
-            }
-          } else if let Some(proxy_id) = self.config.effective_proxy_id() {
-            if found.proxy_id.as_deref() != Some(proxy_id.as_str()) {
-              match crate::profile::ProfileManager::instance()
-                .update_profile_proxy(
-                  app_handle.clone(),
-                  &found.id.to_string(),
-                  Some(proxy_id.clone()),
-                )
-                .await
-              {
-                Ok(updated) => {
-                  found = updated;
-                  self.log(&format!("Worker profile proxy set to {proxy_id}"));
-                }
-                Err(e) => {
-                  self.log(&format!(
-                    "Warning: failed to set worker proxy_id={proxy_id}: {e}"
-                  ));
-                }
-              }
-            }
-          }
-
-          self.log(&format!(
-            "Reusing configured profile as worker: {} ({}) browser={} version={}",
-            found.name, found.id, found.browser, found.version
-          ));
-          self.worker_profile_id = Some(found.id.to_string());
-          self.owns_worker_profile = false;
-          return Ok(found);
-        }
-      }
-      self.log(&format!(
-        "Configured profile_id {profile_id} not found — creating auto-reg worker"
-      ));
+    if self.config.profile_id.is_some() {
+      return Err("Selected registration profile was not installed before execution".into());
     }
 
     let browser_str = if self.config.browser_type == "camoufox" {
@@ -7255,19 +7257,35 @@ impl RegistrationEngine {
 
     let worker = self.ensure_worker_profile(app_handle).await?;
     self.log(&format!(
-      "Launching worker {} ({}) — fingerprint renew + fresh ephemeral dir",
+      "Launching worker {} ({}) with configured runtime policy",
       worker.name, worker.id
     ));
 
-    let launched = BrowserRunner::instance()
-      .launch_browser(
-        app_handle.clone(),
-        &worker,
-        Some("about:blank".into()),
-        None,
-      )
-      .await
-      .map_err(|e| format!("Launch: {e}"))?;
+    let launched = if let Some(mut lease) = self.runtime_lease.take() {
+      let policy = self.launch_policy_for_worker(&worker.id.to_string(), false);
+      let result = BrowserRunner::instance()
+        .launch_browser_with_policy(
+          app_handle.clone(),
+          &worker,
+          Some("about:blank".into()),
+          None,
+          &policy,
+          &mut lease,
+        )
+        .await;
+      self.runtime_lease = Some(lease);
+      result
+    } else {
+      BrowserRunner::instance()
+        .launch_browser(
+          app_handle.clone(),
+          &worker,
+          Some("about:blank".into()),
+          None,
+        )
+        .await
+    }
+    .map_err(|e| format!("Launch: {e}"))?;
 
     Ok(launched)
   }
@@ -7281,10 +7299,20 @@ impl RegistrationEngine {
   ) -> Result<(), String> {
     use crate::browser_runner::BrowserRunner;
 
-    match BrowserRunner::instance()
-      .kill_browser_process(app_handle.clone(), profile)
-      .await
-    {
+    let cleanup_result = if let Some(mut lease) = self.runtime_lease.take() {
+      let policy = self.launch_policy_for_worker(&profile.id.to_string(), false);
+      let result = BrowserRunner::instance()
+        .kill_runtime_browser(app_handle.clone(), profile, &policy, &mut lease)
+        .await;
+      self.runtime_lease = Some(lease);
+      result
+    } else {
+      BrowserRunner::instance()
+        .kill_browser_process(app_handle.clone(), profile)
+        .await
+    };
+
+    match cleanup_result {
       Ok(()) => {
         self.log(&format!(
           "Browser killed for worker profile {} ({})",
@@ -7303,12 +7331,18 @@ impl RegistrationEngine {
     }
   }
 
+  fn should_delete_worker_profile(&self, profile_id: &str) -> bool {
+    self.owns_worker_profile && self.worker_profile_id.as_deref() == Some(profile_id)
+  }
+
   /// Delete the auto-created worker at batch end. Never delete user-provided profile_id.
   async fn dispose_worker_profile(&mut self, app_handle: &tauri::AppHandle) {
-    let Some(id) = self.worker_profile_id.take() else {
+    let Some(id) = self.worker_profile_id.as_ref().cloned() else {
       return;
     };
-    if !self.owns_worker_profile {
+    let should_delete = self.should_delete_worker_profile(&id);
+    self.worker_profile_id = None;
+    if !should_delete {
       self.log(&format!(
         "Keeping user-provided worker profile on disk: {id}"
       ));
@@ -7369,5 +7403,129 @@ impl RegistrationEngine {
       two_factor_backfill_operation_id: None,
       record_revision: 1,
     }
+  }
+}
+
+#[cfg(test)]
+mod runtime_policy_tests {
+  use super::*;
+  use crate::profile_runtime::{DataMode, FingerprintMode, LeaseRegistry};
+
+  fn config() -> RegistrationConfig {
+    serde_json::from_value(serde_json::json!({ "cdks": ["GMAIL-TEST"] }))
+      .expect("minimal registration config")
+  }
+
+  #[test]
+  fn selected_worker_policy_is_task_local_and_not_owned() {
+    let mut config = config();
+    config.data_mode = DataMode::Persistent;
+    config.fingerprint_mode = FingerprintMode::Stable;
+    config.network_mode = NetworkMode::Proxy;
+    config.proxy_id = Some("proxy-task".to_string());
+    let engine = RegistrationEngine::new(config);
+
+    let policy = engine.launch_policy_for_worker("selected-profile", false);
+
+    assert_eq!(
+      policy.source_profile_id.as_deref(),
+      Some("selected-profile")
+    );
+    assert_eq!(policy.data_mode, DataMode::Persistent);
+    assert_eq!(policy.fingerprint_mode, FingerprintMode::Stable);
+    assert_eq!(policy.proxy_id.as_deref(), Some("proxy-task"));
+    assert_eq!(policy.vpn_id, None);
+    assert!(!policy.clear_network);
+    assert!(!policy.owns_generated_worker);
+    assert!(!policy.persist_process_to_source);
+  }
+
+  #[test]
+  fn selected_worker_policy_uses_slot_vpn_and_clears_stored_network_for_direct_mode() {
+    let mut vpn_config = config();
+    vpn_config.network_mode = NetworkMode::Vpn;
+    vpn_config.vpn_id = Some("vpn-base".to_string());
+    let mut vpn_engine = RegistrationEngine::new(vpn_config);
+    vpn_engine.slot_vpn_id = Some("vpn-slot".to_string());
+
+    let vpn_policy = vpn_engine.launch_policy_for_worker("selected-profile", false);
+    assert_eq!(vpn_policy.vpn_id.as_deref(), Some("vpn-slot"));
+    assert_eq!(vpn_policy.proxy_id, None);
+    assert!(!vpn_policy.clear_network);
+
+    let direct_engine = RegistrationEngine::new(config());
+    let direct_policy = direct_engine.launch_policy_for_worker("selected-profile", false);
+    assert!(direct_policy.clear_network);
+    assert_eq!(direct_policy.proxy_id, None);
+    assert_eq!(direct_policy.vpn_id, None);
+  }
+
+  #[test]
+  fn selected_runtime_defers_batch_terminal_until_cleanup() {
+    let mut selected = RegistrationEngine::new(config());
+    let profile = crate::profile::BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "selected".to_string(),
+      browser: "chromium".to_string(),
+      version: "1.0.0".to_string(),
+      ..crate::profile::BrowserProfile::default()
+    };
+    let registry = LeaseRegistry::new();
+    let lease = registry
+      .try_acquire(&profile.id.to_string())
+      .expect("selected profile lease");
+    selected.install_selected_runtime(profile, lease.clone());
+
+    assert!(!selected.should_emit_batch_terminal_in_run());
+    assert!(RegistrationEngine::new(config()).should_emit_batch_terminal_in_run());
+    registry.release(&lease.lease_id);
+  }
+
+  #[test]
+  fn worker_deletion_requires_matching_task_owned_profile() {
+    let mut engine = RegistrationEngine::new(config());
+    engine.worker_profile_id = Some("generated-profile".to_string());
+    engine.owns_worker_profile = true;
+
+    assert!(engine.should_delete_worker_profile("generated-profile"));
+    assert!(!engine.should_delete_worker_profile("different-profile"));
+
+    engine.owns_worker_profile = false;
+    assert!(!engine.should_delete_worker_profile("generated-profile"));
+  }
+
+  #[test]
+  fn selected_runtime_propagates_to_cdk_fork_without_profile_ownership() {
+    let profile = crate::profile::BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "selected".to_string(),
+      browser: "chromium".to_string(),
+      version: "1.0.0".to_string(),
+      ..crate::profile::BrowserProfile::default()
+    };
+    let profile_id = profile.id.to_string();
+    let registry = LeaseRegistry::new();
+    let lease = registry
+      .try_acquire(&profile_id)
+      .expect("selected profile lease");
+    let mut engine = RegistrationEngine::new(config());
+
+    engine.install_selected_runtime(profile.clone(), lease.clone());
+    let slot = engine.fork_for_cdk(0);
+
+    assert_eq!(slot.worker_profile_id.as_deref(), Some(profile_id.as_str()));
+    assert_eq!(
+      slot.selected_profile.as_ref().map(|item| item.id),
+      Some(profile.id)
+    );
+    assert_eq!(
+      slot
+        .runtime_lease
+        .as_ref()
+        .map(|item| item.lease_id.as_str()),
+      Some(lease.lease_id.as_str())
+    );
+    assert!(!slot.owns_worker_profile);
+    registry.release(&lease.lease_id);
   }
 }

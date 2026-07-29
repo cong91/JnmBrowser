@@ -1,0 +1,68 @@
+# Progress Log
+
+Bead: jnmbrowser-pia
+Started: 2026-07-28
+
+## Codebase Patterns
+
+- BrowserRunner owns browser launch, process lifecycle, pre-launch rollback, fingerprint regeneration, and ephemeral directory handling.
+- ephemeral_dirs.rs owns transactional runtime directory replacement, deletion retries, startup recovery, and effective-path resolution.
+- Two-factor Backfill provides the strongest existing cleanup guard, ownership check, rollback, and stale-recovery pattern.
+- Auto Registration already tracks worker ownership and has backend profile_id validation, but normal UI wiring and immutable runtime adoption are incomplete.
+- All user-visible frontend strings must be translated in seven locale files; Tauri listeners must be installed before starting work.
+
+## Specification Notes
+
+- Selected architecture: Option C (Recommended), using immutable source profiles, runtime launch policy, runtime data/fingerprint overrides, and a full lifecycle lease.
+- `/create` intentionally writes specification artifacts only. Application implementation belongs to `/ship jnmbrowser-pia` after planning and file reservation.
+- Existing dirty worktree changes on feat/auto-reg-2fa-backfill are pre-existing and must remain untouched.
+
+---
+
+<!-- Task logs below - APPEND ONLY -->
+
+## 2026-07-28 — /plan jnmbrowser-pia
+
+- Wrote `.beads/artifacts/jnmbrowser-pia/plan.md` (Option C, Level 2 discovery).
+- Locked: fail-fast lease, profile_runtime module, lease-scoped ephemeral keys, no source metadata FP writes, UI Select by profile id.
+- Waves 1–9 map to PRD tasks backend-1 … verification-1.
+- No application code implemented in /plan.
+
+
+## 2026-07-28 — /ship jnmbrowser-pia Wave 1
+
+- Implemented `src-tauri/src/profile_runtime/` (policy, lease, guard, mod) + `mod profile_runtime` in lib.rs.
+- Tests: `cargo test --lib profile_runtime::` → 13 passed.
+- Commit: `7a4ea54 feat(profile-runtime): add launch policy types and lifecycle lease registry`.
+- Pre-commit gate required small unrelated test/clippy alignment (UA 148, firefox BrowserType, password radio selector, account-check-live match_result_ok).
+- backend-1 remains `passes: false` until Wave 2 (ephemeral keys + BrowserRunner policy path) completes PRD steps.
+- Next: Wave 2 Task 2.
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 2
+
+- Implemented lease-scoped ephemeral directory APIs with backward-compatible profile-id wrappers.
+- Added BrowserRunner policy launch overlays for runtime-only data, fingerprint, proxy/VPN, metadata persistence, and PID tracking.
+- Added manager-aware, ownership-safe, retryable runtime cleanup for browser, proxy, owned VPN worker, and ephemeral data; lifecycle lease release remains workflow-owned.
+- Verification: `ephemeral_dirs::` 15 passed; `profile_runtime::` 14 passed; `browser_runner::` 20 passed; full `cargo test --lib` 912 passed; formatting, focused clippy, and `git diff --check` passed.
+- Commit: `22a2b34 feat(profile-runtime): add policy-aware browser launch overlays`.
+- PRD `backend-1` complete; next: Wave 3 Task 3 (Account Checker vertical slice).
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 3
+
+- Migrated Account Checker to `AccountCheckConfig` with selected profile, data mode, fingerprint mode, and fixed/rotating VPN policy.
+- Added synchronous selected-profile validation and fail-fast lease acquisition, read-only metadata loading, generated-worker ownership controls, cancellation truthfulness, and guarded cleanup diagnostics.
+- Applied effective VPN to the actual BrowserRunner runtime policy; selected profile metadata and persistent data remain untouched during validation and launches.
+- Added failed-launch rollback synchronization before runtime cleanup/lease release.
+- Verification: Account Checker 35 passed; BrowserRunner 20 passed; full `cargo test --lib` 925 passed; all-targets/all-features clippy, formatting, unused-command check, and diff check passed.
+- Commit: `ed90af6 feat(account-checker): reuse selected profiles with runtime policy`.
+- PRD `backend-2` complete; next: Wave 4 Task 4 (Auto Registration migration).
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 4
+
+- Added Auto Registration `dataMode` and `fingerprintMode` request defaults while preserving legacy payload compatibility and selected-profile concurrency rejection.
+- Added synchronous read-only selected-profile validation and fail-fast lease acquisition before task publication; missing, running, cross-OS, browser-mismatched, busy, and unsupported ephemeral Camoufox/Firefox selections fail closed.
+- Removed selected-profile fingerprint/proxy/VPN metadata updates and routed selected launches, relaunches, attach-failure cleanup, and per-account cleanup through BrowserRunner runtime policy APIs with task-local network overrides.
+- Added guarded cleanup that releases the lease only after runtime resources are reconciled, defers selected batch terminal events until cleanup, and keeps failed cleanup leases unavailable for overlap.
+- Preserved generated-worker creation/ordinary launch/deletion behavior; deletion now requires matching task ownership. Parallel batch requests now prepare every config and lease before spawning the first task.
+- Verification: Registration 131 passed; `profile_runtime::` 14 passed; `browser_runner::` 20 passed; full `cargo test --lib` 942 passed; focused all-features lib clippy, Rust formatting, unused-command check, and diff check passed. Existing-account 2FA dispatch tests remain green inside the Registration suite.
+- PRD `backend-3` complete; next: Wave 5 Task 5 (Auto Login migration).

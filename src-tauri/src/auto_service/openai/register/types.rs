@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::email::EmailProvider;
+use crate::profile_runtime::{DataMode, FingerprintMode};
 
 /// How auto-registration should exit the network.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -26,10 +27,16 @@ pub struct RegistrationConfig {
   /// List of CDK codes (e.g. ["GMAIL-K4L5-EUW5-PHBV-A6KW", ...])
   pub cdks: Vec<String>,
   /// Optional existing profile ID to reuse as the batch worker.
-  /// When set and found, auto-reg launches this profile (with FP renew + data wipe
-  /// on each relaunch) instead of creating an ephemeral worker. Not deleted at end.
+  /// When set and found, auto-reg launches this profile with the requested runtime
+  /// data/fingerprint policy instead of creating a worker. Not deleted at end.
   /// When unset, one ephemeral worker is created for the whole batch and deleted once.
   pub profile_id: Option<String>,
+  /// Whether runtime browser data is disposable or uses the source profile directory.
+  #[serde(default)]
+  pub data_mode: DataMode,
+  /// Whether each launch gets a new runtime fingerprint or preserves the stored one.
+  #[serde(default)]
+  pub fingerprint_mode: FingerprintMode,
   /// Optional proxy ID to attach (used when `network_mode` is Proxy)
   pub proxy_id: Option<String>,
   /// Optional VPN config ID from Proxies & VPNs (used when `network_mode` is Vpn)
@@ -329,6 +336,42 @@ mod network_config_tests {
   }
 
   #[test]
+  fn registration_config_defaults_to_ephemeral_random_runtime_policy() {
+    let json = r#"{"cdks":["GMAIL-X"]}"#;
+    let config: RegistrationConfig = serde_json::from_str(json).unwrap();
+
+    assert_eq!(
+      config.data_mode,
+      crate::profile_runtime::DataMode::Ephemeral
+    );
+    assert_eq!(
+      config.fingerprint_mode,
+      crate::profile_runtime::FingerprintMode::RandomPerLaunch
+    );
+  }
+
+  #[test]
+  fn registration_config_accepts_explicit_runtime_policy() {
+    let json = r#"{
+      "cdks":["GMAIL-X"],
+      "profileId":"profile-id",
+      "dataMode":"persistent",
+      "fingerprintMode":"stable"
+    }"#;
+    let config: RegistrationConfig = serde_json::from_str(json).unwrap();
+
+    assert_eq!(config.profile_id.as_deref(), Some("profile-id"));
+    assert_eq!(
+      config.data_mode,
+      crate::profile_runtime::DataMode::Persistent
+    );
+    assert_eq!(
+      config.fingerprint_mode,
+      crate::profile_runtime::FingerprintMode::Stable
+    );
+  }
+
+  #[test]
   fn validate_cdks_rejects_blank_codes() {
     let mut c = base_config(NetworkMode::None);
     c.cdks = vec!["GMAIL-X".into(), "  ".into()];
@@ -369,6 +412,8 @@ mod network_config_tests {
     RegistrationConfig {
       cdks: vec!["GMAIL-X".into()],
       profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       proxy_id: None,
       vpn_id: None,
       browser_type: "chromium".into(),

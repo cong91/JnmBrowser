@@ -55,6 +55,16 @@ pub struct ParallelBatchSummary {
   pub all_succeeded: bool,
 }
 
+fn prepare_all_batches_with<T, F>(
+  configs: Vec<RegistrationConfig>,
+  mut prepare: F,
+) -> Result<Vec<T>, String>
+where
+  F: FnMut(RegistrationConfig) -> Result<T, String>,
+{
+  configs.into_iter().map(&mut prepare).collect()
+}
+
 /// Launch multiple registration batches in parallel.
 ///
 /// Each batch runs its own `RegistrationEngine` on a dedicated thread.
@@ -80,17 +90,18 @@ pub async fn launch_parallel_batches(
 
   let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_BATCHES));
   let cancel_flag = Arc::new(AtomicBool::new(false));
-  let mut task_ids = Vec::with_capacity(configs.len());
+  let prepared_batches = prepare_all_batches_with(configs, |config| {
+    prepare_registration(config, cancel_flag.clone())
+  })?;
+  let total_batches = prepared_batches.len();
+  let mut task_ids = Vec::with_capacity(total_batches);
 
-  // We spawn each batch on a dedicated blocking thread so the Tauri
-  // command handler returns immediately. Each batch internally creates
-  // its own tokio runtime. The semaphore is acquired BEFORE entering
-  // spawn_blocking to cap concurrent preparations.
-  for (idx, config) in configs.into_iter().enumerate() {
+  // All configurations and selected-profile leases are prepared before the
+  // first task starts, so a later invalid or busy profile cannot partially
+  // launch the request.
+  for (idx, prepared) in prepared_batches.into_iter().enumerate() {
     let handle = app_handle.clone();
     let flag = cancel_flag.clone();
-
-    let prepared = prepare_registration(config, flag.clone())?;
     let task_id = prepared.task_id().to_string();
     task_ids.push(task_id.clone());
 
@@ -124,7 +135,7 @@ pub async fn launch_parallel_batches(
 
     // Stagger starts — random delay between batches to avoid
     // simultaneous Cloudflare challenges.
-    if idx + 1 < task_ids.len() {
+    if idx + 1 < total_batches {
       let stagger_ms = rand::rng().random_range(MIN_STAGGER_MS..MAX_STAGGER_MS);
       std::thread::sleep(Duration::from_millis(stagger_ms));
     }
@@ -254,6 +265,40 @@ impl Default for RateLimiter {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn parallel_preparation_returns_no_batches_when_a_later_config_fails() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct PreparedMarker(Arc<AtomicUsize>);
+
+    impl Drop for PreparedMarker {
+      fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+      }
+    }
+
+    let configs = vec![
+      serde_json::from_value(serde_json::json!({ "cdks": ["FIRST"] })).unwrap(),
+      serde_json::from_value(serde_json::json!({ "cdks": ["SECOND"] })).unwrap(),
+    ];
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut prepared = 0usize;
+
+    let result = prepare_all_batches_with(configs, |_config| {
+      prepared += 1;
+      if prepared == 2 {
+        Err("second preparation failed".to_string())
+      } else {
+        Ok(PreparedMarker(dropped.clone()))
+      }
+    });
+
+    assert_eq!(result.unwrap_err(), "second preparation failed");
+    assert_eq!(prepared, 2);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+  }
 
   #[test]
   fn rate_limiter_starts_idle() {

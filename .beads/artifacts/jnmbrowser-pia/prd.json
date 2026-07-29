@@ -1,0 +1,235 @@
+{
+  "beadId": "jnmbrowser-pia",
+  "prdName": "selected-browser-profile-reuse-runtime-launch-policy",
+  "tasks": [
+    {
+      "id": "backend-1",
+      "category": "backend",
+      "description": "A reusable Rust runtime policy, unique runtime identity, and full-lifecycle profile lease are available to BrowserRunner and automation workflows without mutating source profile metadata.",
+      "steps": [
+        "Run targeted Rust tests for persistent metadata preservation, runtime identity uniqueness, ephemeral cleanup/recovery, and stable versus random fingerprint resolution.",
+        "Run targeted Rust tests proving concurrent lease rejection and reacquisition after success, cancellation, launch failure, panic/drop, and cleanup failure.",
+        "Run cargo fmt --all -- --check and the focused clippy target after pnpm copy-proxy-binary."
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/browser_runner.rs",
+          "src-tauri/src/ephemeral_dirs.rs",
+          "src-tauri/src/profile/types.rs",
+          "src-tauri/src/profile/manager.rs",
+          "src-tauri/src/chromium_manager.rs",
+          "src-tauri/src/camoufox_manager.rs",
+          "src-tauri/src/auto_service/openai/browser.rs",
+          "src-tauri/tests/browser_profile_reuse.rs"
+        ]
+      }
+    },
+    {
+      "id": "backend-2",
+      "category": "backend",
+      "description": "Account Checker accepts the shared runtime policy, can select an existing profile, applies effective VPN overrides, and reports guarded cleanup failures while preserving generated-worker fallback.",
+      "steps": [
+        "Run focused Account Checker tests for selected-profile validation, effective VPN application, generated-worker ownership, cancellation, and cleanup diagnostics.",
+        "Confirm the selected profile metadata and persistent data path are unchanged before and after a successful and failed check."
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": ["Shared runtime launch policy and profile lease"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/auto_service/openai/account_checker/commands.rs",
+          "src-tauri/src/auto_service/openai/account_checker/types.rs",
+          "src-tauri/tests/account_checker.rs"
+        ]
+      }
+    },
+    {
+      "id": "backend-3",
+      "category": "backend",
+      "description": "Auto Registration exposes its existing profile selection through the normal request/UI boundary and runs adopted profiles through immutable runtime overlays with lease-protected cleanup.",
+      "steps": [
+        "Run registration tests proving selected-profile concurrency above one is rejected, source metadata is restored byte-for-byte, and only owned generated workers are deleted.",
+        "Run registration lifecycle tests for relaunch fingerprint renewal, ephemeral data isolation, cancellation, launch failure, and cleanup failure.",
+        "Verify existing-account 2FA backfill dispatch still bypasses new-account quota/provider paths."
+      ],
+      "passes": true,
+      "metadata": {
+        "depends_on": [
+          "Shared runtime launch policy and profile lease",
+          "Account Checker profile reuse vertical slice"
+        ],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/auto_service/openai/register/types.rs",
+          "src-tauri/src/auto_service/openai/register/execution.rs",
+          "src-tauri/src/auto_service/openai/register/engine.rs",
+          "docs/auto-registration.md"
+        ]
+      }
+    },
+    {
+      "id": "backend-4",
+      "category": "backend",
+      "description": "Auto Login accepts an explicit profile/runtime policy, replaces implicit unleased name reuse with an explicit default, and keeps network and fingerprint overrides task-local.",
+      "steps": [
+        "Run login tests proving explicit profile validation, same-profile concurrent rejection, and lease release after normal and failed login termination.",
+        "Verify stable-worker default behavior remains available when no profile is selected and does not select a different user's profile by name alone.",
+        "Verify task-local network/fingerprint settings do not persist to the selected source profile."
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": [
+          "Shared runtime launch policy and profile lease",
+          "Auto Registration runtime-policy migration"
+        ],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/auto_service/openai/login/types.rs",
+          "src-tauri/src/auto_service/openai/login/commands.rs",
+          "src-tauri/src/auto_service/openai/login/engine.rs",
+          "src-tauri/tests/login_profile_reuse.rs"
+        ]
+      }
+    },
+    {
+      "id": "backend-5",
+      "category": "backend",
+      "description": "2FA Backfill uses the shared runtime policy while preserving serial execution, canary/bulk gates, recovery journals, ownership checks, secret-free events, and guarded cleanup.",
+      "steps": [
+        "Run backfill tests for selected-profile serialization, operation ownership, stale recovery, cancellation, and cleanup refusal on ownership mismatch.",
+        "Verify progress events and recovery summaries remain free of passwords, OTP/TOTP material, access tokens, raw provider responses, and raw HTML."
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": [
+          "Shared runtime launch policy and profile lease",
+          "Auto Login explicit profile migration"
+        ],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src-tauri/src/auto_service/openai/two_factor_backfill/commands.rs",
+          "src-tauri/src/auto_service/openai/two_factor_backfill/engine.rs",
+          "src-tauri/tests/two_factor_backfill.rs"
+        ]
+      }
+    },
+    {
+      "id": "frontend-1",
+      "category": "frontend",
+      "description": "All four dialogs and event hooks expose profile, data-mode, fingerprint-mode, and compatible network controls with server-validated Tauri requests and no raw user-facing strings.",
+      "steps": [
+        "Run pnpm lint:js and verify all four dialogs type-check with the backend request shapes.",
+        "Manually verify profile list refresh, stale-profile rejection, translated validation/error states, keyboard access, and incompatible concurrency behavior.",
+        "Run pnpm check-unused-commands."
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": [
+          "Account Checker profile reuse vertical slice",
+          "Auto Registration runtime-policy migration",
+          "Auto Login explicit profile migration",
+          "Two-factor Backfill shared factory migration"
+        ],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src/components/account-checker-dialog.tsx",
+          "src/components/account-registration-dialog.tsx",
+          "src/components/account-login-dialog.tsx",
+          "src/components/two-factor-backfill-dialog.tsx",
+          "src/hooks/use-account-checker-events.ts",
+          "src/hooks/use-registration-events.ts",
+          "src/hooks/use-login-events.ts",
+          "src/hooks/use-two-factor-backfill-events.ts",
+          "src-tauri/src/lib.rs"
+        ]
+      }
+    },
+    {
+      "id": "docs-1",
+      "category": "docs",
+      "description": "The new policy terminology, errors, and workflow lifecycle are translated in all seven locales and documented consistently for persistent and ephemeral modes and kernel capabilities.",
+      "steps": [
+        "Validate every new key exists and is non-empty in all seven locale files.",
+        "Run the repository spellcheck/lint path and review the documentation against the implemented kernel capability matrix."
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["Frontend profile policy controls and Tauri wiring"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": [
+          "src/i18n/locales/en.json",
+          "src/i18n/locales/es.json",
+          "src/i18n/locales/fr.json",
+          "src/i18n/locales/ja.json",
+          "src/i18n/locales/pt.json",
+          "src/i18n/locales/ru.json",
+          "src/i18n/locales/zh.json",
+          "docs/auto-registration.md"
+        ]
+      }
+    },
+    {
+      "id": "verification-1",
+      "category": "verification",
+      "description": "The completed migration has reproducible verification evidence covering frontend, Rust, command registration, tests, formatting, and documentation consistency.",
+      "steps": [
+        "Run pnpm copy-proxy-binary before proxy-dependent Rust checks.",
+        "Run pnpm format.",
+        "Run pnpm lint.",
+        "Run pnpm test.",
+        "Run pnpm check-unused-commands.",
+        "Review git diff --stat, git status --short, and the complete bead artifact set; confirm unrelated pre-existing changes remain untouched."
+      ],
+      "passes": false,
+      "metadata": {
+        "depends_on": ["Seven-locale translations and lifecycle documentation"],
+        "parallel": false,
+        "conflicts_with": [],
+        "files": []
+      }
+    }
+  ],
+  "context": {
+    "patterns": [
+      "BrowserRunner centralizes browser launch, fingerprint regeneration, process lifecycle, pre-launch rollback, and ephemeral directory handling.",
+      "ephemeral_dirs.rs provides transactional runtime directory replacement, deletion retries, startup recovery, and effective-path resolution.",
+      "Two-factor backfill uses BrowserCleanupGuard, ownership checks, rollback, and stale recovery.",
+      "Auto Registration tracks worker_profile_id and owns_worker_profile for generated versus user-provided workers.",
+      "Tauri listeners are installed asynchronously before work starts, as shown by use-extension-events.ts.",
+      "User-facing frontend strings are translated across seven locale files."
+    ],
+    "keyFiles": [
+      "src-tauri/src/browser_runner.rs",
+      "src-tauri/src/ephemeral_dirs.rs",
+      "src-tauri/src/auto_service/openai/account_checker/commands.rs",
+      "src-tauri/src/auto_service/openai/register/engine.rs",
+      "src-tauri/src/auto_service/openai/login/engine.rs",
+      "src-tauri/src/auto_service/openai/two_factor_backfill/engine.rs",
+      ".zcode/artifacts/audit-browser-profile-reuse/audit.md",
+      "docs/auto-registration.md"
+    ],
+    "nonGoals": [
+      "New fingerprint-generation algorithms or browser kernels",
+      "Remote/distributed leases",
+      "Concurrent execution against one selected source profile",
+      "Unrelated OpenAI provider, authentication, quota, inventory, or journal redesign"
+    ]
+  },
+  "beadMetadata": {
+    "depends_on": [],
+    "parallel": false,
+    "conflicts_with": [],
+    "blocks": [],
+    "estimated_hours": 32
+  }
+}
