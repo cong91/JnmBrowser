@@ -257,38 +257,33 @@ impl BrowserCleanupGuard {
   }
 }
 
+fn retry_dropped_cleanup(action: BrowserCleanupAction) {
+  std::thread::spawn(move || {
+    let runtime = loop {
+      match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+      {
+        Ok(runtime) => break runtime,
+        Err(_) => {
+          log::error!("Dropped 2FA backfill cleanup runtime creation failed; retrying");
+          std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+      }
+    };
+    let mut delay = std::time::Duration::from_millis(100);
+    while runtime.block_on(action()).is_err() {
+      log::error!("Dropped 2FA backfill browser cleanup failed; retrying");
+      std::thread::sleep(delay);
+      delay = (delay * 2).min(std::time::Duration::from_secs(5));
+    }
+  });
+}
+
 impl Drop for BrowserCleanupGuard {
   fn drop(&mut self) {
-    let Some(action) = self.action.take() else {
-      return;
-    };
-    match tokio::runtime::Handle::try_current() {
-      Ok(handle) => {
-        handle.spawn(async move {
-          if let Err(error) = action().await {
-            log::error!("Dropped 2FA backfill browser cleanup failed: {error}");
-          }
-        });
-      }
-      Err(error) => {
-        std::thread::spawn(move || {
-          let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-          {
-            Ok(runtime) => runtime,
-            Err(runtime_error) => {
-              log::error!(
-                "Dropped 2FA backfill browser session without a Tokio runtime ({error}); fallback runtime creation failed: {runtime_error}"
-              );
-              return;
-            }
-          };
-          if let Err(cleanup_error) = runtime.block_on(action()) {
-            log::error!("Fallback 2FA backfill browser cleanup failed: {cleanup_error}");
-          }
-        });
-      }
+    if let Some(action) = self.action.take() {
+      retry_dropped_cleanup(action);
     }
   }
 }
@@ -723,8 +718,8 @@ mod tests {
       let calls = Arc::clone(&retry_calls_for_action);
       Box::pin(async move {
         let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt == 1 {
-          Err("first cleanup failed".into())
+        if attempt <= 2 {
+          Err(format!("cleanup attempt {attempt} failed"))
         } else {
           Ok(())
         }
@@ -733,12 +728,12 @@ mod tests {
     assert!(guard.close().await.is_err());
     drop(guard);
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
-      while retry_calls.load(Ordering::SeqCst) != 2 {
+      while retry_calls.load(Ordering::SeqCst) != 3 {
         tokio::task::yield_now().await;
       }
     })
     .await
     .expect("Drop must retry a failed cleanup action");
-    assert_eq!(retry_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(retry_calls.load(Ordering::SeqCst), 3);
   }
 }

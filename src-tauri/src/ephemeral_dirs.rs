@@ -534,8 +534,8 @@ pub fn remove_ephemeral_dir(profile_id: &str) -> Result<bool, String> {
   remove_ephemeral_dir_for_key(profile_id)
 }
 
-/// Recover ephemeral dir mappings on startup by scanning the RAM-backed base dir.
-/// Dir names are profile UUIDs, so we re-populate the in-memory HashMap.
+/// Recover legacy profile-scoped mappings and remove orphaned lease-scoped runtime dirs.
+/// Lease-scoped dirs have no valid owner after process restart and are always disposable.
 /// Also cleans up old disk-based dirs from previous versions.
 pub fn recover_ephemeral_dirs() {
   cleanup_legacy_dirs();
@@ -561,7 +561,18 @@ pub fn recover_ephemeral_dirs() {
   for entry in entries.flatten() {
     if entry.path().is_dir() {
       if let Some(name) = entry.file_name().to_str() {
-        if uuid::Uuid::parse_str(name).is_ok() {
+        let valid_runtime_key = name.split_once("__").is_some_and(|(source, lease)| {
+          uuid::Uuid::parse_str(source).is_ok() && uuid::Uuid::parse_str(lease).is_ok()
+        });
+        if valid_runtime_key {
+          match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => log::info!("Removed orphaned lease-scoped ephemeral dir"),
+            Err(error) => log::warn!(
+              "Failed to remove orphaned lease-scoped ephemeral dir {}: {error}",
+              entry.path().display()
+            ),
+          }
+        } else if uuid::Uuid::parse_str(name).is_ok() {
           dirs.insert(name.to_string(), entry.path());
           log::info!("Recovered ephemeral dir for profile {}", name);
         }
@@ -794,6 +805,24 @@ mod tests {
 
     // Clean up
     remove_ephemeral_dir(&test_id).unwrap();
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn test_recovery_removes_orphaned_lease_scoped_ephemeral_dir() {
+    let base = get_ephemeral_base_dir().unwrap();
+    let source_id = uuid::Uuid::new_v4().to_string();
+    let lease_id = uuid::Uuid::new_v4().to_string();
+    let runtime_key = format!("{source_id}__{lease_id}");
+    let runtime_dir = base.join(&runtime_key);
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+
+    EPHEMERAL_DIRS.lock().unwrap().remove(&runtime_key);
+    assert!(get_ephemeral_dir_for_key(&runtime_key).is_none());
+
+    recover_ephemeral_dirs();
+    assert!(get_ephemeral_dir_for_key(&runtime_key).is_none());
+    assert!(!runtime_dir.exists());
   }
 
   #[test]

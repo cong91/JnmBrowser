@@ -63,6 +63,7 @@ impl LaunchKernel {
 #[derive(Debug, Default)]
 struct PreLaunchResources {
   launch_locks: Vec<tokio::sync::OwnedMutexGuard<()>>,
+  runtime_lease_id: Option<String>,
   vpn_id: Option<String>,
   vpn_config_existed: bool,
   vpn_worker_id: Option<String>,
@@ -111,6 +112,12 @@ impl<D: LaunchRollbackDispatcher> PreLaunchTransaction<D> {
       resources: PreLaunchResources::default(),
       committed: false,
     }
+  }
+
+  fn new_for_runtime(dispatcher: D, lease: &RuntimeLease) -> Self {
+    let mut transaction = Self::new(dispatcher);
+    transaction.resources.runtime_lease_id = Some(lease.lease_id.clone());
+    transaction
   }
 
   fn own_launch_lock(&mut self, launch_lock: tokio::sync::OwnedMutexGuard<()>) {
@@ -190,6 +197,64 @@ impl<D: LaunchRollbackDispatcher> PreLaunchTransaction<D> {
     self.resources.vpn_worker_id.as_deref()
   }
 
+  fn runtime_cleanup_state(&self) -> RuntimeCleanupState {
+    let pending_proxy_worker_ids = self
+      .resources
+      .profile_id
+      .as_deref()
+      .map(|profile_id| {
+        crate::proxy_storage::list_proxy_configs()
+          .into_iter()
+          .filter(|proxy| {
+            proxy.profile_id.as_deref() == Some(profile_id)
+              && !self.resources.preexisting_proxy_ids.contains(&proxy.id)
+          })
+          .map(|proxy| proxy.id)
+          .collect()
+      })
+      .unwrap_or_default();
+    let pending_vpn_worker_ids = self
+      .resources
+      .vpn_id
+      .as_deref()
+      .map(|vpn_id| {
+        crate::vpn_worker_storage::list_vpn_worker_configs()
+          .into_iter()
+          .filter(|worker| {
+            worker.vpn_id == vpn_id
+              && !self
+                .resources
+                .preexisting_vpn_worker_ids
+                .contains(&worker.id)
+          })
+          .map(|worker| worker.id)
+          .collect()
+      })
+      .unwrap_or_default();
+
+    RuntimeCleanupState {
+      process_id: self
+        .resources
+        .browser
+        .as_ref()
+        .and_then(LaunchKernel::process_id),
+      proxy_process_id: self.resources.proxy_pid,
+      pending_browser_profile_path: self.resources.browser_profile_path.clone(),
+      browser_instance_id: self
+        .resources
+        .browser
+        .as_ref()
+        .map(|browser| match browser {
+          LaunchKernel::Camoufox { instance_id, .. }
+          | LaunchKernel::Chromium { instance_id, .. } => instance_id.clone(),
+        }),
+      pending_proxy_worker_ids,
+      pending_vpn_worker_ids,
+      owned_vpn_worker_id: self.resources.vpn_worker_id.clone(),
+      ephemeral_runtime_key: self.resources.ephemeral_profile_id.clone(),
+    }
+  }
+
   fn commit(mut self) {
     self.resources.launch_locks.clear();
     self.committed = true;
@@ -200,6 +265,15 @@ impl<D: LaunchRollbackDispatcher> Drop for PreLaunchTransaction<D> {
   fn drop(&mut self) {
     if self.committed || self.resources.is_empty() {
       return;
+    }
+
+    if let Some(lease_id) = self.resources.runtime_lease_id.as_deref() {
+      let cleanup_state = self.runtime_cleanup_state();
+      if !cleanup_state.is_empty()
+        && !LeaseRegistry::global().set_runtime_cleanup_state(lease_id, cleanup_state)
+      {
+        log::error!("Failed to retain cleanup state for inactive runtime lease");
+      }
     }
 
     self
@@ -326,7 +400,6 @@ async fn rollback_pre_launch_resources(
       for process_id in process_ids_with_command_arg(&proxy_id) {
         force_stop_uncommitted_process(process_id).await;
       }
-      crate::proxy_storage::delete_proxy_config(&proxy_id);
     }
 
     let remaining_proxy_configs = crate::proxy_storage::list_proxy_configs();
@@ -337,7 +410,12 @@ async fn rollback_pre_launch_resources(
       if let Some(process_id) = proxy.pid {
         force_stop_uncommitted_process(process_id).await;
       }
-      crate::proxy_storage::delete_proxy_config(&proxy.id);
+      if !proxy
+        .pid
+        .is_some_and(crate::proxy_storage::is_process_running)
+      {
+        crate::proxy_storage::delete_proxy_config(&proxy.id);
+      }
     }
   }
 
@@ -348,7 +426,6 @@ async fn rollback_pre_launch_resources(
     for process_id in process_ids_with_command_arg(worker_id) {
       force_stop_uncommitted_process(process_id).await;
     }
-    crate::vpn_worker_storage::delete_vpn_worker_config(worker_id);
   }
 
   let new_vpn_worker_ids = crate::vpn_worker_storage::list_vpn_worker_configs()
@@ -367,7 +444,6 @@ async fn rollback_pre_launch_resources(
     for process_id in process_ids_with_command_arg(&worker_id) {
       force_stop_uncommitted_process(process_id).await;
     }
-    crate::vpn_worker_storage::delete_vpn_worker_config(&worker_id);
   }
 
   if let (Some(profile_id), Some(ephemeral_dir)) = (
@@ -504,6 +580,12 @@ fn validate_runtime_lease(
   policy: &LaunchPolicy,
   lease: &RuntimeLease,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  if policy.source_profile_id.is_some()
+    && (policy.persist_process_to_source || policy.owns_generated_worker)
+  {
+    return Err("selected profile runtime ownership is forbidden by runtime policy".into());
+  }
+
   let source_profile_id = policy
     .source_profile_id
     .as_deref()
@@ -537,6 +619,7 @@ fn validate_runtime_lease(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeCleanupStep {
   StopProxy(u32),
+  StopPendingProxyWorker(String),
   StopCamoufoxManager {
     profile_path: PathBuf,
     fallback_instance_id: Option<String>,
@@ -546,6 +629,7 @@ enum RuntimeCleanupStep {
     fallback_instance_id: Option<String>,
   },
   ForceKillBrowser(u32),
+  StopPendingVpnWorker(String),
   StopOwnedVpnWorker(String),
   RemoveEphemeralRuntime(String),
 }
@@ -557,14 +641,32 @@ fn runtime_cleanup_plan(
   state: &RuntimeCleanupState,
 ) -> Result<Vec<RuntimeCleanupStep>, Box<dyn std::error::Error + Send + Sync>> {
   let mut plan = Vec::new();
-  if let Some(process_id) = state.process_id {
-    plan.push(RuntimeCleanupStep::StopProxy(process_id));
+  if let Some(proxy_process_id) = state.proxy_process_id {
+    plan.push(RuntimeCleanupStep::StopProxy(proxy_process_id));
   }
+  plan.extend(
+    state
+      .pending_proxy_worker_ids
+      .iter()
+      .cloned()
+      .map(RuntimeCleanupStep::StopPendingProxyWorker),
+  );
 
   let runtime_key = state.ephemeral_runtime_key.as_deref();
-  if state.process_id.is_some() || state.browser_instance_id.is_some() {
-    let profile_path =
-      crate::ephemeral_dirs::get_effective_profile_path_for_key(profile, profiles_dir, runtime_key);
+  if state.process_id.is_some()
+    || state.browser_instance_id.is_some()
+    || state.pending_browser_profile_path.is_some()
+  {
+    let profile_path = state
+      .pending_browser_profile_path
+      .clone()
+      .unwrap_or_else(|| {
+        crate::ephemeral_dirs::get_effective_profile_path_for_key(
+          profile,
+          profiles_dir,
+          runtime_key,
+        )
+      });
     if profile.browser == "camoufox" || profile.browser == "firefox" {
       plan.push(RuntimeCleanupStep::StopCamoufoxManager {
         profile_path,
@@ -583,16 +685,22 @@ fn runtime_cleanup_plan(
   if let Some(process_id) = state.process_id {
     plan.push(RuntimeCleanupStep::ForceKillBrowser(process_id));
   }
+  plan.extend(
+    state
+      .pending_vpn_worker_ids
+      .iter()
+      .cloned()
+      .map(RuntimeCleanupStep::StopPendingVpnWorker),
+  );
   if let Some(worker_id) = state.owned_vpn_worker_id.as_ref() {
     plan.push(RuntimeCleanupStep::StopOwnedVpnWorker(worker_id.clone()));
   }
   if policy.data_mode == DataMode::Ephemeral {
-    plan.push(RuntimeCleanupStep::RemoveEphemeralRuntime(
-      state
-        .ephemeral_runtime_key
-        .clone()
-        .unwrap_or_else(|| profile.id.to_string()),
-    ));
+    if let Some(runtime_key) = state.ephemeral_runtime_key.as_ref() {
+      plan.push(RuntimeCleanupStep::RemoveEphemeralRuntime(
+        runtime_key.clone(),
+      ));
+    }
   }
   Ok(plan)
 }
@@ -864,9 +972,18 @@ impl BrowserRunner {
     // Handle Camoufox / Firefox profiles using CamoufoxManager (Playwright-based)
     if profile.browser == "camoufox" || profile.browser == "firefox" {
       let profile_launch_lock = acquire_pre_launch_lock(format!("profile:{}", profile.id)).await;
-      let mut launch_transaction = PreLaunchTransaction::new(BrowserLaunchRollbackDispatcher {
-        app_handle: app_handle.clone(),
-      });
+      let mut launch_transaction = if let Some(lease) = runtime_lease.as_deref() {
+        PreLaunchTransaction::new_for_runtime(
+          BrowserLaunchRollbackDispatcher {
+            app_handle: app_handle.clone(),
+          },
+          lease,
+        )
+      } else {
+        PreLaunchTransaction::new(BrowserLaunchRollbackDispatcher {
+          app_handle: app_handle.clone(),
+        })
+      };
       launch_transaction.own_launch_lock(profile_launch_lock);
 
       // Get or create camoufox config
@@ -1119,7 +1236,11 @@ impl BrowserRunner {
       if let Some(lease) = runtime_lease.as_deref_mut() {
         let cleanup_state = RuntimeCleanupState {
           process_id: Some(process_id),
+          proxy_process_id: Some(process_id),
+          pending_browser_profile_path: None,
           browser_instance_id: Some(camoufox_result.id.clone()),
+          pending_proxy_worker_ids: Vec::new(),
+          pending_vpn_worker_ids: Vec::new(),
           owned_vpn_worker_id: launch_transaction.owned_vpn_worker_id().map(str::to_owned),
           ephemeral_runtime_key: runtime_key.clone(),
         };
@@ -1197,9 +1318,18 @@ impl BrowserRunner {
     // Handle Chromium profiles using ChromiumManager
     if crate::browser::is_chromium_browser_name(&profile.browser) {
       let profile_launch_lock = acquire_pre_launch_lock(format!("profile:{}", profile.id)).await;
-      let mut launch_transaction = PreLaunchTransaction::new(BrowserLaunchRollbackDispatcher {
-        app_handle: app_handle.clone(),
-      });
+      let mut launch_transaction = if let Some(lease) = runtime_lease.as_deref() {
+        PreLaunchTransaction::new_for_runtime(
+          BrowserLaunchRollbackDispatcher {
+            app_handle: app_handle.clone(),
+          },
+          lease,
+        )
+      } else {
+        PreLaunchTransaction::new(BrowserLaunchRollbackDispatcher {
+          app_handle: app_handle.clone(),
+        })
+      };
       launch_transaction.own_launch_lock(profile_launch_lock);
 
       // Get or create Chromium config
@@ -1462,7 +1592,11 @@ impl BrowserRunner {
       if let Some(lease) = runtime_lease {
         let cleanup_state = RuntimeCleanupState {
           process_id: Some(process_id),
+          proxy_process_id: Some(process_id),
+          pending_browser_profile_path: None,
           browser_instance_id: Some(chromium_result.id.clone()),
+          pending_proxy_worker_ids: Vec::new(),
+          pending_vpn_worker_ids: Vec::new(),
           owned_vpn_worker_id: launch_transaction.owned_vpn_worker_id().map(str::to_owned),
           ephemeral_runtime_key: runtime_key.clone(),
         };
@@ -1837,12 +1971,23 @@ impl BrowserRunner {
     for step in cleanup_plan {
       match step {
         RuntimeCleanupStep::StopProxy(process_id) => {
-          if let Err(error) = PROXY_MANAGER
+          PROXY_MANAGER
             .stop_proxy(app_handle.clone(), process_id)
             .await
-          {
-            log::warn!("Failed to stop runtime proxy for PID {process_id}: {error}");
-          }
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+              format!("Failed to stop runtime proxy for PID {process_id}: {error}").into()
+            })?;
+          cleanup_state.proxy_process_id = None;
+        }
+        RuntimeCleanupStep::StopPendingProxyWorker(worker_id) => {
+          crate::proxy_runner::stop_proxy_process(&worker_id)
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+              format!("Failed to stop pending runtime proxy worker {worker_id}: {error}").into()
+            })?;
+          cleanup_state
+            .pending_proxy_worker_ids
+            .retain(|id| id != &worker_id);
         }
         RuntimeCleanupStep::StopCamoufoxManager {
           profile_path,
@@ -1863,18 +2008,31 @@ impl BrowserRunner {
               fallback_instance_id
             }
           };
-          if let Some(instance_id) = instance_id {
-            if let Err(error) = self
-              .camoufox_manager
-              .stop_camoufox(&app_handle, &instance_id)
-              .await
-            {
-              return Err(
-                format!("Failed to stop runtime Camoufox manager instance {instance_id}: {error}")
-                  .into(),
-              );
+          match instance_id {
+            Some(instance_id) => {
+              let _ = self
+                .camoufox_manager
+                .stop_camoufox(&app_handle, &instance_id)
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                  format!("Failed to stop runtime Camoufox manager instance {instance_id}: {error}")
+                    .into()
+                })?;
+              if self
+                .camoufox_manager
+                .find_camoufox_by_profile(&profile_path.to_string_lossy())
+                .await?
+                .is_some()
+              {
+                return Err(
+                  format!("Runtime Camoufox manager instance {instance_id} is still running")
+                    .into(),
+                );
+              }
+              cleanup_state.browser_instance_id = None;
+              cleanup_state.pending_browser_profile_path = None;
             }
-            cleanup_state.browser_instance_id = None;
+            None => cleanup_state.pending_browser_profile_path = None,
           }
         }
         RuntimeCleanupStep::StopChromiumManager {
@@ -1887,16 +2045,31 @@ impl BrowserRunner {
             .await
             .map(|process| process.id)
             .or(fallback_instance_id);
-          if let Some(instance_id) = instance_id {
-            self
-              .chromium_manager
-              .stop_chromium(&instance_id)
-              .await
-              .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("Failed to stop runtime Chromium manager instance {instance_id}: {error}")
-                  .into()
-              })?;
-            cleanup_state.browser_instance_id = None;
+          match instance_id {
+            Some(instance_id) => {
+              self
+                .chromium_manager
+                .stop_chromium(&instance_id)
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                  format!("Failed to stop runtime Chromium manager instance {instance_id}: {error}")
+                    .into()
+                })?;
+              if self
+                .chromium_manager
+                .find_chromium_by_profile(&profile_path.to_string_lossy())
+                .await
+                .is_some()
+              {
+                return Err(
+                  format!("Runtime Chromium manager instance {instance_id} is still running")
+                    .into(),
+                );
+              }
+              cleanup_state.browser_instance_id = None;
+              cleanup_state.pending_browser_profile_path = None;
+            }
+            None => cleanup_state.pending_browser_profile_path = None,
           }
         }
         RuntimeCleanupStep::ForceKillBrowser(process_id) => {
@@ -1931,12 +2104,25 @@ impl BrowserRunner {
           }
           cleanup_state.process_id = None;
         }
-        RuntimeCleanupStep::StopOwnedVpnWorker(worker_id) => {
+        RuntimeCleanupStep::StopPendingVpnWorker(worker_id) => {
           crate::vpn_worker_runner::stop_vpn_worker(&worker_id)
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+              format!("Failed to stop pending runtime VPN worker {worker_id}: {error}").into()
+            })?;
+          cleanup_state
+            .pending_vpn_worker_ids
+            .retain(|id| id != &worker_id);
+        }
+        RuntimeCleanupStep::StopOwnedVpnWorker(worker_id) => {
+          let stopped = crate::vpn_worker_runner::stop_vpn_worker(&worker_id)
             .await
             .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
               format!("Failed to stop runtime VPN worker {worker_id}: {error}").into()
             })?;
+          if !stopped && crate::vpn_worker_storage::get_vpn_worker_config(&worker_id).is_some() {
+            return Err(format!("Runtime VPN worker {worker_id} remains tracked").into());
+          }
           cleanup_state.owned_vpn_worker_id = None;
         }
         RuntimeCleanupStep::RemoveEphemeralRuntime(runtime_key) => {
@@ -3722,7 +3908,11 @@ mod tests {
     let profile_path = crate::ephemeral_dirs::create_ephemeral_dir_for_key(&runtime_key).unwrap();
     let state = RuntimeCleanupState {
       process_id: Some(4242),
+      proxy_process_id: Some(4242),
+      pending_browser_profile_path: None,
       browser_instance_id: Some("camoufox-runtime".to_string()),
+      pending_proxy_worker_ids: Vec::new(),
+      pending_vpn_worker_ids: Vec::new(),
       owned_vpn_worker_id: Some("owned-vpn-worker".to_string()),
       ephemeral_runtime_key: Some(runtime_key.clone()),
     };
@@ -3755,7 +3945,11 @@ mod tests {
     policy.data_mode = DataMode::Persistent;
     let state = RuntimeCleanupState {
       process_id: Some(5252),
+      proxy_process_id: Some(5252),
+      pending_browser_profile_path: None,
       browser_instance_id: Some("chromium-runtime".to_string()),
+      pending_proxy_worker_ids: Vec::new(),
+      pending_vpn_worker_ids: Vec::new(),
       owned_vpn_worker_id: None,
       ephemeral_runtime_key: None,
     };
@@ -3789,7 +3983,11 @@ mod tests {
     let policy = LaunchPolicy::for_source_profile(profile.id.to_string());
     let state = RuntimeCleanupState {
       process_id: None,
+      proxy_process_id: None,
+      pending_browser_profile_path: None,
       browser_instance_id: None,
+      pending_proxy_worker_ids: vec!["proxy-retry".to_string()],
+      pending_vpn_worker_ids: vec!["vpn-pending-retry".to_string()],
       owned_vpn_worker_id: Some("vpn-retry".to_string()),
       ephemeral_runtime_key: Some("runtime-retry".to_string()),
     };
@@ -3799,6 +3997,8 @@ mod tests {
     assert_eq!(
       plan,
       vec![
+        RuntimeCleanupStep::StopPendingProxyWorker("proxy-retry".to_string()),
+        RuntimeCleanupStep::StopPendingVpnWorker("vpn-pending-retry".to_string()),
         RuntimeCleanupStep::StopOwnedVpnWorker("vpn-retry".to_string()),
         RuntimeCleanupStep::RemoveEphemeralRuntime("runtime-retry".to_string()),
       ]
@@ -3838,6 +4038,115 @@ mod tests {
         }
       }
     }
+  }
+
+  #[derive(Clone)]
+  struct FailedRollbackDispatcher;
+
+  impl LaunchRollbackDispatcher for FailedRollbackDispatcher {
+    fn dispatch(&self, _resources: PreLaunchResources) {}
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn failed_rollback_retains_every_cleanup_identity_on_the_active_lease() {
+    let registry = crate::profile_runtime::LeaseRegistry::global();
+    let source_profile_id = uuid::Uuid::new_v4().to_string();
+    let lease = registry
+      .try_acquire(&source_profile_id)
+      .expect("runtime lease");
+    let runtime_key = lease.runtime_key.clone();
+    let mut transaction = PreLaunchTransaction::new_for_runtime(FailedRollbackDispatcher, &lease);
+
+    transaction.own_proxy_mapping(2_000_000_099);
+    transaction.own_vpn_worker("owned-vpn-worker".to_string());
+    transaction.own_ephemeral_profile(runtime_key.clone(), PathBuf::from(&runtime_key));
+    transaction.own_browser(LaunchKernel::Chromium {
+      instance_id: "chromium-failed-rollback".to_string(),
+      process_id: Some(42099),
+    });
+    drop(transaction);
+
+    assert_eq!(
+      registry.runtime_cleanup_state(&lease.lease_id),
+      Some(RuntimeCleanupState {
+        process_id: Some(42099),
+        proxy_process_id: Some(2_000_000_099),
+        pending_browser_profile_path: None,
+        browser_instance_id: Some("chromium-failed-rollback".to_string()),
+        pending_proxy_worker_ids: Vec::new(),
+        pending_vpn_worker_ids: Vec::new(),
+        owned_vpn_worker_id: Some("owned-vpn-worker".to_string()),
+        ephemeral_runtime_key: Some(runtime_key),
+      })
+    );
+    assert!(registry.is_leased(&source_profile_id));
+    registry.release(&lease.lease_id);
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn failed_launch_without_result_retains_exact_profile_path_for_cleanup() {
+    let registry = crate::profile_runtime::LeaseRegistry::global();
+    let source_profile_id = uuid::Uuid::new_v4().to_string();
+    let lease = registry
+      .try_acquire(&source_profile_id)
+      .expect("runtime lease");
+    let profile_path = PathBuf::from("runtime-profile-path");
+    let mut transaction = PreLaunchTransaction::new_for_runtime(FailedRollbackDispatcher, &lease);
+    transaction.begin_browser_launch(profile_path.clone());
+    drop(transaction);
+
+    assert_eq!(
+      registry
+        .runtime_cleanup_state(&lease.lease_id)
+        .and_then(|state| state.pending_browser_profile_path),
+      Some(profile_path)
+    );
+    assert!(registry.is_leased(&source_profile_id));
+    registry.release(&lease.lease_id);
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn selected_runtime_rejects_source_metadata_persistence() {
+    let registry = crate::profile_runtime::LeaseRegistry::global();
+    let profile = BrowserProfile::default();
+    let source_profile_id = profile.id.to_string();
+    let lease = registry
+      .try_acquire(&source_profile_id)
+      .expect("runtime lease");
+    let mut policy = LaunchPolicy::for_source_profile(&source_profile_id);
+    policy.persist_process_to_source = true;
+
+    let error = super::validate_runtime_lease(&profile, &policy, &lease)
+      .expect_err("selected runtime must reject metadata persistence")
+      .to_string();
+
+    assert!(error.contains("selected profile runtime ownership is forbidden"));
+    assert!(registry.is_leased(&source_profile_id));
+    registry.release(&lease.lease_id);
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn selected_runtime_rejects_generated_worker_ownership() {
+    let registry = crate::profile_runtime::LeaseRegistry::global();
+    let profile = BrowserProfile::default();
+    let source_profile_id = profile.id.to_string();
+    let lease = registry
+      .try_acquire(&source_profile_id)
+      .expect("runtime lease");
+    let mut policy = LaunchPolicy::for_source_profile(&source_profile_id);
+    policy.owns_generated_worker = true;
+
+    let error = super::validate_runtime_lease(&profile, &policy, &lease)
+      .expect_err("selected runtime must reject generated worker ownership")
+      .to_string();
+
+    assert!(error.contains("selected profile runtime ownership is forbidden"));
+    assert!(registry.is_leased(&source_profile_id));
+    registry.release(&lease.lease_id);
   }
 
   struct LaunchGuardHarness {

@@ -1737,33 +1737,53 @@ impl ProxyManager {
     })
   }
 
+  fn finalize_proxy_stop(
+    &self,
+    browser_pid: u32,
+    proxy: &ProxyInfo,
+    stop_result: Result<bool, String>,
+  ) -> Result<(), String> {
+    stop_result?;
+
+    let mut proxies = self.active_proxies.lock().unwrap();
+    if proxies
+      .get(&browser_pid)
+      .is_some_and(|current| current.id == proxy.id)
+    {
+      proxies.remove(&browser_pid);
+    }
+    drop(proxies);
+
+    if let Some(profile_id) = proxy.profile_id.as_deref() {
+      let mut map = self.profile_active_proxy_ids.lock().unwrap();
+      if map
+        .get(profile_id)
+        .is_some_and(|current_id| current_id == &proxy.id)
+      {
+        map.remove(profile_id);
+      }
+    }
+    Ok(())
+  }
+
   // Stop the proxy associated with a browser process ID
   pub async fn stop_proxy(
     &self,
     _app_handle: tauri::AppHandle,
     browser_pid: u32,
   ) -> Result<(), String> {
-    let (proxy_id, profile_id): (String, Option<String>) = {
-      let mut proxies = self.active_proxies.lock().unwrap();
-      match proxies.remove(&browser_pid) {
-        Some(proxy) => (proxy.id, proxy.profile_id.clone()),
-        None => return Ok(()), // No proxy to stop
+    let proxy = {
+      let proxies = self.active_proxies.lock().unwrap();
+      match proxies.get(&browser_pid) {
+        Some(proxy) => proxy.clone(),
+        None => return Ok(()),
       }
     };
 
-    if let Err(e) = crate::proxy_runner::stop_proxy_process(&proxy_id).await {
-      log::warn!("Proxy stop error: {e}");
-    }
-
-    // Clear profile-to-proxy mapping if it references this proxy
-    if let Some(id) = profile_id {
-      let mut map = self.profile_active_proxy_ids.lock().unwrap();
-      if let Some(current_id) = map.get(&id) {
-        if current_id == &proxy_id {
-          map.remove(&id);
-        }
-      }
-    }
+    let stop_result = crate::proxy_runner::stop_proxy_process(&proxy.id)
+      .await
+      .map_err(|error| format!("Proxy stop error: {error}"));
+    self.finalize_proxy_stop(browser_pid, &proxy, stop_result)?;
 
     // Emit event for reactive UI updates
     if let Err(e) = events::emit_empty("proxies-changed") {
@@ -1802,12 +1822,12 @@ impl ProxyManager {
         // Use the existing stop_proxy method
         self.stop_proxy(app_handle, pid).await
       } else {
-        // Proxy not found in active_proxies, try to stop it directly by ID
-        if let Err(e) = crate::proxy_runner::stop_proxy_process(&proxy_id).await {
-          log::warn!("Proxy stop error: {e}");
-        }
+        // Proxy not found in active_proxies, try to stop it directly by ID.
+        crate::proxy_runner::stop_proxy_process(&proxy_id)
+          .await
+          .map_err(|error| format!("Proxy stop error: {error}"))?;
 
-        // Clear profile-to-proxy mapping
+        // Clear profile-to-proxy mapping only after the worker is confirmed stopped.
         let mut map = self.profile_active_proxy_ids.lock().unwrap();
         map.remove(profile_id);
 
@@ -2274,6 +2294,59 @@ mod tests {
     );
     assert!(empty_settings.username.is_none(), "Username should be None");
     assert!(empty_settings.password.is_none(), "Password should be None");
+  }
+
+  #[test]
+  fn failed_proxy_stop_retains_retry_mappings() {
+    let manager = ProxyManager::new();
+    let browser_pid = 424_242;
+    let profile_id = "profile-retry".to_string();
+    let proxy = ProxyInfo {
+      id: "proxy-retry".to_string(),
+      local_url: "http://127.0.0.1:8888".to_string(),
+      upstream_host: "DIRECT".to_string(),
+      upstream_port: 0,
+      upstream_type: "DIRECT".to_string(),
+      local_port: 8888,
+      profile_id: Some(profile_id.clone()),
+      blocklist_file: None,
+    };
+    manager.insert_active_proxy(browser_pid, proxy.clone());
+    manager.insert_profile_proxy_mapping(profile_id.clone(), proxy.id.clone());
+
+    let error = manager
+      .finalize_proxy_stop(browser_pid, &proxy, Err("termination failed".to_string()))
+      .expect_err("failed stop must retain retry mappings");
+
+    assert_eq!(error, "termination failed");
+    assert_eq!(manager.get_active_proxy(browser_pid).unwrap().id, proxy.id);
+    assert_eq!(manager.profile_proxy_mapping_count(), 1);
+  }
+
+  #[test]
+  fn successful_proxy_stop_clears_retry_mappings() {
+    let manager = ProxyManager::new();
+    let browser_pid = 434_343;
+    let profile_id = "profile-clean".to_string();
+    let proxy = ProxyInfo {
+      id: "proxy-clean".to_string(),
+      local_url: "http://127.0.0.1:8989".to_string(),
+      upstream_host: "DIRECT".to_string(),
+      upstream_port: 0,
+      upstream_type: "DIRECT".to_string(),
+      local_port: 8989,
+      profile_id: Some(profile_id.clone()),
+      blocklist_file: None,
+    };
+    manager.insert_active_proxy(browser_pid, proxy.clone());
+    manager.insert_profile_proxy_mapping(profile_id, proxy.id.clone());
+
+    manager
+      .finalize_proxy_stop(browser_pid, &proxy, Ok(true))
+      .expect("successful stop clears mappings");
+
+    assert!(manager.get_active_proxy(browser_pid).is_none());
+    assert_eq!(manager.profile_proxy_mapping_count(), 0);
   }
 
   #[tokio::test]

@@ -1,6 +1,7 @@
 //! Process-local exclusive lease over a selected source profile for one automation lifecycle.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use thiserror::Error;
@@ -10,7 +11,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeCleanupState {
   pub process_id: Option<u32>,
+  pub proxy_process_id: Option<u32>,
+  pub pending_browser_profile_path: Option<PathBuf>,
   pub browser_instance_id: Option<String>,
+  pub pending_proxy_worker_ids: Vec<String>,
+  pub pending_vpn_worker_ids: Vec<String>,
   pub owned_vpn_worker_id: Option<String>,
   pub ephemeral_runtime_key: Option<String>,
 }
@@ -18,7 +23,11 @@ pub struct RuntimeCleanupState {
 impl RuntimeCleanupState {
   pub fn is_empty(&self) -> bool {
     self.process_id.is_none()
+      && self.proxy_process_id.is_none()
+      && self.pending_browser_profile_path.is_none()
       && self.browser_instance_id.is_none()
+      && self.pending_proxy_worker_ids.is_empty()
+      && self.pending_vpn_worker_ids.is_empty()
       && self.owned_vpn_worker_id.is_none()
       && self.ephemeral_runtime_key.is_none()
   }
@@ -32,7 +41,11 @@ pub struct RuntimeLease {
   /// Unique key for ephemeral directory maps (not bare source profile id).
   pub runtime_key: String,
   pub process_id: Option<u32>,
+  pub proxy_process_id: Option<u32>,
+  pub pending_browser_profile_path: Option<PathBuf>,
   pub browser_instance_id: Option<String>,
+  pub pending_proxy_worker_ids: Vec<String>,
+  pub pending_vpn_worker_ids: Vec<String>,
   pub owned_vpn_worker_id: Option<String>,
   pub ephemeral_runtime_key: Option<String>,
 }
@@ -45,12 +58,17 @@ impl RuntimeLease {
 
   pub fn set_process_id(&mut self, process_id: Option<u32>) {
     self.process_id = process_id;
+    self.proxy_process_id = process_id;
   }
 
   pub fn runtime_cleanup_state(&self) -> RuntimeCleanupState {
     RuntimeCleanupState {
       process_id: self.process_id,
+      proxy_process_id: self.proxy_process_id,
+      pending_browser_profile_path: self.pending_browser_profile_path.clone(),
       browser_instance_id: self.browser_instance_id.clone(),
+      pending_proxy_worker_ids: self.pending_proxy_worker_ids.clone(),
+      pending_vpn_worker_ids: self.pending_vpn_worker_ids.clone(),
       owned_vpn_worker_id: self.owned_vpn_worker_id.clone(),
       ephemeral_runtime_key: self.ephemeral_runtime_key.clone(),
     }
@@ -58,7 +76,11 @@ impl RuntimeLease {
 
   pub fn set_runtime_cleanup_state(&mut self, state: RuntimeCleanupState) {
     self.process_id = state.process_id;
+    self.proxy_process_id = state.proxy_process_id;
+    self.pending_browser_profile_path = state.pending_browser_profile_path;
     self.browser_instance_id = state.browser_instance_id;
+    self.pending_proxy_worker_ids = state.pending_proxy_worker_ids;
+    self.pending_vpn_worker_ids = state.pending_vpn_worker_ids;
     self.owned_vpn_worker_id = state.owned_vpn_worker_id;
     self.ephemeral_runtime_key = state.ephemeral_runtime_key;
   }
@@ -146,7 +168,11 @@ impl LeaseRegistry {
       source_profile_id: source.to_string(),
       runtime_key,
       process_id: None,
+      proxy_process_id: None,
+      pending_browser_profile_path: None,
       browser_instance_id: None,
+      pending_proxy_worker_ids: Vec::new(),
+      pending_vpn_worker_ids: Vec::new(),
       owned_vpn_worker_id: None,
       ephemeral_runtime_key: None,
     })
@@ -232,6 +258,7 @@ impl LeaseRegistry {
       return false;
     };
     state.process_id = process_id;
+    state.proxy_process_id = process_id;
     self.set_runtime_cleanup_state(lease_id, state)
   }
 
@@ -422,7 +449,11 @@ mod tests {
     let mut lease = registry.try_acquire("profile-cleanup").expect("acquire");
     let state = RuntimeCleanupState {
       process_id: Some(6161),
+      proxy_process_id: Some(6161),
+      pending_browser_profile_path: None,
       browser_instance_id: Some("kernel-6161".to_string()),
+      pending_proxy_worker_ids: vec!["proxy-pending-6161".to_string()],
+      pending_vpn_worker_ids: vec!["vpn-pending-6161".to_string()],
       owned_vpn_worker_id: Some("vpn-owned-6161".to_string()),
       ephemeral_runtime_key: Some(lease.runtime_key.clone()),
     };

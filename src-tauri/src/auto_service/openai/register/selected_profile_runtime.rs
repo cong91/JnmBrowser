@@ -255,23 +255,34 @@ impl SelectedProfileRuntimeCleanupGuard {
   }
 }
 
-impl Drop for SelectedProfileRuntimeCleanupGuard {
-  fn drop(&mut self) {
-    let Some(action) = self.action.take() else {
-      return;
-    };
-    std::thread::spawn(move || {
-      let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+fn retry_dropped_cleanup(action: CleanupAction) {
+  std::thread::spawn(move || {
+    let runtime = loop {
+      match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-      else {
-        log::error!("Dropped registration cleanup without a runtime");
-        return;
-      };
-      if runtime.block_on(action()).is_err() {
-        log::error!("Dropped registration runtime cleanup failed");
+      {
+        Ok(runtime) => break runtime,
+        Err(_) => {
+          log::error!("Dropped registration cleanup runtime creation failed; retrying");
+          std::thread::sleep(std::time::Duration::from_secs(1));
+        }
       }
-    });
+    };
+    let mut delay = std::time::Duration::from_millis(100);
+    while runtime.block_on(action()).is_err() {
+      log::error!("Dropped registration runtime cleanup failed; retrying");
+      std::thread::sleep(delay);
+      delay = (delay * 2).min(std::time::Duration::from_secs(5));
+    }
+  });
+}
+
+impl Drop for SelectedProfileRuntimeCleanupGuard {
+  fn drop(&mut self) {
+    if let Some(action) = self.action.take() {
+      retry_dropped_cleanup(action);
+    }
   }
 }
 
@@ -542,8 +553,8 @@ mod tests {
       let retried_tx = retried_tx.clone();
       Box::pin(async move {
         let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt == 1 {
-          Err("first cleanup failed".to_string())
+        if attempt <= 2 {
+          Err(format!("cleanup attempt {attempt} failed"))
         } else {
           let _ = retried_tx.send(());
           Ok(())
@@ -558,7 +569,7 @@ mod tests {
     retried_rx
       .recv_timeout(std::time::Duration::from_secs(2))
       .expect("drop should retry cleanup");
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
   }
 
   #[tokio::test]

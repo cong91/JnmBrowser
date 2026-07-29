@@ -202,21 +202,24 @@ fn launch_policy_for_profile(
   } else {
     LaunchPolicy::for_source_profile(profile_id)
   };
-  policy.source_profile_id = Some(profile_id.to_string());
+  if !owns_generated_worker {
+    policy.source_profile_id = Some(profile_id.to_string());
+  }
   policy.data_mode = config.data_mode;
   policy.fingerprint_mode = config.fingerprint_mode;
   policy.persist_process_to_source = false;
   policy
 }
 
-fn should_delete_profile(policy: &LaunchPolicy, profile_id: &str) -> bool {
-  policy.owns_generated_worker && policy.source_profile_id.as_deref() == Some(profile_id)
+fn should_delete_profile(owned_generated_profile_id: Option<&str>, profile_id: &str) -> bool {
+  owned_generated_profile_id == Some(profile_id)
 }
 
 struct CleanupContext {
   profile: BrowserProfile,
   policy: LaunchPolicy,
   lease: RuntimeLease,
+  owned_generated_profile_id: Option<String>,
 }
 
 struct AccountCheckCleanupGuard {
@@ -240,30 +243,33 @@ impl AccountCheckCleanupGuard {
   }
 }
 
+fn retry_dropped_cleanup(action: CleanupAction) {
+  std::thread::spawn(move || {
+    let runtime = loop {
+      match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+      {
+        Ok(runtime) => break runtime,
+        Err(_) => {
+          log::error!("Dropped account check cleanup runtime creation failed; retrying");
+          std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+      }
+    };
+    let mut delay = std::time::Duration::from_millis(100);
+    while runtime.block_on(action()).is_err() {
+      log::error!("Dropped account check cleanup failed; retrying");
+      std::thread::sleep(delay);
+      delay = (delay * 2).min(std::time::Duration::from_secs(5));
+    }
+  });
+}
+
 impl Drop for AccountCheckCleanupGuard {
   fn drop(&mut self) {
-    let Some(action) = self.action.take() else {
-      return;
-    };
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-      handle.spawn(async move {
-        if action().await.is_err() {
-          log::error!("Dropped account check cleanup failed");
-        }
-      });
-    } else {
-      std::thread::spawn(move || {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-          .enable_all()
-          .build()
-        else {
-          log::error!("Dropped account check cleanup without a runtime");
-          return;
-        };
-        if runtime.block_on(action()).is_err() {
-          log::error!("Fallback account check cleanup failed");
-        }
-      });
+    if let Some(action) = self.action.take() {
+      retry_dropped_cleanup(action);
     }
   }
 }
@@ -337,10 +343,12 @@ async fn run_check_batch(
   let (profile, lease, owns_generated_worker) = profile_and_lease;
   let profile_id = profile.id.to_string();
   let base_policy = launch_policy_for_profile(&config, &profile_id, owns_generated_worker);
+  let owned_generated_profile_id = owns_generated_worker.then(|| profile_id.clone());
   let cleanup_context = Arc::new(Mutex::new(CleanupContext {
     profile: profile.clone(),
     policy: base_policy.clone(),
     lease: lease.clone(),
+    owned_generated_profile_id,
   }));
   let cleanup_context_for_action = cleanup_context.clone();
   let cleanup_app_handle = app_handle.clone();
@@ -518,7 +526,7 @@ async fn cleanup_runtime(
   app_handle: &tauri::AppHandle,
   context: &Arc<Mutex<CleanupContext>>,
 ) -> Result<(), String> {
-  let (profile, policy, mut lease) = {
+  let (profile, policy, mut lease, owned_generated_profile_id) = {
     let context = context
       .lock()
       .map_err(|_| "cleanup context lock poisoned".to_string())?;
@@ -526,12 +534,13 @@ async fn cleanup_runtime(
       context.profile.clone(),
       context.policy.clone(),
       context.lease.clone(),
+      context.owned_generated_profile_id.clone(),
     )
   };
 
   cleanup_runtime_browser(app_handle, &profile, &policy, &mut lease).await?;
   let profile_id = profile.id.to_string();
-  if should_delete_profile(&policy, &profile_id) {
+  if should_delete_profile(owned_generated_profile_id.as_deref(), &profile_id) {
     crate::profile::ProfileManager::instance()
       .delete_profile(app_handle, &profile_id)
       .map_err(|error| format!("delete generated worker: {error}"))?;
@@ -757,18 +766,49 @@ mod tests {
     assert_eq!(policy.fingerprint_mode, FingerprintMode::Stable);
     assert!(!policy.owns_generated_worker);
     assert!(!policy.persist_process_to_source);
-    assert!(!should_delete_profile(&policy, "selected-id"));
+    assert!(!should_delete_profile(None, "selected-id"));
   }
 
   #[test]
   fn generated_profile_policy_preserves_ownership_and_process_tracking() {
     let policy = launch_policy_for_profile(&config(), "generated-id", true);
 
-    assert_eq!(policy.source_profile_id.as_deref(), Some("generated-id"));
+    assert_eq!(policy.source_profile_id, None);
     assert!(policy.owns_generated_worker);
     assert!(!policy.persist_process_to_source);
-    assert!(should_delete_profile(&policy, "generated-id"));
-    assert!(!should_delete_profile(&policy, "different-id"));
+    assert!(should_delete_profile(Some("generated-id"), "generated-id"));
+    assert!(!should_delete_profile(Some("generated-id"), "different-id"));
+  }
+
+  #[tokio::test]
+  async fn cleanup_guard_retains_owner_after_repeated_drop_failures() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_action = attempts.clone();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let action = Arc::new(move || {
+      let attempts = attempts_for_action.clone();
+      let completed_tx = completed_tx.clone();
+      Box::pin(async move {
+        let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt <= 2 {
+          Err(format!("cleanup attempt {attempt} failed"))
+        } else {
+          let _ = completed_tx.send(());
+          Ok(())
+        }
+      }) as CleanupFuture
+    });
+    let mut guard = AccountCheckCleanupGuard::new(action);
+
+    assert!(guard.close().await.is_err());
+    drop(guard);
+
+    completed_rx
+      .recv_timeout(std::time::Duration::from_secs(2))
+      .expect("drop owner must retry until cleanup succeeds");
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
   }
 
   #[test]
