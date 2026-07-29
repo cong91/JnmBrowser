@@ -17,14 +17,12 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use super::eligibility::evaluate_eligibility;
-use super::engine::{
-  stable_account_key, BackfillEngine, ProductionAccountStore, ProductionBrowserFactory,
-  SelectedBrowserRuntime,
-};
+use super::engine::{stable_account_key, BackfillEngine, ProductionAccountStore};
 use super::gate::CanaryGate;
 use super::journal::{
   PersistedBackfillAccountPatch, TwoFactorBackfillJournal, TwoFactorBackfillJournalState,
 };
+use super::production_browser::{ProductionBrowserFactory, SelectedBrowserRuntime};
 use super::task;
 use super::types::{
   TwoFactorBackfillPreview, TwoFactorBackfillPreviewRequest, TwoFactorBackfillRecoveryResult,

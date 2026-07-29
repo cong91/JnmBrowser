@@ -10,6 +10,7 @@ use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+use super::selected_profile_runtime::SelectedProfileRuntime;
 use super::store::{
   cdk_remaining_capacity, compare_and_update_registered_account, get_cdk_inventory,
   get_registered_account, put_cdk_inventory_record, reserve_cdk_slots_per,
@@ -37,8 +38,6 @@ use crate::auto_service::openai::two_factor_backfill::journal::{
   PersistedBackfillAccountPatch, TwoFactorBackfillJournal, TwoFactorBackfillJournalState,
 };
 use crate::email::{EmailService, EmailServiceError};
-use crate::profile::BrowserProfile;
-use crate::profile_runtime::{LaunchPolicy, RuntimeLease};
 use crate::sms::{poll_otp_with_cancel, NumberRequest, SmsService, SmsServiceError};
 
 /// Write structural About You diagnostics without screenshots, field values,
@@ -1703,12 +1702,10 @@ pub struct RegistrationEngine {
   task_id: String,
   device_id: String,
   logs: Vec<String>,
-  /// Reused worker profile id for this engine instance (one per concurrent CDK slot).
+  /// Reused generated worker profile id for this engine instance.
   worker_profile_id: Option<String>,
-  /// Read-only selected source profile resolved before task publication.
-  selected_profile: Option<BrowserProfile>,
-  /// Task-level selected-profile lease cloned into serial CDK slots for launch/cleanup.
-  runtime_lease: Option<RuntimeLease>,
+  /// Read-only selected profile, task-local launch policy, and full-lifecycle lease.
+  selected_runtime: Option<SelectedProfileRuntime>,
   /// True when this engine created the worker and must delete it when the CDK finishes.
   owns_worker_profile: bool,
   /// Optional CDK index suffix for concurrent worker profile names.
@@ -1736,8 +1733,7 @@ impl RegistrationEngine {
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
       worker_profile_id: None,
-      selected_profile: None,
-      runtime_lease: None,
+      selected_runtime: None,
       owns_worker_profile: false,
       worker_slot: 0,
       ephemeral_vpn_ids: Vec::new(),
@@ -1757,8 +1753,7 @@ impl RegistrationEngine {
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
       worker_profile_id: None,
-      selected_profile: None,
-      runtime_lease: None,
+      selected_runtime: None,
       owns_worker_profile: false,
       worker_slot: 0,
       ephemeral_vpn_ids: Vec::new(),
@@ -1770,42 +1765,9 @@ impl RegistrationEngine {
     }
   }
 
-  pub fn install_selected_runtime(&mut self, profile: BrowserProfile, lease: RuntimeLease) {
-    self.worker_profile_id = Some(profile.id.to_string());
-    self.selected_profile = Some(profile);
-    self.runtime_lease = Some(lease);
+  pub(super) fn install_selected_runtime(&mut self, runtime: SelectedProfileRuntime) {
+    self.selected_runtime = Some(runtime);
     self.owns_worker_profile = false;
-  }
-
-  pub fn selected_runtime(&self) -> Option<(BrowserProfile, LaunchPolicy, RuntimeLease)> {
-    let profile = self.selected_profile.clone()?;
-    let lease = self.runtime_lease.clone()?;
-    let policy = self.launch_policy_for_worker(&profile.id.to_string(), false);
-    Some((profile, policy, lease))
-  }
-
-  fn launch_policy_for_worker(
-    &self,
-    profile_id: &str,
-    owns_generated_worker: bool,
-  ) -> LaunchPolicy {
-    let mut policy = if owns_generated_worker {
-      LaunchPolicy::for_generated_worker()
-    } else {
-      LaunchPolicy::for_source_profile(profile_id)
-    };
-    policy.source_profile_id = Some(profile_id.to_string());
-    policy.data_mode = self.config.data_mode;
-    policy.fingerprint_mode = self.config.fingerprint_mode;
-    policy.owns_generated_worker = owns_generated_worker;
-    policy.persist_process_to_source = owns_generated_worker;
-
-    match self.config.network_mode {
-      NetworkMode::Proxy => policy.proxy_id = self.config.effective_proxy_id(),
-      NetworkMode::Vpn => policy.vpn_id = self.worker_vpn_id(),
-      NetworkMode::None | NetworkMode::Nord => policy.clear_network = true,
-    }
-    policy
   }
 
   /// Fork a per-CDK engine that shares cancel/task/config but owns its own worker + logs.
@@ -1823,9 +1785,11 @@ impl RegistrationEngine {
       task_id: self.task_id.clone(),
       device_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
-      worker_profile_id: self.worker_profile_id.clone(),
-      selected_profile: self.selected_profile.clone(),
-      runtime_lease: self.runtime_lease.clone(),
+      worker_profile_id: None,
+      selected_runtime: self
+        .selected_runtime
+        .as_ref()
+        .map(|runtime| runtime.with_slot_vpn(slot_vpn_id.as_deref())),
       owns_worker_profile: false,
       worker_slot,
       ephemeral_vpn_ids: Vec::new(), // only root owns cleanup
@@ -2161,7 +2125,7 @@ impl RegistrationEngine {
   }
 
   fn should_emit_batch_terminal_in_run(&self) -> bool {
-    self.runtime_lease.is_none()
+    self.selected_runtime.is_none()
   }
 
   #[allow(dead_code)]
@@ -7064,23 +7028,16 @@ impl RegistrationEngine {
     use crate::browser::BrowserType;
     use crate::profile::manager::create_browser_profile_with_group;
 
-    // Already have a worker for this engine — selected profiles use the validated
+    // Already have a worker for this engine. Selected profiles use their validated
     // in-memory snapshot; generated workers reload latest metadata from disk.
+    if let Some(runtime) = self.selected_runtime.as_ref() {
+      return Ok(runtime.profile().clone());
+    }
     if let Some(id) = self.worker_profile_id.clone() {
-      if let Some(profile) = self.selected_profile.as_ref() {
-        if profile.id.to_string() == id {
-          return Ok(profile.clone());
-        }
-      }
       if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
         if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
           return Ok(found);
         }
-      }
-      if self.selected_profile.is_some() {
-        return Err(format!(
-          "Selected worker profile {id} is no longer available"
-        ));
       }
       self.log(&format!(
         "Worker profile {id} missing from store — will recreate"
@@ -7261,20 +7218,8 @@ impl RegistrationEngine {
       worker.name, worker.id
     ));
 
-    let launched = if let Some(mut lease) = self.runtime_lease.take() {
-      let policy = self.launch_policy_for_worker(&worker.id.to_string(), false);
-      let result = BrowserRunner::instance()
-        .launch_browser_with_policy(
-          app_handle.clone(),
-          &worker,
-          Some("about:blank".into()),
-          None,
-          &policy,
-          &mut lease,
-        )
-        .await;
-      self.runtime_lease = Some(lease);
-      result
+    let launched = if let Some(runtime) = self.selected_runtime.as_mut() {
+      runtime.launch(app_handle).await
     } else {
       BrowserRunner::instance()
         .launch_browser(
@@ -7284,8 +7229,8 @@ impl RegistrationEngine {
           None,
         )
         .await
-    }
-    .map_err(|e| format!("Launch: {e}"))?;
+        .map_err(|error| format!("Launch: {error}"))
+    }?;
 
     Ok(launched)
   }
@@ -7299,17 +7244,13 @@ impl RegistrationEngine {
   ) -> Result<(), String> {
     use crate::browser_runner::BrowserRunner;
 
-    let cleanup_result = if let Some(mut lease) = self.runtime_lease.take() {
-      let policy = self.launch_policy_for_worker(&profile.id.to_string(), false);
-      let result = BrowserRunner::instance()
-        .kill_runtime_browser(app_handle.clone(), profile, &policy, &mut lease)
-        .await;
-      self.runtime_lease = Some(lease);
-      result
+    let cleanup_result = if let Some(runtime) = self.selected_runtime.as_mut() {
+      runtime.kill(app_handle, profile).await
     } else {
       BrowserRunner::instance()
         .kill_browser_process(app_handle.clone(), profile)
         .await
+        .map_err(|error| error.to_string())
     };
 
     match cleanup_result {
@@ -7409,55 +7350,11 @@ impl RegistrationEngine {
 #[cfg(test)]
 mod runtime_policy_tests {
   use super::*;
-  use crate::profile_runtime::{DataMode, FingerprintMode, LeaseRegistry};
+  use crate::profile_runtime::LeaseRegistry;
 
   fn config() -> RegistrationConfig {
     serde_json::from_value(serde_json::json!({ "cdks": ["GMAIL-TEST"] }))
       .expect("minimal registration config")
-  }
-
-  #[test]
-  fn selected_worker_policy_is_task_local_and_not_owned() {
-    let mut config = config();
-    config.data_mode = DataMode::Persistent;
-    config.fingerprint_mode = FingerprintMode::Stable;
-    config.network_mode = NetworkMode::Proxy;
-    config.proxy_id = Some("proxy-task".to_string());
-    let engine = RegistrationEngine::new(config);
-
-    let policy = engine.launch_policy_for_worker("selected-profile", false);
-
-    assert_eq!(
-      policy.source_profile_id.as_deref(),
-      Some("selected-profile")
-    );
-    assert_eq!(policy.data_mode, DataMode::Persistent);
-    assert_eq!(policy.fingerprint_mode, FingerprintMode::Stable);
-    assert_eq!(policy.proxy_id.as_deref(), Some("proxy-task"));
-    assert_eq!(policy.vpn_id, None);
-    assert!(!policy.clear_network);
-    assert!(!policy.owns_generated_worker);
-    assert!(!policy.persist_process_to_source);
-  }
-
-  #[test]
-  fn selected_worker_policy_uses_slot_vpn_and_clears_stored_network_for_direct_mode() {
-    let mut vpn_config = config();
-    vpn_config.network_mode = NetworkMode::Vpn;
-    vpn_config.vpn_id = Some("vpn-base".to_string());
-    let mut vpn_engine = RegistrationEngine::new(vpn_config);
-    vpn_engine.slot_vpn_id = Some("vpn-slot".to_string());
-
-    let vpn_policy = vpn_engine.launch_policy_for_worker("selected-profile", false);
-    assert_eq!(vpn_policy.vpn_id.as_deref(), Some("vpn-slot"));
-    assert_eq!(vpn_policy.proxy_id, None);
-    assert!(!vpn_policy.clear_network);
-
-    let direct_engine = RegistrationEngine::new(config());
-    let direct_policy = direct_engine.launch_policy_for_worker("selected-profile", false);
-    assert!(direct_policy.clear_network);
-    assert_eq!(direct_policy.proxy_id, None);
-    assert_eq!(direct_policy.vpn_id, None);
   }
 
   #[test]
@@ -7474,7 +7371,8 @@ mod runtime_policy_tests {
     let lease = registry
       .try_acquire(&profile.id.to_string())
       .expect("selected profile lease");
-    selected.install_selected_runtime(profile, lease.clone());
+    let runtime = SelectedProfileRuntime::new(&selected.config, profile, lease.clone());
+    selected.install_selected_runtime(runtime);
 
     assert!(!selected.should_emit_batch_terminal_in_run());
     assert!(RegistrationEngine::new(config()).should_emit_batch_terminal_in_run());
@@ -7509,22 +7407,18 @@ mod runtime_policy_tests {
       .try_acquire(&profile_id)
       .expect("selected profile lease");
     let mut engine = RegistrationEngine::new(config());
+    let runtime = SelectedProfileRuntime::new(&engine.config, profile.clone(), lease.clone());
 
-    engine.install_selected_runtime(profile.clone(), lease.clone());
+    engine.install_selected_runtime(runtime);
     let slot = engine.fork_for_cdk(0);
 
-    assert_eq!(slot.worker_profile_id.as_deref(), Some(profile_id.as_str()));
-    assert_eq!(
-      slot.selected_profile.as_ref().map(|item| item.id),
-      Some(profile.id)
-    );
-    assert_eq!(
-      slot
-        .runtime_lease
-        .as_ref()
-        .map(|item| item.lease_id.as_str()),
-      Some(lease.lease_id.as_str())
-    );
+    assert_eq!(slot.worker_profile_id, None);
+    let slot_runtime = slot
+      .selected_runtime
+      .as_ref()
+      .expect("selected runtime should propagate to the CDK slot");
+    assert_eq!(slot_runtime.profile().id, profile.id);
+    assert_eq!(slot_runtime.lease_id(), lease.lease_id);
     assert!(!slot.owns_worker_profile);
     registry.release(&lease.lease_id);
   }

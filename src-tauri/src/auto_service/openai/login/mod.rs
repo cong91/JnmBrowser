@@ -7,6 +7,7 @@ pub mod store;
 pub mod sub2api;
 pub mod task;
 pub mod types;
+mod worker_runtime;
 
 pub(crate) fn safe_browser_url_for_log(raw: &str) -> String {
   let Ok(parsed) = url::Url::parse(raw) else {

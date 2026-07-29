@@ -3,6 +3,7 @@ pub mod eligibility;
 pub(crate) mod engine;
 pub mod gate;
 pub(crate) mod journal;
+pub(crate) mod production_browser;
 pub mod task;
 pub mod types;
 

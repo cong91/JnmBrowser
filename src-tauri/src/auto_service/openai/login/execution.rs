@@ -1,12 +1,11 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tauri::AppHandle;
 
 use super::engine::LoginEngine;
 use super::types::{LoginConfig, LoginResult};
+use super::worker_runtime::WorkerRuntimeCleanupGuard;
 use crate::profile::BrowserProfile;
 use crate::profile_runtime::{LeaseCleanupGuard, LeaseError, LeaseRegistry, RuntimeLease};
 use crate::settings_manager::SettingsManager;
@@ -15,93 +14,6 @@ use crate::sms::SmsService;
 
 const SELECTED_PROFILE_BUSY_ERROR: &str =
   "Selected profile is busy; wait for the current automation task to finish or stop it before retrying";
-
-type RuntimeCleanupFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
-type RuntimeCleanupAction = Arc<dyn Fn() -> RuntimeCleanupFuture + Send + Sync>;
-
-struct LoginRuntimeCleanupGuard {
-  action: Option<RuntimeCleanupAction>,
-}
-
-impl LoginRuntimeCleanupGuard {
-  fn new(action: RuntimeCleanupAction) -> Self {
-    Self {
-      action: Some(action),
-    }
-  }
-
-  async fn close(&mut self) -> Result<(), String> {
-    let Some(action) = self.action.as_ref().cloned() else {
-      return Ok(());
-    };
-    action().await?;
-    self.action.take();
-    Ok(())
-  }
-}
-
-impl Drop for LoginRuntimeCleanupGuard {
-  fn drop(&mut self) {
-    let Some(action) = self.action.take() else {
-      return;
-    };
-    std::thread::spawn(move || {
-      let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-      else {
-        log::error!("Dropped Auto Login cleanup without a runtime");
-        return;
-      };
-      if runtime.block_on(action()).is_err() {
-        log::error!("Dropped Auto Login runtime cleanup failed");
-      }
-    });
-  }
-}
-
-struct WorkerRuntimeCleanupContext {
-  profile: BrowserProfile,
-  policy: crate::profile_runtime::LaunchPolicy,
-  lease: RuntimeLease,
-  lease_registry: &'static LeaseRegistry,
-}
-
-fn release_worker_lease_after_cleanup(
-  registry: &'static LeaseRegistry,
-  lease_id: &str,
-  cleanup_result: Result<(), String>,
-) -> Result<(), String> {
-  cleanup_result?;
-  registry.release(lease_id);
-  Ok(())
-}
-
-async fn cleanup_worker_runtime(
-  app_handle: &AppHandle,
-  context: &Arc<Mutex<WorkerRuntimeCleanupContext>>,
-) -> Result<(), String> {
-  let (profile, policy, mut lease) = {
-    let context = context
-      .lock()
-      .map_err(|_| "Auto Login cleanup context lock poisoned".to_string())?;
-    (
-      context.profile.clone(),
-      context.policy.clone(),
-      context.lease.clone(),
-    )
-  };
-  crate::browser_runner::BrowserRunner::instance()
-    .kill_runtime_browser(app_handle.clone(), &profile, &policy, &mut lease)
-    .await
-    .map_err(|error| format!("Auto Login runtime cleanup failed: {error}"))?;
-
-  let mut context = context
-    .lock()
-    .map_err(|_| "Auto Login cleanup context lock poisoned".to_string())?;
-  context.lease = lease;
-  release_worker_lease_after_cleanup(context.lease_registry, &context.lease.lease_id, Ok(()))
-}
 
 /// A validated login run ready to be moved onto its dedicated runtime.
 pub struct PreparedLogin {
@@ -441,32 +353,16 @@ pub fn run_prepared_login(
   let runtime = tokio::runtime::Runtime::new()
     .map_err(|error| format!("Failed to create login runtime: {error}"))?;
 
-  let worker_profile = prepared.worker_profile.clone();
-  let runtime_lease = prepared.runtime_lease.clone();
   prepared
     .engine
-    .install_worker_runtime(worker_profile.clone(), runtime_lease.clone());
-  let policy = prepared
+    .install_worker_runtime(prepared.worker_profile, prepared.runtime_lease);
+  let worker_runtime = prepared
     .engine
     .worker_runtime()
-    .map(|(_, policy, _)| policy)
     .ok_or_else(|| "Auto Login worker runtime state is incomplete".to_string())?;
+  let mut cleanup_guard =
+    WorkerRuntimeCleanupGuard::new(app_handle.clone(), worker_runtime, prepared.lease_registry);
   let _ = prepared._lease_guard.into_lease_id();
-  let cleanup_context = Arc::new(Mutex::new(WorkerRuntimeCleanupContext {
-    profile: worker_profile,
-    policy,
-    lease: runtime_lease,
-    lease_registry: prepared.lease_registry,
-  }));
-  let cleanup_context_for_action = cleanup_context.clone();
-  let cleanup_app_handle = app_handle.clone();
-  let cleanup_action = Arc::new(move || {
-    let context = cleanup_context_for_action.clone();
-    let app_handle = cleanup_app_handle.clone();
-    Box::pin(async move { cleanup_worker_runtime(&app_handle, &context).await })
-      as RuntimeCleanupFuture
-  }) as RuntimeCleanupAction;
-  let mut cleanup_guard = LoginRuntimeCleanupGuard::new(cleanup_action);
 
   let results =
     runtime.block_on(async { prepared.engine.run(app_handle.clone(), sms_service).await });
@@ -641,57 +537,6 @@ mod tests {
 
     drop(prepared);
     assert!(!registry.is_leased(&profile_id));
-  }
-
-  #[test]
-  fn worker_lease_releases_only_after_cleanup_succeeds() {
-    let registry = leaked_registry();
-    let profile_id = uuid::Uuid::new_v4().to_string();
-    let lease = registry.try_acquire(&profile_id).expect("acquire lease");
-
-    let error = release_worker_lease_after_cleanup(
-      registry,
-      &lease.lease_id,
-      Err("cleanup failed".to_string()),
-    )
-    .expect_err("failed cleanup must retain lease");
-    assert_eq!(error, "cleanup failed");
-    assert!(registry.is_leased(&profile_id));
-
-    release_worker_lease_after_cleanup(registry, &lease.lease_id, Ok(()))
-      .expect("successful retry releases lease");
-    assert!(!registry.is_leased(&profile_id));
-  }
-
-  #[tokio::test]
-  async fn runtime_cleanup_guard_retries_after_explicit_failure() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let attempts_for_action = attempts.clone();
-    let (retried_tx, retried_rx) = std::sync::mpsc::channel();
-    let action = Arc::new(move || {
-      let attempts = attempts_for_action.clone();
-      let retried_tx = retried_tx.clone();
-      Box::pin(async move {
-        let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt == 1 {
-          Err("first cleanup failed".to_string())
-        } else {
-          let _ = retried_tx.send(());
-          Ok(())
-        }
-      }) as RuntimeCleanupFuture
-    });
-    let mut guard = LoginRuntimeCleanupGuard::new(action);
-
-    assert!(guard.close().await.is_err());
-    drop(guard);
-
-    retried_rx
-      .recv_timeout(std::time::Duration::from_secs(2))
-      .expect("drop should retry cleanup");
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
   }
 
   #[test]

@@ -16,12 +16,13 @@ use uuid::Uuid;
 use super::store::save_login_result;
 use super::sub2api::Sub2ApiClient;
 use super::types::{
-  should_rotate, LoginConfig, LoginCredential, LoginNetworkMode, LoginProgress,
-  LoginProgressEventKind, LoginResult, LoginResultStatus, LoginStep, LoginTerminalSummary,
+  should_rotate, LoginConfig, LoginCredential, LoginProgress, LoginProgressEventKind, LoginResult,
+  LoginResultStatus, LoginStep, LoginTerminalSummary,
 };
+use super::worker_runtime::WorkerRuntime;
 use super::{oauth, pkce, safe_browser_url_for_log};
 use crate::profile::BrowserProfile;
-use crate::profile_runtime::{LaunchPolicy, RuntimeLease};
+use crate::profile_runtime::RuntimeLease;
 use crate::sms::{poll_otp_with_cancel, NumberRequest, SmsService};
 
 type CdpWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -900,12 +901,8 @@ pub struct LoginEngine {
   task_id: String,
   logs: Vec<String>,
   used_phones: HashSet<String>,
-  /// Reused worker profile for this engine (one slot for sequential batch).
-  worker_profile_id: Option<String>,
-  /// Read-only worker snapshot resolved before task publication.
-  worker_profile: Option<BrowserProfile>,
-  /// Full-lifecycle lease for the prepared worker.
-  runtime_lease: Option<RuntimeLease>,
+  /// Prepared worker snapshot, task-local policy, and full-lifecycle lease.
+  worker_runtime: Option<WorkerRuntime>,
 }
 
 impl LoginEngine {
@@ -916,35 +913,16 @@ impl LoginEngine {
       task_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
       used_phones: HashSet::new(),
-      worker_profile_id: None,
-      worker_profile: None,
-      runtime_lease: None,
+      worker_runtime: None,
     }
   }
 
   pub fn install_worker_runtime(&mut self, profile: BrowserProfile, lease: RuntimeLease) {
-    self.worker_profile_id = Some(profile.id.to_string());
-    self.worker_profile = Some(profile);
-    self.runtime_lease = Some(lease);
+    self.worker_runtime = Some(WorkerRuntime::new(&self.config, profile, lease));
   }
 
-  pub fn worker_runtime(&self) -> Option<(BrowserProfile, LaunchPolicy, RuntimeLease)> {
-    let profile = self.worker_profile.clone()?;
-    let lease = self.runtime_lease.clone()?;
-    let policy = self.launch_policy_for_worker(&profile.id.to_string());
-    Some((profile, policy, lease))
-  }
-
-  fn launch_policy_for_worker(&self, profile_id: &str) -> LaunchPolicy {
-    let mut policy = LaunchPolicy::for_source_profile(profile_id);
-    policy.data_mode = self.config.data_mode;
-    policy.fingerprint_mode = self.config.fingerprint_mode;
-    match self.config.network_mode {
-      LoginNetworkMode::Proxy => policy.proxy_id = self.config.proxy_id.clone(),
-      LoginNetworkMode::Vpn => policy.vpn_id = self.config.effective_vpn_id(),
-      LoginNetworkMode::None | LoginNetworkMode::Nord => policy.clear_network = true,
-    }
-    policy
+  pub(super) fn worker_runtime(&self) -> Option<WorkerRuntime> {
+    self.worker_runtime.clone()
   }
 
   pub fn task_id(&self) -> &str {
@@ -972,7 +950,7 @@ impl LoginEngine {
   }
 
   fn should_emit_batch_terminal_in_run(&self) -> bool {
-    self.runtime_lease.is_none()
+    self.worker_runtime.is_none()
   }
 
   #[allow(dead_code)]
@@ -4217,16 +4195,11 @@ impl LoginEngine {
 
   /// Return the worker snapshot resolved and leased before task publication.
   fn ensure_worker_profile(&self) -> Result<BrowserProfile, String> {
-    let profile = self
-      .worker_profile
-      .clone()
-      .ok_or_else(|| "Auto Login worker runtime was not installed before execution".to_string())?;
-    if self.worker_profile_id.as_deref() != Some(profile.id.to_string().as_str())
-      || self.runtime_lease.is_none()
-    {
-      return Err("Auto Login worker runtime state is incomplete".to_string());
-    }
-    Ok(profile)
+    self
+      .worker_runtime
+      .as_ref()
+      .map(|runtime| runtime.profile().clone())
+      .ok_or_else(|| "Auto Login worker runtime was not installed before execution".to_string())
   }
 
   /// Launch the prepared worker profile and attach CDP / Playwright.
@@ -4234,30 +4207,18 @@ impl LoginEngine {
     &mut self,
     app_handle: &tauri::AppHandle,
   ) -> Result<(crate::profile::BrowserProfile, BrowserSession), String> {
-    use crate::browser_runner::BrowserRunner;
-
     let worker = self.ensure_worker_profile()?;
     self.log(&format!(
       "Launching worker {} ({}) with configured runtime policy",
       worker.name, worker.id
     ));
 
-    let policy = self.launch_policy_for_worker(&worker.id.to_string());
-    let mut lease = self
-      .runtime_lease
-      .take()
-      .ok_or_else(|| "Auto Login worker lease is missing".to_string())?;
-    let launch_result = BrowserRunner::instance()
-      .launch_browser_with_policy(
-        app_handle.clone(),
-        &worker,
-        Some("about:blank".into()),
-        None,
-        &policy,
-        &mut lease,
-      )
+    let launch_result = self
+      .worker_runtime
+      .as_mut()
+      .ok_or_else(|| "Auto Login worker runtime is missing".to_string())?
+      .launch(app_handle)
       .await;
-    self.runtime_lease = Some(lease);
     let launched = match launch_result {
       Ok(launched) => launched,
       Err(error) => {
@@ -4277,9 +4238,9 @@ impl LoginEngine {
       &launched,
       &crate::profile::ProfileManager::instance().get_profiles_dir(),
       self
-        .runtime_lease
+        .worker_runtime
         .as_ref()
-        .and_then(|lease| lease.ephemeral_runtime_key.as_deref()),
+        .and_then(WorkerRuntime::ephemeral_runtime_key),
     );
     let profile_path_str = profile_path.to_string_lossy().to_string();
 
@@ -4386,17 +4347,12 @@ impl LoginEngine {
     app_handle: &tauri::AppHandle,
     profile: &crate::profile::BrowserProfile,
   ) -> Result<(), String> {
-    use crate::browser_runner::BrowserRunner;
-
-    let policy = self.launch_policy_for_worker(&profile.id.to_string());
-    let mut lease = self
-      .runtime_lease
-      .take()
-      .ok_or_else(|| "Auto Login worker lease is missing".to_string())?;
-    let cleanup_result = BrowserRunner::instance()
-      .kill_runtime_browser(app_handle.clone(), profile, &policy, &mut lease)
+    let cleanup_result = self
+      .worker_runtime
+      .as_mut()
+      .ok_or_else(|| "Auto Login worker runtime is missing".to_string())?
+      .kill(app_handle, profile)
       .await;
-    self.runtime_lease = Some(lease);
 
     match cleanup_result {
       Ok(()) => {
@@ -4447,58 +4403,6 @@ mod tests {
   use super::*;
 
   #[test]
-  fn selected_login_policy_is_task_local_and_not_owned() {
-    let mut config: LoginConfig = serde_json::from_value(serde_json::json!({
-      "credentialsText": "user@example.com|password",
-      "dataMode": "persistent",
-      "fingerprintMode": "stable",
-      "networkMode": "proxy",
-      "proxyId": "proxy-task"
-    }))
-    .unwrap();
-    config.parse_credentials();
-    config.normalize();
-    let engine = LoginEngine::with_cancel_flag(config, Arc::new(AtomicBool::new(false)));
-
-    let policy = engine.launch_policy_for_worker("selected-profile");
-
-    assert_eq!(
-      policy.source_profile_id.as_deref(),
-      Some("selected-profile")
-    );
-    assert_eq!(
-      policy.data_mode,
-      crate::profile_runtime::DataMode::Persistent
-    );
-    assert_eq!(
-      policy.fingerprint_mode,
-      crate::profile_runtime::FingerprintMode::Stable
-    );
-    assert_eq!(policy.proxy_id.as_deref(), Some("proxy-task"));
-    assert_eq!(policy.vpn_id, None);
-    assert!(!policy.clear_network);
-    assert!(!policy.owns_generated_worker);
-    assert!(!policy.persist_process_to_source);
-  }
-
-  #[test]
-  fn direct_login_policy_clears_stored_network() {
-    let mut config: LoginConfig = serde_json::from_value(serde_json::json!({
-      "credentialsText": "user@example.com|password"
-    }))
-    .unwrap();
-    config.parse_credentials();
-    config.normalize();
-    let engine = LoginEngine::with_cancel_flag(config, Arc::new(AtomicBool::new(false)));
-
-    let policy = engine.launch_policy_for_worker("worker-profile");
-
-    assert!(policy.clear_network);
-    assert_eq!(policy.proxy_id, None);
-    assert_eq!(policy.vpn_id, None);
-  }
-
-  #[test]
   fn prepared_worker_runtime_is_installed_without_delete_ownership() {
     let mut config: LoginConfig = serde_json::from_value(serde_json::json!({
       "credentialsText": "user@example.com|password"
@@ -4521,21 +4425,11 @@ mod tests {
 
     engine.install_worker_runtime(profile.clone(), lease.clone());
 
-    assert_eq!(
-      engine.worker_profile_id.as_deref(),
-      Some(profile.id.to_string().as_str())
-    );
-    assert_eq!(
-      engine.worker_profile.as_ref().map(|item| item.id),
-      Some(profile.id)
-    );
-    assert_eq!(
-      engine
-        .runtime_lease
-        .as_ref()
-        .map(|item| item.lease_id.as_str()),
-      Some(lease.lease_id.as_str())
-    );
+    let runtime = engine
+      .worker_runtime()
+      .expect("worker runtime should be installed");
+    assert_eq!(runtime.profile().id, profile.id);
+    assert_eq!(runtime.lease_id(), lease.lease_id);
     registry.release(&lease.lease_id);
   }
 

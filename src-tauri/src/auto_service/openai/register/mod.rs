@@ -2,6 +2,7 @@ pub mod commands;
 pub mod engine;
 pub mod execution;
 pub mod parallel;
+mod selected_profile_runtime;
 pub mod sentinel;
 pub mod store;
 pub mod task;
