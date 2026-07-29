@@ -190,7 +190,7 @@
         "Run pnpm check-unused-commands.",
         "Review git diff --stat, git status --short, and the complete bead artifact set; confirm unrelated pre-existing changes remain untouched."
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["Seven-locale translations and lifecycle documentation"],
         "parallel": false,
