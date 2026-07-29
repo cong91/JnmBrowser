@@ -122,3 +122,22 @@ Started: 2026-07-28
 - Artifact and responsibility audit: 24 required files exist; all seven locales have 1800 keys and the shared `automationProfile` namespace has 19 identical non-empty leaves; no Cargo or lockfile dependency churn appeared; no unfinished stubs were found; the three feature-introduced runtime responsibilities are isolated in their approved modules. Unrelated dirty files remain unstaged and preserved.
 - Runtime-boundary checkpoint: `9b9c603 refactor(automation): isolate profile runtime lifecycles`.
 - PRD `verification-1` complete; Wave 9 and the full selected-browser-profile-reuse plan are closed.
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 9 verification reopened
+
+- A delayed core-runtime audit invalidated the prior closure evidence. The failed-launch rollback path can lose retryable cleanup identity while only logging rollback failures, allowing final cleanup to observe empty state and release the selected source lease while task-owned resources may remain active.
+- Source review also confirmed that startup recovery ignores lease-scoped `{source_uuid}__{lease_uuid}` ephemeral directories, proxy stop removes tracking before verified termination and swallows stop errors, and the core runtime validator does not reject selected-source policies that enable source metadata persistence.
+- Reset only PRD `verification-1` to pending and replaced the stale PASS stamp with a reopened marker. Prior progress remains append-only history and must not be used as current verification evidence.
+- Next: add failure-injection regressions, fix cleanup state ownership and confirmed P2 gaps, rerun focused and full quality gates, then repeat the prompt-to-artifact audit before any closure.
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 9 correction and final closure
+
+- Fixed failed-launch rollback ownership in `BrowserRunner`: every known browser, proxy, VPN, profile-path, manager-instance, worker-ID, and lease-scoped ephemeral identity is synchronously checkpointed before asynchronous rollback, including launches that return no PID.
+- Made cleanup resource-specific and retryable: proxy/VPN stop failures propagate; tracking and artifacts remain until verified termination; pending worker IDs and exact browser profile paths are retained; ephemeral deletion is allowed only for an exact checkpointed runtime key; cleanup state is cleared only after each owned resource succeeds.
+- Added crash recovery for lease-scoped ephemeral directories, while preserving legacy bare-UUID recovery; rejected selected-source policies that request source metadata persistence or generated-worker ownership.
+- Preserved exact generated-worker deletion ownership and selected-profile retention across Account Checker, Auto Login, Registration, and 2FA Backfill; Drop cleanup owners retry with capped exponential backoff until cleanup succeeds or the process exits.
+- Verification on exact source after checkpoint `b27dae954d16a0cd3b2d22a26972f0d96ee31bc5`: `pnpm copy-proxy-binary` passed; `pnpm format` passed with Biome 157 root and 12 sync files reporting no fixes, strict all-target/all-feature clippy-fix and Rust format passing; the known `pnpm lint` hook interception was recorded, and the actual `pnpm lint:js`, `pnpm lint:rust`, and `pnpm lint:spell` scripts passed.
+- Full suite passed: frontend 29, Rust library 977, proxy integration 14, VPN integration 15, and sync E2E 15. Unused Tauri command check passed with 1 test. Focused suites passed: BrowserRunner 24, profile runtime 26, ephemeral dirs 16, proxy manager 55, VPN worker runner 5, Account Checker 36, Auto Login 70, Auto Registration 131, and 2FA Backfill 100.
+- Final audit passed: all 24 plan-required artifacts exist; seven locales each have 1,800 keys and 19 identical non-empty `automationProfile` keys; UUID selector values, running/leased availability, registration concurrency one, listener-before-invoke ordering, runtime network overlays, immutable source metadata, fail-fast leases, exact deletion ownership, secret-free payloads, and process-local/kernel limitations are directly evidenced by source, tests, or docs; no feature stubs, dependency churn, or staged unrelated files remain.
+- Commit checkpoints: runtime boundary split `9b9c6032143fbd64ea97d08fbf6792238c9fc0e3`; cleanup correction `b27dae954d16a0cd3b2d22a26972f0d96ee31bc5`.
+- PRD `verification-1` is now complete; the reopened verification is corrected and the full selected-browser-profile-reuse plan is closed.
