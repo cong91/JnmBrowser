@@ -1820,6 +1820,10 @@ impl BrowserRunner {
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_runtime_lease(profile, policy, lease)?;
 
+    // A failed launch rolls back asynchronously while retaining this same source-profile lock.
+    // Wait for that rollback before observing runtime cleanup state or allowing lease release.
+    let _profile_cleanup_lock = acquire_pre_launch_lock(format!("profile:{}", profile.id)).await;
+
     let mut cleanup_state = LeaseRegistry::global()
       .runtime_cleanup_state(&lease.lease_id)
       .unwrap_or_else(|| lease.runtime_cleanup_state());

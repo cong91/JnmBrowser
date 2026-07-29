@@ -8,6 +8,8 @@
 //! ```
 
 use donutbrowser_lib::auto_service::openai::account_checker::commands::start_openai_account_check;
+use donutbrowser_lib::auto_service::openai::account_checker::types::AccountCheckConfig;
+use donutbrowser_lib::profile_runtime::{DataMode, FingerprintMode};
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -122,9 +124,17 @@ fn main() {
       });
 
       // Start the account check
-      let credentials = credentials_text_for_setup.clone();
+      let config = AccountCheckConfig {
+        credentials_text: credentials_text_for_setup.clone(),
+        source_profile_id: None,
+        data_mode: DataMode::Ephemeral,
+        fingerprint_mode: FingerprintMode::RandomPerLaunch,
+        vpn_id: None,
+        browser_type: "chromium".to_string(),
+        headless: false,
+      };
       tauri::async_runtime::spawn(async move {
-        match start_openai_account_check(handle.clone(), credentials).await {
+        match start_openai_account_check(handle.clone(), config).await {
           Ok(task_id) => {
             eprintln!("[started] task_id={task_id}");
           }

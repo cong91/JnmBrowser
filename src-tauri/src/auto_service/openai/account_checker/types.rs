@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::profile_runtime::{DataMode, FingerprintMode};
+
 /// Reuse the same credential parse format from login: email|password|2fa
 pub use super::super::login::types::LoginCredential;
 
@@ -64,14 +66,27 @@ impl AccountCheckResult {
   }
 }
 
+fn default_browser_type() -> String {
+  "chromium".to_string()
+}
+
 /// Configuration for a batch account check task (from frontend).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCheckConfig {
   pub credentials_text: String,
+  #[serde(default)]
+  pub source_profile_id: Option<String>,
+  #[serde(default)]
+  pub data_mode: DataMode,
+  #[serde(default)]
+  pub fingerprint_mode: FingerprintMode,
+  #[serde(default)]
+  pub vpn_id: Option<String>,
+  #[serde(default = "default_browser_type")]
   pub browser_type: String,
+  #[serde(default)]
   pub headless: bool,
-  pub concurrency: u32,
 }
 
 /// Safe step enum — no credential material.
@@ -101,4 +116,49 @@ pub struct CheckProgress {
   pub outcome: Option<AccountOutcome>,
   pub reason_code: Option<ReasonCode>,
   pub terminal: bool,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn account_check_config_deserializes_camel_case_defaults() {
+    let config: AccountCheckConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password"
+    }))
+    .expect("deserialize account checker config");
+
+    assert_eq!(config.credentials_text, "user@example.com|password");
+    assert_eq!(config.source_profile_id, None);
+    assert_eq!(config.data_mode, DataMode::Ephemeral);
+    assert_eq!(config.fingerprint_mode, FingerprintMode::RandomPerLaunch);
+    assert_eq!(config.vpn_id, None);
+    assert_eq!(config.browser_type, "chromium");
+    assert!(!config.headless);
+  }
+
+  #[test]
+  fn account_check_config_requires_credentials_text() {
+    let error = serde_json::from_value::<AccountCheckConfig>(serde_json::json!({}))
+      .expect_err("credentialsText must be required");
+    assert!(error.to_string().contains("credentialsText"));
+  }
+
+  #[test]
+  fn account_check_config_accepts_explicit_policy_fields() {
+    let config: AccountCheckConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password",
+      "sourceProfileId": "profile-id",
+      "dataMode": "persistent",
+      "fingerprintMode": "stable",
+      "vpnId": "vpn-id"
+    }))
+    .expect("deserialize explicit account checker config");
+
+    assert_eq!(config.source_profile_id.as_deref(), Some("profile-id"));
+    assert_eq!(config.data_mode, DataMode::Persistent);
+    assert_eq!(config.fingerprint_mode, FingerprintMode::Stable);
+    assert_eq!(config.vpn_id.as_deref(), Some("vpn-id"));
+  }
 }
