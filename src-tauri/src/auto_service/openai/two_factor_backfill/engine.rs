@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::commands::{
   BackfillBrowser, BackfillMode, BackfillNetworkConfig, TwoFactorBackfillStartRequest,
@@ -1626,27 +1627,170 @@ impl ProductionBrowserPlatform for SystemProductionBrowserPlatform {
   }
 }
 
+fn release_selected_lease_after_cleanup(
+  registry: &'static crate::profile_runtime::LeaseRegistry,
+  lease_id: &str,
+  cleanup_result: Result<(), String>,
+) -> Result<(), String> {
+  cleanup_result?;
+  registry.release(lease_id);
+  Ok(())
+}
+
+#[derive(Clone)]
+pub(crate) struct SelectedBrowserRuntime {
+  state: Arc<AsyncMutex<SelectedBrowserRuntimeState>>,
+  lease_registry: &'static crate::profile_runtime::LeaseRegistry,
+}
+
+struct SelectedBrowserRuntimeState {
+  profile: crate::profile::BrowserProfile,
+  policy: crate::profile_runtime::LaunchPolicy,
+  lease: crate::profile_runtime::RuntimeLease,
+}
+
+impl SelectedBrowserRuntime {
+  pub(crate) fn new(
+    profile: crate::profile::BrowserProfile,
+    policy: crate::profile_runtime::LaunchPolicy,
+    lease: crate::profile_runtime::RuntimeLease,
+    lease_registry: &'static crate::profile_runtime::LeaseRegistry,
+  ) -> Self {
+    Self {
+      state: Arc::new(AsyncMutex::new(SelectedBrowserRuntimeState {
+        profile,
+        policy,
+        lease,
+      })),
+      lease_registry,
+    }
+  }
+
+  fn validate_ownership(&self, state: &SelectedBrowserRuntimeState) -> Result<(), String> {
+    validate_selected_runtime_ownership(&state.profile, &state.policy, &state.lease)?;
+    if self
+      .lease_registry
+      .holder_lease_id(&state.lease.source_profile_id)
+      .as_deref()
+      != Some(state.lease.lease_id.as_str())
+    {
+      return Err("refusing to clean a selected profile runtime owned by another lease".into());
+    }
+    Ok(())
+  }
+
+  async fn snapshot(
+    &self,
+  ) -> (
+    crate::profile::BrowserProfile,
+    crate::profile_runtime::LaunchPolicy,
+    crate::profile_runtime::RuntimeLease,
+  ) {
+    let state = self.state.lock().await;
+    (
+      state.profile.clone(),
+      state.policy.clone(),
+      state.lease.clone(),
+    )
+  }
+
+  async fn launch(
+    &self,
+    app_handle: &AppHandle<tauri::Wry>,
+  ) -> Result<crate::profile::BrowserProfile, String> {
+    let mut state = self.state.lock().await;
+    self.validate_ownership(&state)?;
+    let profile = state.profile.clone();
+    let policy = state.policy.clone();
+    crate::browser_runner::BrowserRunner::instance()
+      .launch_browser_with_policy(
+        app_handle.clone(),
+        &profile,
+        Some("about:blank".into()),
+        None,
+        &policy,
+        &mut state.lease,
+      )
+      .await
+      .map_err(|error| format!("Launch selected 2FA backfill profile: {error}"))
+  }
+
+  async fn cleanup(&self, app_handle: &AppHandle<tauri::Wry>) -> Result<(), String> {
+    let mut state = self.state.lock().await;
+    self.validate_ownership(&state)?;
+    let profile = state.profile.clone();
+    let policy = state.policy.clone();
+    crate::browser_runner::BrowserRunner::instance()
+      .kill_runtime_browser(app_handle.clone(), &profile, &policy, &mut state.lease)
+      .await
+      .map_err(|error| format!("Clean selected 2FA backfill profile runtime: {error}"))
+  }
+
+  async fn close(&self, app_handle: &AppHandle<tauri::Wry>) -> Result<(), String> {
+    let (_, _, lease) = self.snapshot().await;
+    release_selected_lease_after_cleanup(
+      self.lease_registry,
+      &lease.lease_id,
+      self.cleanup(app_handle).await,
+    )
+  }
+}
+
+fn validate_selected_runtime_ownership(
+  profile: &crate::profile::BrowserProfile,
+  policy: &crate::profile_runtime::LaunchPolicy,
+  lease: &crate::profile_runtime::RuntimeLease,
+) -> Result<(), String> {
+  let profile_id = profile.id.to_string();
+  if policy.source_profile_id.as_deref() != Some(profile_id.as_str())
+    || lease.source_profile_id != profile_id
+  {
+    return Err("refusing to clean a selected profile runtime owned by another lease".into());
+  }
+  if policy.owns_generated_worker || policy.persist_process_to_source {
+    return Err("selected profile runtime policy has invalid ownership flags".into());
+  }
+  Ok(())
+}
+
 pub(crate) struct ProductionBrowserFactory {
   platform: Arc<dyn ProductionBrowserPlatform>,
+  selected_runtime: Option<SelectedBrowserRuntime>,
 }
 
 impl ProductionBrowserFactory {
-  pub(crate) fn new() -> Self {
+  pub(crate) fn new(selected_runtime: Option<SelectedBrowserRuntime>) -> Self {
     Self {
       platform: Arc::new(SystemProductionBrowserPlatform),
+      selected_runtime,
     }
+  }
+
+  pub(crate) fn selected_runtime_cleanup_guard(
+    &self,
+    app_handle: AppHandle<tauri::Wry>,
+  ) -> Option<BrowserCleanupGuard> {
+    let runtime = self.selected_runtime.clone()?;
+    Some(BrowserCleanupGuard::new(Arc::new(move || {
+      let runtime = runtime.clone();
+      let app_handle = app_handle.clone();
+      Box::pin(async move { runtime.close(&app_handle).await })
+    })))
   }
 
   #[cfg(test)]
   fn with_platform(platform: Arc<dyn ProductionBrowserPlatform>) -> Self {
-    Self { platform }
+    Self {
+      platform,
+      selected_runtime: None,
+    }
   }
 }
 
 type BrowserCleanupFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 type BrowserCleanupAction = Arc<dyn Fn() -> BrowserCleanupFuture + Send + Sync>;
 
-struct BrowserCleanupGuard {
+pub(crate) struct BrowserCleanupGuard {
   action: Option<BrowserCleanupAction>,
 }
 
@@ -1657,7 +1801,7 @@ impl BrowserCleanupGuard {
     }
   }
 
-  async fn close(&mut self) -> Result<(), String> {
+  pub(crate) async fn close(&mut self) -> Result<(), String> {
     let Some(action) = self.action.as_ref().cloned() else {
       return Ok(());
     };
@@ -1740,7 +1884,9 @@ impl BackfillBrowserFactory<tauri::Wry> for ProductionBrowserFactory {
     browser: &BackfillBrowser,
     network: &BackfillNetworkConfig,
   ) -> Result<(), String> {
-    self.platform.installed_version(browser)?;
+    if self.selected_runtime.is_none() {
+      self.platform.installed_version(browser)?;
+    }
     self.platform.validate_network(network)
   }
 
@@ -1753,8 +1899,13 @@ impl BackfillBrowserFactory<tauri::Wry> for ProductionBrowserFactory {
     login_email: &str,
     operation_id: &str,
   ) -> Result<Box<dyn BackfillBrowserSession + Send>, String> {
-    let version = self.platform.installed_version(browser)?;
     self.platform.validate_network(network)?;
+    if let Some(selected_runtime) = &self.selected_runtime {
+      return launch_selected_browser_session(app_handle, selected_runtime, device_id, login_email)
+        .await;
+    }
+
+    let version = self.platform.installed_version(browser)?;
     self.platform.note_profile_creation();
 
     let browser_name = match browser {
@@ -1866,6 +2017,49 @@ impl BackfillBrowserFactory<tauri::Wry> for ProductionBrowserFactory {
       cleanup,
     }))
   }
+}
+
+async fn launch_selected_browser_session(
+  app_handle: &AppHandle<tauri::Wry>,
+  runtime: &SelectedBrowserRuntime,
+  device_id: &str,
+  login_email: &str,
+) -> Result<Box<dyn BackfillBrowserSession + Send>, String> {
+  let launched = runtime.launch(app_handle).await?;
+  let mut attached = match attach_browser_session(&launched).await {
+    Ok(attached) => attached,
+    Err(error) => {
+      if let Err(cleanup_error) = runtime.cleanup(app_handle).await {
+        return Err(format!("{error}; rollback failed: {cleanup_error}"));
+      }
+      return Err(error);
+    }
+  };
+  if let Err(error) = attached
+    .prepare_existing_account_login(device_id, login_email)
+    .await
+  {
+    drop(attached);
+    return match runtime.cleanup(app_handle).await {
+      Ok(()) => Err(format!("Prepare existing-account login: {error}")),
+      Err(cleanup_error) => Err(format!(
+        "Prepare existing-account login: {error}; rollback failed: {cleanup_error}"
+      )),
+    };
+  }
+
+  let cleanup_runtime = runtime.clone();
+  let cleanup_app_handle = app_handle.clone();
+  let cleanup = BrowserCleanupGuard::new(Arc::new(move || {
+    let runtime = cleanup_runtime.clone();
+    let app_handle = cleanup_app_handle.clone();
+    Box::pin(async move { runtime.cleanup(&app_handle).await })
+  }));
+  Ok(Box::new(ProductionBrowserSession {
+    browser: Some(attached),
+    device_id: device_id.to_string(),
+    cleanup,
+  }))
 }
 
 async fn cleanup_worker_profile(
@@ -2044,6 +2238,9 @@ mod tests {
       selected_account_keys: account_keys.iter().map(|key| (*key).into()).collect(),
       allow_free_trial_no: false,
       acknowledge_legacy_access: false,
+      profile_id: None,
+      data_mode: crate::profile_runtime::DataMode::Ephemeral,
+      fingerprint_mode: crate::profile_runtime::FingerprintMode::RandomPerLaunch,
       browser: BackfillBrowser::Chromium,
       network: BackfillNetworkConfig::None,
       mode: BackfillMode::Canary,
@@ -2055,6 +2252,9 @@ mod tests {
       selected_account_keys: account_keys.iter().map(|key| (*key).into()).collect(),
       allow_free_trial_no: false,
       acknowledge_legacy_access: false,
+      profile_id: None,
+      data_mode: crate::profile_runtime::DataMode::Ephemeral,
+      fingerprint_mode: crate::profile_runtime::FingerprintMode::RandomPerLaunch,
       browser: BackfillBrowser::Chromium,
       network: BackfillNetworkConfig::None,
       mode: BackfillMode::Bulk,
@@ -3720,6 +3920,81 @@ mod tests {
     );
   }
 
+  #[test]
+  fn selected_runtime_refuses_profile_or_policy_ownership_mismatch() {
+    let profile = crate::profile::BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      ..crate::profile::BrowserProfile::default()
+    };
+    let registry = Box::leak(Box::new(crate::profile_runtime::LeaseRegistry::new()));
+    let lease = registry
+      .try_acquire(&profile.id.to_string())
+      .expect("selected lease");
+    let valid = crate::profile_runtime::LaunchPolicy::for_source_profile(profile.id.to_string());
+    assert!(validate_selected_runtime_ownership(&profile, &valid, &lease).is_ok());
+
+    let foreign_policy =
+      crate::profile_runtime::LaunchPolicy::for_source_profile(uuid::Uuid::new_v4().to_string());
+    assert!(
+      validate_selected_runtime_ownership(&profile, &foreign_policy, &lease)
+        .unwrap_err()
+        .contains("another lease")
+    );
+
+    let foreign_lease = registry
+      .try_acquire(&uuid::Uuid::new_v4().to_string())
+      .expect("foreign lease");
+    assert!(
+      validate_selected_runtime_ownership(&profile, &valid, &foreign_lease)
+        .unwrap_err()
+        .contains("another lease")
+    );
+    registry.release(&lease.lease_id);
+    registry.release(&foreign_lease.lease_id);
+  }
+
+  #[tokio::test]
+  async fn selected_runtime_refuses_a_stale_lease_holder() {
+    let profile = crate::profile::BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      ..crate::profile::BrowserProfile::default()
+    };
+    let profile_id = profile.id.to_string();
+    let registry = Box::leak(Box::new(crate::profile_runtime::LeaseRegistry::new()));
+    let stale_lease = registry.try_acquire(&profile_id).expect("stale lease");
+    let policy = crate::profile_runtime::LaunchPolicy::for_source_profile(profile_id.clone());
+    let runtime = SelectedBrowserRuntime::new(profile, policy, stale_lease.clone(), registry);
+    registry.release(&stale_lease.lease_id);
+    let replacement = registry
+      .try_acquire(&profile_id)
+      .expect("replacement lease");
+
+    let state = runtime.state.lock().await;
+    assert!(runtime
+      .validate_ownership(&state)
+      .unwrap_err()
+      .contains("another lease"));
+    drop(state);
+    registry.release(&replacement.lease_id);
+  }
+
+  #[test]
+  fn selected_lease_releases_only_after_cleanup_succeeds() {
+    let registry = Box::leak(Box::new(crate::profile_runtime::LeaseRegistry::new()));
+    let profile_id = uuid::Uuid::new_v4().to_string();
+    let lease = registry.try_acquire(&profile_id).expect("selected lease");
+
+    let error =
+      release_selected_lease_after_cleanup(registry, &lease.lease_id, Err("cleanup failed".into()))
+        .expect_err("failed cleanup must retain lease");
+    assert_eq!(error, "cleanup failed");
+    assert!(registry.is_leased(&profile_id));
+
+    release_selected_lease_after_cleanup(registry, &lease.lease_id, Ok(()))
+      .expect("successful cleanup releases lease");
+    assert!(!registry.is_leased(&profile_id));
+  }
+
   #[tokio::test]
   async fn browser_cleanup_guard_drop_schedules_cleanup_and_successful_close_disarms() {
     let drop_calls = Arc::new(AtomicUsize::new(0));
@@ -3753,6 +4028,30 @@ mod tests {
     drop(guard);
     tokio::task::yield_now().await;
     assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+
+    let retry_calls = Arc::new(AtomicUsize::new(0));
+    let retry_calls_for_action = Arc::clone(&retry_calls);
+    let mut guard = BrowserCleanupGuard::new(Arc::new(move || {
+      let calls = Arc::clone(&retry_calls_for_action);
+      Box::pin(async move {
+        let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt == 1 {
+          Err("first cleanup failed".into())
+        } else {
+          Ok(())
+        }
+      })
+    }));
+    assert!(guard.close().await.is_err());
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+      while retry_calls.load(Ordering::SeqCst) != 2 {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("Drop must retry a failed cleanup action");
+    assert_eq!(retry_calls.load(Ordering::SeqCst), 2);
   }
 
   #[tokio::test]

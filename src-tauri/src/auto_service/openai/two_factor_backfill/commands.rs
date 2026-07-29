@@ -19,6 +19,7 @@ use tauri::AppHandle;
 use super::eligibility::evaluate_eligibility;
 use super::engine::{
   stable_account_key, BackfillEngine, ProductionAccountStore, ProductionBrowserFactory,
+  SelectedBrowserRuntime,
 };
 use super::gate::CanaryGate;
 use super::journal::{
@@ -35,6 +36,10 @@ use crate::auto_service::openai::register::store::{
 };
 use crate::auto_service::openai::register::types::{
   RegistrationResult, TwoFactorBackfillOutcome, TwoFactorBackfillState,
+};
+use crate::profile::BrowserProfile;
+use crate::profile_runtime::{
+  DataMode, FingerprintMode, LaunchPolicy, LeaseCleanupGuard, LeaseError, LeaseRegistry,
 };
 
 /// Browser kernel used for the repair. Mirrors the auto-register choice so the
@@ -82,6 +87,12 @@ pub struct TwoFactorBackfillStartRequest {
   pub allow_free_trial_no: bool,
   #[serde(default)]
   pub acknowledge_legacy_access: bool,
+  #[serde(default)]
+  pub profile_id: Option<String>,
+  #[serde(default)]
+  pub data_mode: DataMode,
+  #[serde(default)]
+  pub fingerprint_mode: FingerprintMode,
   pub browser: BackfillBrowser,
   pub network: BackfillNetworkConfig,
   pub mode: BackfillMode,
@@ -95,6 +106,12 @@ pub struct TwoFactorBackfillPreviewCommandRequest {
   pub allow_free_trial_no: bool,
   #[serde(default)]
   pub acknowledge_legacy_access: bool,
+  #[serde(default)]
+  pub profile_id: Option<String>,
+  #[serde(default)]
+  pub data_mode: DataMode,
+  #[serde(default)]
+  pub fingerprint_mode: FingerprintMode,
   pub browser: BackfillBrowser,
   pub network: BackfillNetworkConfig,
 }
@@ -385,6 +402,120 @@ async fn cleanup_stale_worker_profile(
     .map_err(|error| format!("delete worker ephemeral directory {profile_id}: {error}"))
 }
 
+const SELECTED_PROFILE_BUSY_ERROR: &str =
+  "Selected profile is busy; wait for the current automation task to finish or stop it before retrying";
+
+struct PreparedSelectedBrowserRuntime {
+  runtime: SelectedBrowserRuntime,
+  lease_guard: Option<LeaseCleanupGuard>,
+}
+
+fn selected_profile_lease_error(error: LeaseError) -> String {
+  match error {
+    LeaseError::Busy { .. } => SELECTED_PROFILE_BUSY_ERROR.to_string(),
+    LeaseError::InvalidSourceProfileId => "Selected source profile ID is invalid".to_string(),
+  }
+}
+
+fn backfill_browser_name(browser: BackfillBrowser) -> &'static str {
+  match browser {
+    BackfillBrowser::Chromium => "chromium",
+    BackfillBrowser::Camoufox => "camoufox",
+  }
+}
+
+fn selected_launch_policy(
+  request: &TwoFactorBackfillStartRequest,
+  profile_id: &str,
+) -> LaunchPolicy {
+  let mut policy = LaunchPolicy::for_source_profile(profile_id);
+  policy.data_mode = request.data_mode;
+  policy.fingerprint_mode = request.fingerprint_mode;
+  match &request.network {
+    BackfillNetworkConfig::None => policy.clear_network = true,
+    BackfillNetworkConfig::Proxy { proxy_id } => {
+      policy.proxy_id = Some(proxy_id.trim().to_string());
+    }
+    BackfillNetworkConfig::Vpn { vpn_id } => {
+      policy.vpn_id = Some(vpn_id.trim().to_string());
+    }
+  }
+  policy
+}
+
+fn resolve_selected_backfill_profile(
+  request: &TwoFactorBackfillStartRequest,
+  profiles_dir: &std::path::Path,
+) -> Result<Option<BrowserProfile>, String> {
+  let Some(profile_id) = request
+    .profile_id
+    .as_deref()
+    .map(str::trim)
+    .filter(|profile_id| !profile_id.is_empty())
+  else {
+    return Ok(None);
+  };
+  let profile_uuid = uuid::Uuid::parse_str(profile_id)
+    .map_err(|_| "Selected source profile ID is not a valid UUID".to_string())?;
+  let metadata_path = profiles_dir
+    .join(profile_uuid.to_string())
+    .join("metadata.json");
+  let metadata = std::fs::read(&metadata_path).map_err(|error| match error.kind() {
+    std::io::ErrorKind::NotFound => "Selected source profile was not found".to_string(),
+    _ => format!("Failed to read selected source profile: {error}"),
+  })?;
+  let profile: BrowserProfile = serde_json::from_slice(&metadata)
+    .map_err(|error| format!("Selected source profile metadata is invalid: {error}"))?;
+  if profile.id != profile_uuid {
+    return Err("Selected source profile metadata ID does not match its directory".into());
+  }
+  if profile
+    .process_id
+    .is_some_and(crate::proxy_storage::is_process_running)
+  {
+    return Err("Selected source profile is running; stop it before starting 2FA Backfill".into());
+  }
+  if profile.is_cross_os() {
+    return Err("Selected source profile was created on a different operating system".into());
+  }
+  let requested_browser = backfill_browser_name(request.browser);
+  if !profile.browser.eq_ignore_ascii_case(requested_browser) {
+    return Err(format!(
+      "Selected source profile uses {}, but 2FA Backfill requested {requested_browser}",
+      profile.browser
+    ));
+  }
+  if request.data_mode == DataMode::Ephemeral && profile.browser.eq_ignore_ascii_case("camoufox") {
+    return Err("Selected Camoufox profiles do not support ephemeral data for 2FA Backfill".into());
+  }
+  Ok(Some(profile))
+}
+
+fn prepare_selected_browser_runtime(
+  request: &TwoFactorBackfillStartRequest,
+  profiles_dir: &std::path::Path,
+  lease_registry: &'static LeaseRegistry,
+) -> Result<Option<PreparedSelectedBrowserRuntime>, String> {
+  let Some(profile) = resolve_selected_backfill_profile(request, profiles_dir)? else {
+    return Ok(None);
+  };
+  let profile_id = profile.id.to_string();
+  let lease = lease_registry
+    .try_acquire(&profile_id)
+    .map_err(selected_profile_lease_error)?;
+  let lease_guard = LeaseCleanupGuard::with_registry(lease_registry, lease.clone());
+  let runtime = SelectedBrowserRuntime::new(
+    profile,
+    selected_launch_policy(request, &profile_id),
+    lease,
+    lease_registry,
+  );
+  Ok(Some(PreparedSelectedBrowserRuntime {
+    runtime,
+    lease_guard: Some(lease_guard),
+  }))
+}
+
 /// Start a serial repair task and return its task ID. This internal starter is
 /// shared by the dedicated repair command and the Auto Registration existing-account mode.
 pub(crate) fn start_two_factor_backfill_task(
@@ -401,6 +532,9 @@ pub(crate) fn start_two_factor_backfill_task(
 
   let task_id = format!("backfill-{}", uuid::Uuid::new_v4());
   let cancel_flag = Arc::new(AtomicBool::new(false));
+  let profiles_dir = crate::profile::ProfileManager::instance().get_profiles_dir();
+  let selected_runtime =
+    prepare_selected_browser_runtime(&request, &profiles_dir, LeaseRegistry::global())?;
 
   let engine = BackfillEngine::new(
     task_id.clone(),
@@ -408,10 +542,15 @@ pub(crate) fn start_two_factor_backfill_task(
     cancel_flag.clone(),
     ProductionAccountStore,
   );
-  let browser_factory = ProductionBrowserFactory::new();
+  let browser_factory = ProductionBrowserFactory::new(
+    selected_runtime
+      .as_ref()
+      .map(|prepared| prepared.runtime.clone()),
+  );
   let task_id_for_log = task_id.clone();
   let app_handle_for_task = app_handle.clone();
   task::spawn_registered(task_id.clone(), cancel_flag, async move {
+    let mut selected_runtime = selected_runtime;
     let canary_gate = match CanaryGate::new() {
       Ok(gate) => gate,
       Err(error) => {
@@ -420,6 +559,13 @@ pub(crate) fn start_two_factor_backfill_task(
         return;
       }
     };
+    let mut selected_cleanup =
+      browser_factory.selected_runtime_cleanup_guard(app_handle_for_task.clone());
+    if let Some(prepared) = selected_runtime.as_mut() {
+      if let Some(lease_guard) = prepared.lease_guard.take() {
+        let _ = lease_guard.into_lease_id();
+      }
+    }
     let journal_factory = move || TwoFactorBackfillJournal::new();
     engine
       .run(
@@ -429,6 +575,11 @@ pub(crate) fn start_two_factor_backfill_task(
         Some(&canary_gate),
       )
       .await;
+    if let Some(cleanup) = selected_cleanup.as_mut() {
+      if let Err(error) = cleanup.close().await {
+        log::error!("2FA backfill selected-profile cleanup failed: {error}");
+      }
+    }
   })?;
 
   Ok(task_id)
@@ -462,9 +613,13 @@ mod tests {
   use chrono::Utc;
 
   use super::{
-    is_generated_backfill_worker, recover_journal_entry, stale_recovery_action,
-    BackfillNetworkConfig, RegistrationResult, StaleRecoveryAction, TwoFactorBackfillJournal,
-    TwoFactorBackfillJournalState, TwoFactorBackfillOutcome, TwoFactorBackfillState,
+    is_generated_backfill_worker, prepare_selected_browser_runtime, recover_journal_entry,
+    resolve_selected_backfill_profile, selected_launch_policy, stale_recovery_action,
+    BackfillBrowser, BackfillMode, BackfillNetworkConfig, DataMode, FingerprintMode, LeaseRegistry,
+    RegistrationResult, StaleRecoveryAction, TwoFactorBackfillJournal,
+    TwoFactorBackfillJournalState, TwoFactorBackfillOutcome,
+    TwoFactorBackfillPreviewCommandRequest, TwoFactorBackfillStartRequest, TwoFactorBackfillState,
+    SELECTED_PROFILE_BUSY_ERROR,
   };
   use crate::auto_service::openai::register::types::{
     AccountInventoryStatus, RegistrationOutcomeReason, TwoFactorBackfillAccessState,
@@ -538,6 +693,186 @@ mod tests {
     account.two_factor_backfill_state = Some(TwoFactorBackfillState::InProgress);
     account.two_factor_backfill_operation_id = Some(OPERATION_ID.into());
     account
+  }
+
+  fn selected_request(profile_id: Option<String>) -> TwoFactorBackfillStartRequest {
+    TwoFactorBackfillStartRequest {
+      selected_account_keys: vec![ACCOUNT_KEY.into()],
+      allow_free_trial_no: false,
+      acknowledge_legacy_access: false,
+      profile_id,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
+      browser: BackfillBrowser::Chromium,
+      network: BackfillNetworkConfig::None,
+      mode: BackfillMode::Canary,
+    }
+  }
+
+  fn write_profile(
+    profiles_dir: &std::path::Path,
+    browser: &str,
+  ) -> (BrowserProfile, std::path::PathBuf, Vec<u8>) {
+    let profile = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "selected-backfill-profile".into(),
+      browser: browser.into(),
+      version: "1.0.0".into(),
+      host_os: Some(crate::profile::types::get_host_os()),
+      ..BrowserProfile::default()
+    };
+    let profile_dir = profiles_dir.join(profile.id.to_string());
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    let metadata_path = profile_dir.join("metadata.json");
+    let metadata = serde_json::to_vec_pretty(&profile).unwrap();
+    std::fs::write(&metadata_path, &metadata).unwrap();
+    (profile, metadata_path, metadata)
+  }
+
+  fn leaked_registry() -> &'static LeaseRegistry {
+    Box::leak(Box::new(LeaseRegistry::new()))
+  }
+
+  #[test]
+  fn start_request_profile_policy_defaults_and_camel_case_values() {
+    let defaults: TwoFactorBackfillStartRequest = serde_json::from_value(serde_json::json!({
+      "selectedAccountKeys": [ACCOUNT_KEY],
+      "browser": "chromium",
+      "network": { "kind": "none" },
+      "mode": "canary"
+    }))
+    .unwrap();
+    assert!(defaults.profile_id.is_none());
+    assert_eq!(defaults.data_mode, DataMode::Ephemeral);
+    assert_eq!(defaults.fingerprint_mode, FingerprintMode::RandomPerLaunch);
+
+    let explicit: TwoFactorBackfillStartRequest = serde_json::from_value(serde_json::json!({
+      "selectedAccountKeys": [ACCOUNT_KEY],
+      "profileId": uuid::Uuid::new_v4().to_string(),
+      "dataMode": "persistent",
+      "fingerprintMode": "stable",
+      "browser": "chromium",
+      "network": { "kind": "proxy", "proxyId": "proxy-1" },
+      "mode": "canary"
+    }))
+    .unwrap();
+    assert_eq!(explicit.data_mode, DataMode::Persistent);
+    assert_eq!(explicit.fingerprint_mode, FingerprintMode::Stable);
+    assert!(explicit.profile_id.is_some());
+  }
+
+  #[test]
+  fn preview_request_profile_policy_defaults_and_camel_case_values() {
+    let defaults: TwoFactorBackfillPreviewCommandRequest =
+      serde_json::from_value(serde_json::json!({
+        "selectedAccountKeys": [ACCOUNT_KEY],
+        "browser": "chromium",
+        "network": { "kind": "none" }
+      }))
+      .unwrap();
+    assert!(defaults.profile_id.is_none());
+    assert_eq!(defaults.data_mode, DataMode::Ephemeral);
+    assert_eq!(defaults.fingerprint_mode, FingerprintMode::RandomPerLaunch);
+
+    let explicit: TwoFactorBackfillPreviewCommandRequest =
+      serde_json::from_value(serde_json::json!({
+        "selectedAccountKeys": [ACCOUNT_KEY],
+        "profileId": uuid::Uuid::new_v4().to_string(),
+        "dataMode": "persistent",
+        "fingerprintMode": "stable",
+        "browser": "chromium",
+        "network": { "kind": "none" }
+      }))
+      .unwrap();
+    assert_eq!(explicit.data_mode, DataMode::Persistent);
+    assert_eq!(explicit.fingerprint_mode, FingerprintMode::Stable);
+    assert!(explicit.profile_id.is_some());
+  }
+
+  #[test]
+  fn selected_profile_resolution_is_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let (profile, metadata_path, metadata) = write_profile(temp.path(), "chromium");
+    let request = selected_request(Some(profile.id.to_string()));
+
+    let resolved = resolve_selected_backfill_profile(&request, temp.path())
+      .unwrap()
+      .expect("selected profile");
+
+    assert_eq!(resolved.id, profile.id);
+    assert_eq!(std::fs::read(metadata_path).unwrap(), metadata);
+  }
+
+  #[test]
+  fn selected_profile_validation_rejects_browser_and_ephemeral_camoufox() {
+    let temp = tempfile::tempdir().unwrap();
+    let (camoufox, _, _) = write_profile(temp.path(), "camoufox");
+    let request = selected_request(Some(camoufox.id.to_string()));
+    let mismatch = resolve_selected_backfill_profile(&request, temp.path()).unwrap_err();
+    assert!(mismatch.contains("requested chromium"));
+
+    let mut camoufox_request = request;
+    camoufox_request.browser = BackfillBrowser::Camoufox;
+    let ephemeral = resolve_selected_backfill_profile(&camoufox_request, temp.path()).unwrap_err();
+    assert!(ephemeral.contains("ephemeral data"));
+  }
+
+  #[test]
+  fn selected_profile_validation_rejects_a_running_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut profile, metadata_path, _) = write_profile(temp.path(), "chromium");
+    profile.process_id = Some(std::process::id());
+    std::fs::write(&metadata_path, serde_json::to_vec_pretty(&profile).unwrap()).unwrap();
+    let request = selected_request(Some(profile.id.to_string()));
+
+    let error = resolve_selected_backfill_profile(&request, temp.path()).unwrap_err();
+
+    assert!(error.contains("is running"));
+  }
+
+  #[test]
+  fn selected_profile_preparation_fails_fast_and_drop_releases_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let (profile, _, _) = write_profile(temp.path(), "chromium");
+    let profile_id = profile.id.to_string();
+    let request = selected_request(Some(profile_id.clone()));
+    let registry = leaked_registry();
+
+    let prepared = prepare_selected_browser_runtime(&request, temp.path(), registry)
+      .unwrap()
+      .expect("selected runtime");
+    assert!(registry.is_leased(&profile_id));
+    let error = prepare_selected_browser_runtime(&request, temp.path(), registry)
+      .err()
+      .expect("second selected task must fail");
+    assert_eq!(error, SELECTED_PROFILE_BUSY_ERROR);
+
+    drop(prepared);
+    assert!(!registry.is_leased(&profile_id));
+  }
+
+  #[test]
+  fn selected_launch_policy_keeps_network_and_fingerprint_task_local() {
+    let profile_id = uuid::Uuid::new_v4().to_string();
+    let mut request = selected_request(Some(profile_id.clone()));
+    request.data_mode = DataMode::Persistent;
+    request.fingerprint_mode = FingerprintMode::Stable;
+    request.network = BackfillNetworkConfig::Vpn {
+      vpn_id: " vpn-1 ".into(),
+    };
+
+    let policy = selected_launch_policy(&request, &profile_id);
+
+    assert_eq!(
+      policy.source_profile_id.as_deref(),
+      Some(profile_id.as_str())
+    );
+    assert_eq!(policy.data_mode, DataMode::Persistent);
+    assert_eq!(policy.fingerprint_mode, FingerprintMode::Stable);
+    assert_eq!(policy.vpn_id.as_deref(), Some("vpn-1"));
+    assert!(policy.proxy_id.is_none());
+    assert!(!policy.owns_generated_worker);
+    assert!(!policy.persist_process_to_source);
   }
 
   #[test]

@@ -106,7 +106,7 @@
         "Run backfill tests for selected-profile serialization, operation ownership, stale recovery, cancellation, and cleanup refusal on ownership mismatch.",
         "Verify progress events and recovery summaries remain free of passwords, OTP/TOTP material, access tokens, raw provider responses, and raw HTML."
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": [
           "Shared runtime launch policy and profile lease",

@@ -77,3 +77,14 @@ Started: 2026-07-28
 - Auto Login retains both selected profiles and its exact stable default worker; no profile deletion path remains in the engine.
 - Verification: Auto Login 68 passed; full `cargo test --lib` 955 passed; focused all-features lib clippy, Rust formatting, unused-command check, and diff check passed. Unused-command bin targets emitted only the existing Windows `LNK4075` linker warning.
 - PRD `backend-4` complete; next: Wave 6 Task 6 (2FA Backfill migration).
+
+## 2026-07-29 — /ship jnmbrowser-pia Wave 6
+
+- Added backward-compatible 2FA Backfill `profileId`, `dataMode`, and `fingerprintMode` fields to start and preview requests while preserving generated-worker defaults.
+- Added synchronous read-only selected-profile validation and fail-fast lease acquisition before task publication; missing, invalid, running, cross-OS, browser-mismatched, busy, and unsupported ephemeral Camoufox selections fail closed.
+- Added one task-scoped selected runtime context reused across the existing serial account loop; data, fingerprint, proxy, VPN, and direct-network settings are applied only through BrowserRunner runtime policy overlays.
+- Selected launches, attach/prepare rollback, per-account close, cancellation, and task-end cleanup use policy-aware runtime cleanup without deleting or mutating the source profile.
+- Cleanup validates profile, policy, lease source, and active lease holder; cleanup failures retain the lease and keep the guard armed for retry, while successful final cleanup releases it.
+- Preserved generated-worker creation, exact operation-name/ephemeral ownership checks, deletion, stale recovery, canary/bulk gates, journals, CAS ownership, cancellation, and secret-free progress/recovery payloads unchanged.
+- Verification: 2FA Backfill 100 passed; full `cargo test --lib` 965 passed; all-targets/all-features clippy, Rust formatting, unused-command check, and diff check passed.
+- PRD `backend-5` complete; next: Wave 7 Task 7 (frontend policy controls and Tauri wiring).
