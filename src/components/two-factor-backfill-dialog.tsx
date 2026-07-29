@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { LuCheck, LuX } from "react-icons/lu";
 import {
   type AutomationProfilePolicy,
+  automationErrorTranslationKey,
   automationProfilePolicyPayload,
   DEFAULT_AUTOMATION_PROFILE_POLICY,
 } from "@/components/automation-profile-policy";
@@ -764,7 +765,12 @@ export function TwoFactorBackfillDialog({
                   <div className="flex gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
-                      {t("registration.twoFactorBackfill.backendError")}
+                      {t(
+                        automationErrorTranslationKey(
+                          error,
+                          "automationProfile.errors.operationFailed",
+                        ),
+                      )}
                     </span>
                   </div>
                 ) : null}

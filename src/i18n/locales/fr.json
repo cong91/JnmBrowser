@@ -98,6 +98,29 @@
       "copied": "Copié"
     }
   },
+  "automationProfile": {
+    "profileLabel": "Profil d'automatisation",
+    "generatedWorker": "Profil de travail généré",
+    "runningOption": "{{name}} — En cours",
+    "leasedOption": "{{name}} — Utilisé par l'automatisation",
+    "ephemeralData": "Données éphémères jetables",
+    "ephemeralDescription": "Utilise un nouveau répertoire de données temporaire et le supprime à la fermeture du navigateur.",
+    "persistentData": "Données persistantes du profil",
+    "persistentDescription": "Utilise directement les cookies et le stockage du profil sélectionné ; les modifications du site peuvent persister.",
+    "randomFingerprint": "Empreinte aléatoire à chaque lancement",
+    "randomFingerprintDescription": "Génère une empreinte propre à l'exécution à chaque lancement sans modifier le profil enregistré.",
+    "stableFingerprint": "Empreinte enregistrée stable",
+    "stableFingerprintDescription": "Utilise l'empreinte déjà enregistrée dans le profil sélectionné.",
+    "ephemeralUnsupported": "Les profils Camoufox/Firefox sélectionnés nécessitent des données persistantes ; les données éphémères ne sont pas prises en charge.",
+    "profileConcurrencyOne": "Un profil sélectionné est réservé à cette tâche ; la concurrence CDK est donc fixée à 1.",
+    "errors": {
+      "profileBusy": "Ce profil est en cours d'exécution ou utilisé par une autre tâche d'automatisation. Arrêtez-le ou attendez la fin de cette tâche, puis réessayez.",
+      "invalidProfile": "Le profil sélectionné est indisponible ou incompatible. Choisissez un autre profil arrêté, puis réessayez.",
+      "cleanupFailed": "Le nettoyage du navigateur n'est pas terminé. Le profil reste réservé pour empêcher une réutilisation dangereuse ; fermez le navigateur et réessayez après le nettoyage.",
+      "startFailed": "La tâche d'automatisation n'a pas pu démarrer. Vérifiez le profil sélectionné et les paramètres, puis réessayez.",
+      "operationFailed": "L'opération d'automatisation a échoué. Vérifiez l'état actuel, puis réessayez."
+    }
+  },
   "settings": {
     "title": "Paramètres",
     "appearance": {

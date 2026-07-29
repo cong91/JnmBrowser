@@ -98,6 +98,29 @@
       "copied": "Copiado"
     }
   },
+  "automationProfile": {
+    "profileLabel": "Perfil de automatización",
+    "generatedWorker": "Trabajador generado",
+    "runningOption": "{{name}} — En ejecución",
+    "leasedOption": "{{name}} — En uso por automatización",
+    "ephemeralData": "Datos efímeros desechables",
+    "ephemeralDescription": "Usa un directorio de datos temporal nuevo y lo elimina al cerrar el navegador.",
+    "persistentData": "Datos persistentes del perfil",
+    "persistentDescription": "Usa directamente las cookies y el almacenamiento del perfil seleccionado; los cambios del sitio pueden persistir.",
+    "randomFingerprint": "Huella aleatoria por inicio",
+    "randomFingerprintDescription": "Genera una huella solo para la ejecución en cada inicio sin cambiar el perfil guardado.",
+    "stableFingerprint": "Huella guardada estable",
+    "stableFingerprintDescription": "Usa la huella ya guardada en el perfil seleccionado.",
+    "ephemeralUnsupported": "Los perfiles Camoufox/Firefox seleccionados requieren datos persistentes; los datos efímeros no son compatibles.",
+    "profileConcurrencyOne": "Un perfil seleccionado es exclusivo de esta tarea, por lo que la concurrencia de CDK se fija en 1.",
+    "errors": {
+      "profileBusy": "Este perfil está en ejecución o lo usa otra tarea de automatización. Deténlo o espera a que termine esa tarea y vuelve a intentarlo.",
+      "invalidProfile": "El perfil seleccionado no está disponible o no es compatible. Elige otro perfil detenido y vuelve a intentarlo.",
+      "cleanupFailed": "La limpieza del navegador no terminó. El perfil permanece reservado para evitar una reutilización insegura; cierra el navegador y vuelve a intentarlo después de la limpieza.",
+      "startFailed": "No se pudo iniciar la tarea de automatización. Revisa el perfil seleccionado y la configuración y vuelve a intentarlo.",
+      "operationFailed": "La operación de automatización falló. Revisa el estado actual y vuelve a intentarlo."
+    }
+  },
   "settings": {
     "title": "Configuración",
     "appearance": {

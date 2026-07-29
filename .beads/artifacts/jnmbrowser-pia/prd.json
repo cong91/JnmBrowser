@@ -161,7 +161,7 @@
         "Validate every new key exists and is non-empty in all seven locale files.",
         "Run the repository spellcheck/lint path and review the documentation against the implemented kernel capability matrix."
       ],
-      "passes": false,
+      "passes": true,
       "metadata": {
         "depends_on": ["Frontend profile policy controls and Tauri wiring"],
         "parallel": false,

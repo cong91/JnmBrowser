@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import {
   type AutomationProfilePolicy,
   accountCheckerProfilePolicyPayload,
+  automationErrorTranslationKey,
   DEFAULT_AUTOMATION_PROFILE_POLICY,
 } from "@/components/automation-profile-policy";
 import { AutomationProfilePolicyFields } from "@/components/automation-profile-policy-fields";
@@ -72,15 +73,16 @@ export function AccountCheckerDialog({ open, onOpenChange }: Props) {
       return;
     }
     setRunning(true);
-    const taskId = await startCheck({
-      credentialsText,
-      ...accountCheckerProfilePolicyPayload(profilePolicy),
-      vpnId: vpnId || undefined,
-      browserType: "chromium",
-      headless: false,
-    });
-    if (!taskId) {
-      toast.error(t("accountChecker.startFailed"));
+    try {
+      await startCheck({
+        credentialsText,
+        ...accountCheckerProfilePolicyPayload(profilePolicy),
+        vpnId: vpnId || undefined,
+        browserType: "chromium",
+        headless: false,
+      });
+    } catch (error) {
+      toast.error(t(automationErrorTranslationKey(error)));
       setRunning(false);
     }
   };

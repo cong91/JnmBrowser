@@ -72,25 +72,54 @@ Progress is shown in real-time with step-by-step logs (including IP rotation mes
 
 Prefer **`vpn`** (WireGuard inventory / Nord Access Token configs created in Proxies & VPNs) for isolation. **`nord` is CLI backup only** — system-wide (affects the whole PC, including CDK HTTP and OTP polling). Modes are mutually exclusive (`proxyId` / `vpnId` / Nord CLI). Nord CLI stays connected after the batch finishes (no auto-disconnect); you disconnect manually when done.
 
-### Profile lifecycle (reuse, not spam)
+### Shared automation profile lifecycle
 
-Auto-registration does **not** create a new profile metadata row for every account.
+Account Checker, Auto Registration, Auto Login, and selected-account 2FA Backfill use the same runtime-profile policy. Each workflow can either use its generated worker default or reuse one explicitly selected, stopped browser profile. The selector sends the profile UUID, never its display name.
 
-| Phase | Behavior |
-|-------|----------|
-| Per CDK worker | Create **one** ephemeral worker profile (`auto-reg-worker-{task8}-s{slot}`), **or** adopt `profileId` if provided |
-| Each account (alias) | Kill → relaunch same worker: `randomize_fingerprint_on_launch` + fresh ephemeral data dir + `clear_all_site_data` + new `device_id` |
-| Cloudflare authorize retry | Relaunch the **same** worker (no extra profile create) |
-| CDK finished | Delete auto-created worker for that slot; **never** delete a user-provided `profileId` |
+| Workflow | Generated worker | Selected source profile |
+|----------|------------------|-------------------------|
+| Account Checker | Creates a task-owned Chromium worker for the batch | Reuses one stopped Chromium profile |
+| Auto Registration | Creates task-owned worker slots for the batch | Reuses one stopped profile and forces CDK concurrency to 1 |
+| Auto Login | Uses the workflow's explicit default worker when no profile is selected | Reuses one stopped profile |
+| 2FA Backfill | Creates an operation-owned worker | Reuses one stopped profile; execution remains serial |
 
-Isolation between accounts comes from relaunch fingerprint renew + ephemeral dir wipe + cookie/storage clear — not from creating unlimited profiles.
+The runtime controls have these meanings:
+
+- **Ephemeral disposable data** creates a lease-scoped temporary browser data directory for each launch/relaunch and removes that directory during cleanup. It does not change the source profile's stored ephemeral flag.
+- **Persistent source data** launches against the selected profile's existing browser data. Cookies, local storage, and other website state may change because this mode intentionally uses the source data directory.
+- **Random fingerprint per launch** generates a launch-only fingerprint in memory. It never writes that fingerprint back to the selected profile.
+- **Stable stored fingerprint** uses the fingerprint already stored on the selected profile.
+- Proxy, VPN, and clear-network choices are runtime-only overlays. They affect the actual browser launch without rewriting the source profile's saved proxy or VPN assignment.
+
+For a selected source profile, automation never changes its fingerprint, proxy, VPN, ephemeral flags, or persisted process metadata. Persistent mode permits browser website data to change, but does not relax that metadata rule.
+
+Selected profiles are protected by a process-local exclusive lease:
+
+1. The lease is acquired before the task is published. A second task selecting the same source profile fails immediately; it is not queued.
+2. Running profiles and profiles leased by another automation task are unavailable in the selector.
+3. Success, cancellation, or launch failure runs browser cleanup before releasing the lease.
+4. If runtime cleanup fails, the lease remains held for the lifetime of the current application process to prevent unsafe reuse. Close the remaining browser process and retry only after cleanup succeeds. Because the registry is process-local, an application restart clears the in-memory lease but does not prove an orphaned browser exited; independently confirm that no browser process remains before selecting the profile again.
+
+A selected source profile is never deleted. Cleanup may delete a generated worker only when the task can verify that it owns that worker; an ownership or identity mismatch fails closed. Auto Registration relaunches the same worker for account retries instead of creating unbounded profile metadata rows.
+
+#### Browser-kernel capabilities
+
+| Workflow | Selected Chromium | Selected Camoufox/Firefox |
+|----------|-------------------|----------------------------|
+| Account Checker | Persistent and ephemeral data | Not supported; Account Checker currently uses Chromium |
+| Auto Registration | Persistent and ephemeral data | Persistent data only |
+| Auto Login | Persistent and ephemeral data | Persistent data only |
+| 2FA Backfill | Persistent and ephemeral data | Persistent data only |
+
+Selected Camoufox/Firefox ephemeral mode is fail-closed: the UI switches the policy to persistent and disables the ephemeral control, and the backend rejects an unsupported ephemeral request. This limitation applies to selected source profiles; generated workers continue to use each workflow's existing kernel-specific lifecycle.
 
 ### CDK concurrency (1 CDK = 1 thread)
 
 - `concurrency` = max number of CDKs processed in parallel (UI default 1, max 8).
 - **Inside** a CDK, aliases (`accountsPerCdk`, 1–6) stay **sequential**.
+- Selecting a source profile forces `concurrency = 1` because that profile has one exclusive task lease.
 - **Nord CLI mode forces concurrency = 1** (system-wide IP is not thread-safe).
-- Proxy / VPN / none modes can run multiple CDK workers concurrently; each slot has its own worker profile.
+- Proxy / VPN / none modes can run multiple CDK workers concurrently only when generated workers are used; each slot then has its own worker profile.
 
 ### CDK inventory stats
 

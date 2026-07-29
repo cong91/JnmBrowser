@@ -7,6 +7,7 @@ import { LuLogIn, LuRocket } from "react-icons/lu";
 import { toast } from "sonner";
 import {
   type AutomationProfilePolicy,
+  automationErrorTranslationKey,
   automationProfilePolicyPayload,
   DEFAULT_AUTOMATION_PROFILE_POLICY,
 } from "@/components/automation-profile-policy";
@@ -358,8 +359,8 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       });
       setActiveTaskId(taskId);
       setActiveTab("progress");
-    } catch {
-      toast.error(t("registration.twoFactorBackfill.backendError"));
+    } catch (error) {
+      toast.error(t(automationErrorTranslationKey(error)));
     }
   };
 
@@ -368,8 +369,15 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
     try {
       await cancelLogin(activeTaskId);
       toast.success(t("common.buttons.cancel"));
-    } catch {
-      toast.error(t("registration.twoFactorBackfill.backendError"));
+    } catch (error) {
+      toast.error(
+        t(
+          automationErrorTranslationKey(
+            error,
+            "automationProfile.errors.operationFailed",
+          ),
+        ),
+      );
     }
   };
 
@@ -466,8 +474,8 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       setActiveTaskId(taskId);
       setActiveTab("progress");
       toast.success(t("autoLogin.retryStarted", { count: credentials.length }));
-    } catch {
-      toast.error(t("registration.twoFactorBackfill.backendError"));
+    } catch (error) {
+      toast.error(t(automationErrorTranslationKey(error)));
     }
   };
 

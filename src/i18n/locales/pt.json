@@ -98,6 +98,29 @@
       "copied": "Copiado"
     }
   },
+  "automationProfile": {
+    "profileLabel": "Perfil de automação",
+    "generatedWorker": "Trabalhador gerado",
+    "runningOption": "{{name}} — Em execução",
+    "leasedOption": "{{name}} — Em uso pela automação",
+    "ephemeralData": "Dados efêmeros descartáveis",
+    "ephemeralDescription": "Usa um novo diretório de dados temporário e o remove após o navegador fechar.",
+    "persistentData": "Dados persistentes do perfil",
+    "persistentDescription": "Usa diretamente os cookies e o armazenamento do perfil selecionado; alterações do site podem persistir.",
+    "randomFingerprint": "Impressão digital aleatória por inicialização",
+    "randomFingerprintDescription": "Gera uma impressão digital somente de execução em cada inicialização sem alterar o perfil salvo.",
+    "stableFingerprint": "Impressão digital salva estável",
+    "stableFingerprintDescription": "Usa a impressão digital já salva no perfil selecionado.",
+    "ephemeralUnsupported": "Perfis Camoufox/Firefox selecionados exigem dados persistentes; dados efêmeros não são compatíveis.",
+    "profileConcurrencyOne": "Um perfil selecionado é exclusivo desta tarefa, portanto a concorrência de CDK é fixada em 1.",
+    "errors": {
+      "profileBusy": "Este perfil está em execução ou é usado por outra tarefa de automação. Pare-o ou aguarde essa tarefa terminar e tente novamente.",
+      "invalidProfile": "O perfil selecionado está indisponível ou é incompatível. Escolha outro perfil parado e tente novamente.",
+      "cleanupFailed": "A limpeza do navegador não terminou. O perfil permanece reservado para impedir reutilização insegura; feche o navegador e tente novamente após a limpeza.",
+      "startFailed": "Não foi possível iniciar a tarefa de automação. Revise o perfil selecionado e as configurações e tente novamente.",
+      "operationFailed": "A operação de automação falhou. Revise o estado atual e tente novamente."
+    }
+  },
   "settings": {
     "title": "Configurações",
     "appearance": {

@@ -98,6 +98,29 @@
       "copied": "已复制"
     }
   },
+  "automationProfile": {
+    "profileLabel": "自动化配置文件",
+    "generatedWorker": "自动生成工作配置",
+    "runningOption": "{{name}} — 运行中",
+    "leasedOption": "{{name}} — 正被自动化任务使用",
+    "ephemeralData": "一次性临时数据",
+    "ephemeralDescription": "每次使用新的临时数据目录，并在浏览器关闭后删除。",
+    "persistentData": "持久化源配置数据",
+    "persistentDescription": "直接使用所选配置文件的 Cookie 和存储；网站产生的更改可能会保留。",
+    "randomFingerprint": "每次启动使用随机指纹",
+    "randomFingerprintDescription": "每次启动生成仅用于本次运行的指纹，不修改已保存的配置文件。",
+    "stableFingerprint": "使用稳定的已保存指纹",
+    "stableFingerprintDescription": "使用所选配置文件中已保存的指纹。",
+    "ephemeralUnsupported": "所选 Camoufox/Firefox 配置文件必须使用持久化数据；不支持临时数据。",
+    "profileConcurrencyOne": "所选配置文件由此任务独占，因此 CDK 并发数固定为 1。",
+    "errors": {
+      "profileBusy": "此配置文件正在运行或被其他自动化任务使用。请停止它或等待该任务完成后重试。",
+      "invalidProfile": "所选配置文件不可用或不兼容。请选择另一个已停止的配置文件后重试。",
+      "cleanupFailed": "浏览器清理尚未完成。为防止不安全的重复使用，该配置文件会保持占用；请关闭浏览器并在清理完成后重试。",
+      "startFailed": "无法启动自动化任务。请检查所选配置文件和设置后重试。",
+      "operationFailed": "自动化操作失败。请检查当前状态后重试。"
+    }
+  },
   "settings": {
     "title": "设置",
     "appearance": {

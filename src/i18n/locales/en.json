@@ -98,6 +98,29 @@
       "copied": "Copied"
     }
   },
+  "automationProfile": {
+    "profileLabel": "Automation profile",
+    "generatedWorker": "Generated worker",
+    "runningOption": "{{name}} — Running",
+    "leasedOption": "{{name}} — Used by automation",
+    "ephemeralData": "Ephemeral disposable data",
+    "ephemeralDescription": "Uses a fresh temporary data directory and removes it after the browser closes.",
+    "persistentData": "Persistent source data",
+    "persistentDescription": "Uses the selected profile's cookies and storage directly; website changes may persist.",
+    "randomFingerprint": "Random fingerprint per launch",
+    "randomFingerprintDescription": "Generates a runtime-only fingerprint for every launch without changing the stored profile.",
+    "stableFingerprint": "Stable stored fingerprint",
+    "stableFingerprintDescription": "Uses the fingerprint already stored on the selected profile.",
+    "ephemeralUnsupported": "Selected Camoufox/Firefox profiles require persistent data; ephemeral data is not supported.",
+    "profileConcurrencyOne": "A selected profile is exclusive to this task, so CDK concurrency is fixed at 1.",
+    "errors": {
+      "profileBusy": "This profile is running or used by another automation task. Stop it or wait for that task to finish, then retry.",
+      "invalidProfile": "The selected profile is unavailable or incompatible. Choose another stopped profile and retry.",
+      "cleanupFailed": "Browser cleanup did not finish. The profile remains reserved to prevent unsafe reuse; close the browser and retry after cleanup.",
+      "startFailed": "The automation task could not start. Review the selected profile and settings, then retry.",
+      "operationFailed": "The automation operation failed. Review the current state and retry."
+    }
+  },
   "settings": {
     "title": "Settings",
     "appearance": {

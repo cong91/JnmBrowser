@@ -82,7 +82,7 @@ export function useAccountCheckerEvents() {
   }, [refreshResults]);
 
   const startCheck = useCallback(
-    async (config: AccountCheckConfig): Promise<string | null> => {
+    async (config: AccountCheckConfig): Promise<string> => {
       await ensureListener();
       try {
         const taskId = await invoke<string>("start_openai_account_check", {
@@ -92,7 +92,7 @@ export function useAccountCheckerEvents() {
         return taskId;
       } catch (e) {
         console.error("Failed to start account check:", e);
-        return null;
+        throw e;
       }
     },
     [ensureListener],

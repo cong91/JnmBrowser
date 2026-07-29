@@ -7,6 +7,7 @@ import { LuFolderOpen, LuRocket } from "react-icons/lu";
 import { toast } from "sonner";
 import {
   type AutomationProfilePolicy,
+  automationErrorTranslationKey,
   automationProfilePolicyPayload,
   DEFAULT_AUTOMATION_PROFILE_POLICY,
   registrationConcurrency,
@@ -411,8 +412,8 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
         smsToken: smsEnabled ? smsTokenOverride.trim() || undefined : undefined,
       });
       setActiveTab("progress");
-    } catch {
-      toast.error(t("registration.twoFactorBackfill.backendError"));
+    } catch (error) {
+      toast.error(t(automationErrorTranslationKey(error)));
     }
   };
 
@@ -719,11 +720,13 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   }
                 />
                 <p className="text-[11px] text-muted-foreground">
-                  {networkMode === "nord"
-                    ? t("registration.concurrencyNordHint")
-                    : networkMode === "vpn"
-                      ? t("registration.nordMaxSessionsHint")
-                      : t("registration.concurrencyHint")}
+                  {profilePolicy.profileId
+                    ? t("automationProfile.profileConcurrencyOne")
+                    : networkMode === "nord"
+                      ? t("registration.concurrencyNordHint")
+                      : networkMode === "vpn"
+                        ? t("registration.nordMaxSessionsHint")
+                        : t("registration.concurrencyHint")}
                 </p>
               </div>
 

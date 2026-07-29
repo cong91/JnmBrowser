@@ -97,7 +97,7 @@ export function AutomationProfilePolicyFields({
     <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3">
       <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-profile`}>
-          {t("profileSelector.selectProfileLabel")}
+          {t("automationProfile.profileLabel")}
         </Label>
         <Select
           value={value.profileId || GENERATED_WORKER_VALUE}
@@ -120,20 +120,24 @@ export function AutomationProfilePolicyFields({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={GENERATED_WORKER_VALUE}>
-              {t("common.labels.default")}
+              {t("automationProfile.generatedWorker")}
             </SelectItem>
             {compatibleProfiles.map((profile) => {
-              const unavailable =
-                runningProfiles.has(profile.id) ||
-                leasedProfiles.has(profile.id);
+              const running = runningProfiles.has(profile.id);
+              const leased = leasedProfiles.has(profile.id);
+              const unavailable = running || leased;
+              const option = leased
+                ? t("automationProfile.leasedOption", { name: profile.name })
+                : running
+                  ? t("automationProfile.runningOption", { name: profile.name })
+                  : profile.name;
               return (
                 <SelectItem
                   key={profile.id}
                   value={profile.id}
                   disabled={unavailable}
                 >
-                  {profile.name}
-                  {unavailable ? ` - ${t("common.status.running")}` : ""}
+                  {option}
                 </SelectItem>
               );
             })}
@@ -161,11 +165,21 @@ export function AutomationProfilePolicyFields({
               }
             />
             <Label htmlFor={`${idPrefix}-ephemeral`} className="font-normal">
-              {t("profiles.ephemeral")}
+              {t(
+                value.dataMode === "ephemeral"
+                  ? "automationProfile.ephemeralData"
+                  : "automationProfile.persistentData",
+              )}
             </Label>
           </div>
           <p className="text-xs text-muted-foreground">
-            {t("profiles.ephemeralDescription")}
+            {t(
+              ephemeralUnsupported
+                ? "automationProfile.ephemeralUnsupported"
+                : value.dataMode === "ephemeral"
+                  ? "automationProfile.ephemeralDescription"
+                  : "automationProfile.persistentDescription",
+            )}
           </p>
         </div>
 
@@ -187,11 +201,19 @@ export function AutomationProfilePolicyFields({
               htmlFor={`${idPrefix}-random-fingerprint`}
               className="font-normal"
             >
-              {t("config.chromium.fingerprint.randomize")}
+              {t(
+                value.fingerprintMode === "randomPerLaunch"
+                  ? "automationProfile.randomFingerprint"
+                  : "automationProfile.stableFingerprint",
+              )}
             </Label>
           </div>
           <p className="text-xs text-muted-foreground">
-            {t("config.chromium.fingerprint.randomizeDescription")}
+            {t(
+              value.fingerprintMode === "randomPerLaunch"
+                ? "automationProfile.randomFingerprintDescription"
+                : "automationProfile.stableFingerprintDescription",
+            )}
           </p>
         </div>
       </div>
