@@ -4,6 +4,7 @@ pub mod gmail_123452026;
 pub mod sms_iosmq;
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicBool;
 
 pub use alias::{EmailAliasGenerator, MAX_ALIASES_PER_EMAIL};
 pub use error::EmailServiceError;
@@ -115,6 +116,20 @@ pub trait EmailService: Send + Sync {
     timeout_secs: u64,
   ) -> Result<String, EmailServiceError>;
 
+  /// Poll with cooperative cancellation for long-running existing-account repairs.
+  /// Providers that do not override this keep the legacy polling behavior.
+  fn poll_verification_code_with_cancel(
+    &self,
+    cdk: &str,
+    timeout_secs: u64,
+    cancel_flag: &AtomicBool,
+  ) -> Result<String, EmailServiceError> {
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+      return Err(EmailServiceError::Cancelled);
+    }
+    self.poll_verification_code(cdk, timeout_secs)
+  }
+
   /// Remember that this OTP was already attempted for `cdk` so the next poll
   /// waits for a newer code (e.g. after OpenAI returns HTTP 401).
   fn mark_verification_code_used(&self, cdk: &str, code: &str);
@@ -135,6 +150,23 @@ pub fn build_email_service(provider: EmailProvider) -> Box<dyn EmailService> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn providers_cancel_before_starting_a_network_poll() {
+    let cancel_flag = AtomicBool::new(true);
+    assert!(matches!(
+      Gmail123452026Service::new().poll_verification_code_with_cancel(
+        "GMAIL-TEST",
+        150,
+        &cancel_flag
+      ),
+      Err(EmailServiceError::Cancelled)
+    ));
+    assert!(matches!(
+      SmsIosmqService::new().poll_verification_code_with_cancel("MAIL-TEST", 150, &cancel_flag),
+      Err(EmailServiceError::Cancelled)
+    ));
+  }
 
   #[test]
   fn parse_provider_by_domain() {

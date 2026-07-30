@@ -1,5 +1,15 @@
 # ChatGPT Auto-Registration
 
+## Account Checker
+
+The Account Checker verifies existing ChatGPT credentials without completing the full OAuth login flow. It accepts one `email|password|2fa` credential per line, submits only the email and password, and stops as soon as a verification-code input is reached.
+
+- **Passed**: a visible, enabled OTP/2FA input is present (authenticator, email OTP, or SMS OTP).
+- **Deactivated**: the page contains both `Authentication Error` and `error_code: account_deactivated`.
+- **Unresolved**: every other outcome, including wrong credentials, Cloudflare, rate limits, timeouts, cancellation, and unknown pages.
+
+Passed and deactivated lists are stored locally and export in the same `email|password|2fa` format. The checker does not submit TOTP codes, poll email or SMS, exchange OAuth tokens, or push accounts to Sub2API.
+
 Automatically create ChatGPT accounts using Gmail CDK codes, browser automation, and anti-detect fingerprinting.
 
 ## Overview
@@ -54,33 +64,62 @@ Progress is shown in real-time with step-by-step logs (including IP rotation mes
 |------|----------------|--------------------|
 | `none` | no `proxy_id` / no `vpn_id` | host IP sticky |
 | `proxy` | static `proxyId` on the reused worker profile | no mid-batch hop (v1) |
-| `vpn` | WireGuard `vpnId` base from **Proxies & VPNs** (private key source) | Concurrency **auto = 6** (Nord WG policy; plan allows up to ~10 devices). At Start, spawn up to 6 ephemeral Nord peers. Process all CDKs in waves. Per-slot rotate hops only that worker’s peer. Ephemeral confs deleted when the batch ends. |
+| `vpn` | WireGuard `vpnId` base from **Proxies & VPNs** (private key source) | Operator chooses CDK concurrency; effective concurrency is capped by the detected Nord session budget (maximum 6). At Start, spawn that many ephemeral Nord peers. Process all CDKs in waves. Per-slot rotate hops only that worker’s peer. Ephemeral confs are deleted when the batch ends. |
 | `nord` | no profile proxy/VPN | **backup** system-wide Nord CLI; after every **N successful free-trial saves**, disconnect → connect → verify public IP |
 
 **Important:** 
-**Nord session budget:** Fixed product policy **max 6** concurrent WireGuard sessions for auto-reg (Nord plans allow up to ~10 devices; 6 is the safe parallel cap). When you create a VPN via Access Token, JnmBrowser stores `max_sessions = 6` on that config and auto-sets concurrency. You do not enter session limits or concurrency by hand for Nord WG.
+**Nord session budget:** Fixed product policy **max 6** concurrent WireGuard sessions for auto-reg (Nord plans allow up to ~10 devices; 6 is the safe parallel cap). When you create a VPN via Access Token, JnmBrowser stores the detected `max_sessions` on that config. The operator chooses CDK concurrency in the registration form; effective concurrency is `min(operator concurrency, detected session budget, 6)`.
 
 Prefer **`vpn`** (WireGuard inventory / Nord Access Token configs created in Proxies & VPNs) for isolation. **`nord` is CLI backup only** — system-wide (affects the whole PC, including CDK HTTP and OTP polling). Modes are mutually exclusive (`proxyId` / `vpnId` / Nord CLI). Nord CLI stays connected after the batch finishes (no auto-disconnect); you disconnect manually when done.
 
-### Profile lifecycle (reuse, not spam)
+### Shared automation profile lifecycle
 
-Auto-registration does **not** create a new profile metadata row for every account.
+Account Checker, Auto Registration, Auto Login, and selected-account 2FA Backfill use the same runtime-profile policy. Each workflow can either use its generated worker default or reuse one explicitly selected, stopped browser profile. The selector sends the profile UUID, never its display name.
 
-| Phase | Behavior |
-|-------|----------|
-| Per CDK worker | Create **one** ephemeral worker profile (`auto-reg-worker-{task8}-s{slot}`), **or** adopt `profileId` if provided |
-| Each account (alias) | Kill → relaunch same worker: `randomize_fingerprint_on_launch` + fresh ephemeral data dir + `clear_all_site_data` + new `device_id` |
-| Cloudflare authorize retry | Relaunch the **same** worker (no extra profile create) |
-| CDK finished | Delete auto-created worker for that slot; **never** delete a user-provided `profileId` |
+| Workflow | Generated worker | Selected source profile |
+|----------|------------------|-------------------------|
+| Account Checker | Creates a task-owned Chromium worker for the batch | Reuses one stopped Chromium profile |
+| Auto Registration | Creates task-owned worker slots for the batch | Reuses one stopped profile and forces CDK concurrency to 1 |
+| Auto Login | Uses the workflow's explicit default worker when no profile is selected | Reuses one stopped profile |
+| 2FA Backfill | Creates an operation-owned worker | Reuses one stopped profile; execution remains serial |
 
-Isolation between accounts comes from relaunch fingerprint renew + ephemeral dir wipe + cookie/storage clear — not from creating unlimited profiles.
+The runtime controls have these meanings:
+
+- **Ephemeral disposable data** creates a lease-scoped temporary browser data directory for each launch/relaunch and removes that directory during cleanup. It does not change the source profile's stored ephemeral flag.
+- **Persistent source data** launches against the selected profile's existing browser data. Cookies, local storage, and other website state may change because this mode intentionally uses the source data directory.
+- **Random fingerprint per launch** generates a launch-only fingerprint in memory. It never writes that fingerprint back to the selected profile.
+- **Stable stored fingerprint** uses the fingerprint already stored on the selected profile.
+- Proxy, VPN, and clear-network choices are runtime-only overlays. They affect the actual browser launch without rewriting the source profile's saved proxy or VPN assignment.
+
+For a selected source profile, automation never changes its fingerprint, proxy, VPN, ephemeral flags, or persisted process metadata. Persistent mode permits browser website data to change, but does not relax that metadata rule.
+
+Selected profiles are protected by a process-local exclusive lease:
+
+1. The lease is acquired before the task is published. A second task selecting the same source profile fails immediately; it is not queued.
+2. Running profiles and profiles leased by another automation task are unavailable in the selector.
+3. Success, cancellation, or launch failure runs browser cleanup before releasing the lease.
+4. If runtime cleanup fails, the lease remains held for the lifetime of the current application process to prevent unsafe reuse. Close the remaining browser process and retry only after cleanup succeeds. Because the registry is process-local, an application restart clears the in-memory lease but does not prove an orphaned browser exited; independently confirm that no browser process remains before selecting the profile again.
+
+A selected source profile is never deleted. Cleanup may delete a generated worker only when the task can verify that it owns that worker; an ownership or identity mismatch fails closed. Auto Registration relaunches the same worker for account retries instead of creating unbounded profile metadata rows.
+
+#### Browser-kernel capabilities
+
+| Workflow | Selected Chromium | Selected Camoufox/Firefox |
+|----------|-------------------|----------------------------|
+| Account Checker | Persistent and ephemeral data | Not supported; Account Checker currently uses Chromium |
+| Auto Registration | Persistent and ephemeral data | Persistent data only |
+| Auto Login | Persistent and ephemeral data | Persistent data only |
+| 2FA Backfill | Persistent and ephemeral data | Persistent data only |
+
+Selected Camoufox/Firefox ephemeral mode is fail-closed: the UI switches the policy to persistent and disables the ephemeral control, and the backend rejects an unsupported ephemeral request. This limitation applies to selected source profiles; generated workers continue to use each workflow's existing kernel-specific lifecycle.
 
 ### CDK concurrency (1 CDK = 1 thread)
 
 - `concurrency` = max number of CDKs processed in parallel (UI default 1, max 8).
 - **Inside** a CDK, aliases (`accountsPerCdk`, 1–6) stay **sequential**.
+- Selecting a source profile forces `concurrency = 1` because that profile has one exclusive task lease.
 - **Nord CLI mode forces concurrency = 1** (system-wide IP is not thread-safe).
-- Proxy / VPN / none modes can run multiple CDK workers concurrently; each slot has its own worker profile.
+- Proxy / VPN / none modes can run multiple CDK workers concurrently only when generated workers are used; each slot then has its own worker profile.
 
 ### CDK inventory stats
 
@@ -225,7 +264,7 @@ CDK Input → Redeem CDK → Generate Alias → Generate User Info
 → Leave Nord connected after finish (no auto-disconnect)
 ```
 
-Registration itself is API-driven (CSRF / register / email-otp / create_account).
+Registration uses browser-backed API and UI steps. The About You name and birthdate step is always completed by filling the visible form and submitting it; it does not fall back to the `create_account` API.
 2FA is UI-driven after a live session is available (Settings → Security → Authenticator).
 
 ## Credential Storage
@@ -326,7 +365,7 @@ Secondary endpoint:
 Probe helper:
 
 ```bash
-cargo run --manifest-path src-tauri/Cargo.toml --bin probe-free-trial --   --profile-id <camoufox-profile-id>   --token-file <registered_account.json>
+cargo run --manifest-path src-tauri/Cargo.toml --features probe-free-trial --bin probe-free-trial --   --profile-id <camoufox-profile-id>   --token-file <registered_account.json>
 ```
 
 ## 2FA Enablement
@@ -345,12 +384,84 @@ After tokens are extracted, the engine enables ChatGPT authenticator 2FA in the 
 Token extract retries `/api/auth/session` up to 5 times with human jitter (session cookies often land after first home paint).
 
 Policy:
-- Only the 2FA step is retried (default 3 attempts) inside the same browser session
-- If 2FA still fails, the registration remains successful with `twoFaEnabled=false` and an error note
-- On success, `totpSecret` is persisted with the account for later login/automation
+- Only the 2FA step is retried (default 3 attempts) inside the same browser session.
+- A free-trial eligible account is first persisted as a non-exportable provisional `Reserved` record before 2FA starts.
+- The authenticator secret is written to the private recovery journal before remote confirmation. The account becomes `Available` only after the Security page is re-opened, authenticator is verified On, and the same secret is durably finalized in the account record.
+- If setup or persistence cannot be verified, registration returns a terminal failure and leaves the account reconciliation-safe in `Reserved`; it never reports a usable account with `twoFaEnabled=false`.
+- Accounts without the free trial remain `Invalid`; 2FA is skipped.
 
 Reference recordings: `register_1.json` / `register_2.json` (signup), `enable2FA.json` (2FA-only).
 Recipe sketch: `src-tauri/src/auto_service/openai/register/recipes/enable_2fa_recipe.json`.
+
+## Selected-account 2FA Backfill
+
+Selected-account 2FA backfill is a repair workflow for existing stored accounts whose local inventory says 2FA is Off. It logs back into the selected account, handles the provider email OTP when required, enables authenticator 2FA only when the remote Security page is confirmed Off, and patches the same inventory record with the recovered TOTP secret. It does **not** create accounts or change registration outcomes.
+
+### Operator flow
+
+1. In **Stored Accounts**, select the target rows and choose **Activate 2FA**.
+2. Run `preview_two_factor_backfill` through the dialog preview before starting. The backend, not the table filter, decides eligibility and returns per-account reasons.
+3. Choose a mode:
+   - **Canary**: exactly one selected account. Required for a provider / browser / network combination before Bulk is allowed.
+   - **Bulk**: multiple selected accounts. The backend opens this only after matching non-secret canary evidence exists.
+4. Choose the browser kernel and an explicit network route (**None**, **Proxy**, or **VPN**). Backfill does not infer or reuse an old proxy/VPN because historical account records do not store reliable network provenance.
+5. Start with `start_auto_registration` using the existing-account operation payload; the compatibility `start_two_factor_backfill` command remains available for older integrations. Stop a running task with `cancel_two_factor_backfill`.
+
+### Existing-account autoreg request
+
+The Auto Registration command accepts an operation-tagged existing-account payload. Its request contains selected stored-account keys plus the backfill browser, explicit network, Canary/Bulk mode, and policy acknowledgement fields. Credentials and the historical provider card remain backend-only. This dispatch happens before new-registration CDK validation and does not construct the registration engine, resolve SMS registration tokens, redeem cards, reserve quota, update CDK inventory, or write login/Sub2API credentials.
+
+```json
+{
+  "config": {
+    "operation": "existingAccount",
+    "selectedAccountKeys": ["account-key"],
+    "browser": "chromium",
+    "network": { "kind": "none" },
+    "mode": "canary",
+    "allowFreeTrialNo": false,
+    "acknowledgeLegacyAccess": false
+  }
+}
+```
+
+The normal new-account payload remains unchanged and still requires non-empty CDKs.
+
+### Eligibility defaults
+
+
+- registration result is successful, email and password are present, inventory `status` is `available`, `twoFaEnabled=false`, `totpSecret` is empty, and the CDK/provider can be resolved;
+- `Invalid` is blocked unless the stored structured outcome reason is `free_trial_no` and the operator explicitly opts into that override;
+- `Sold`, `Exported`, `Reserved`, local 2FA flag/secret conflicts, unknown-invalid rows, and known-locked rows are blocked;
+- legacy `GMAIL-*` and `MAIL-*` CDKs may be migrated once to provider provenance (`gmail.123452026.xyz` or `sms.iosmq.xyz`) by exact prefix inference; unknown prefixes stay manual-review and must not trigger provider network calls;
+- legacy rows whose lock state is unknown require explicit acknowledgement and Canary mode. Do not bulk-run historical locked rows or rows previously associated with lockout/abuse signals.
+
+### Semantics and safety
+
+- Backfill may enter through the `start_auto_registration` existing-account operation boundary, but it never enters the new-account registration engine, never creates accounts, never reserves or releases CDK quota, never mutates CDK inventory counts, and never writes to the login/Sub2API credential store.
+- Execution is serial (`concurrency=1`) by design. There is no operator-facing concurrency override.
+- Progress events contain safe task/account keys, index/total, step/outcome/error code, retryability, and timestamps only. They must not include passwords, raw CDKs, email verification codes, TOTP secrets/codes, access tokens, or raw provider responses.
+- Cancellation is cooperative: it is checked before each account and propagated through existing-account authentication and built-in provider OTP polling. The active HTTP request may still run until its request timeout, and browser/profile cleanup always finishes before the terminal `cancelled` event; partial successes remain persisted and later accounts are untouched.
+- A timed-out live harness must request cancellation and wait for that terminal event instead of exiting the process. If an older interrupted run left an owned `InProgress` record, the guarded stale-recovery path may CAS-finalize it as `Cancelled` and remove only its verified auto-created worker profile; recovery refuses secret-bearing journals and ownership mismatches.
+- A lock discovered while authenticating is persisted as `two_factor_backfill_access_state=locked`, records a failed per-account outcome, and skips to the next selected account. Rate limits, Cloudflare/challenge escalation, repeated 401, and cleanup failures remain batch-level safety pauses.
+
+### Journal, recovery, and reconciliation
+
+The backend stores a private recovery journal while enabling 2FA. The journal captures the pending authenticator secret before submitting the TOTP code, then is marked complete only after the remote Security page is reopened and verified On and the original inventory record is patched atomically.
+
+- If the app crashes or the task is canceled after secret capture, use the journal for operator recovery; do not expose raw secrets in UI events or logs.
+- If remote MFA is already On while the local record says Off, backfill returns a reconciliation/manual-review outcome. It must not toggle MFA Off or disable/re-enable authenticator to force a fresh secret.
+- If local inventory is Off but the remote account is On, reconcile the local record only from a verified recovery path or manual operator evidence.
+- Terminal cleanup must close browser resources, release task/account locks, remove completed handles, and delete completed journals. Failed or incomplete journals stay available for manual recovery.
+
+### Developer notes
+
+- The command surface is `preview_two_factor_backfill`, `start_auto_registration` with `operation=existingAccount`, compatibility `start_two_factor_backfill`, `cancel_two_factor_backfill`, `list_two_factor_backfill_recovery`, and `recover_two_factor_backfill_journal`.
+- `list_two_factor_backfill_recovery` returns only secret-free journal summaries. `recover_two_factor_backfill_journal` performs no remote operation: it deletes a journal only when the account already proves the exact completed local state; otherwise it records manual review and releases an owned `InProgress` record to reconciliation-required through the normal revision-checked account patch.
+- Provider migration is additive provenance on the existing account record; it is not a quota or registration ledger operation.
+- The shared ChatGPT 2FA automation may be reused, but backfill must not call OAuth/Codex PKCE, phone enrollment, registration, or Sub2API login-store collaborators.
+- Remote state inspection is fail-closed: only a positive remote-Off signal may proceed to setup. Remote-On/local-Off is reconciliation, and selector ambiguity is a safe failure.
+- Keep canary evidence non-secret: workflow/selector version, browser kernel, email provider, and network configuration are enough to gate Bulk without storing account secrets.
 
 
 ## Account Inventory & Export

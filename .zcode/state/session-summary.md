@@ -1,6 +1,6 @@
 ---
 purpose: Anchored session summary (survives across turns)
-updated: 2026-07-22
+updated: 2026-07-28
 source: generated-by-zcode-starterkit-session-summary-hook
 ---
 
@@ -10,149 +10,96 @@ source: generated-by-zcode-starterkit-session-summary-hook
 active
 
 ## Files Read (40)
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\MCP_全阶段开发计划书.md
-- C:\Users\PC\.zcode\cli\exec\sess_d34a2b9d-8c5a-4165-8c75-3d72b46e016a\call_00_oEkUPDDMSM4oQXHGvPl54503-stdout.log
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\camoufox_manager.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\browser_runner.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\ephemeral_dirs.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\profile\types.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\profile\manager.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\player.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\mcp_server.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\tauri.conf.json
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/store.rs
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/types.rs
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/app_dirs.rs
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/engine.rs
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/hooks/use-registration-events.ts
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/account-registration-dialog.tsx
-- C:\Users\mrc\Documents\projects\JnmBrowser\package.json
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\issues.jsonl
-- C:\Users\mrc\Documents\projects\JnmBrowser\docs\auto-registration.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\engine.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\types.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\task.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\commands.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\email\mod.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\email\gmail_123452026.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\email\sms_iosmq.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\store.rs
-- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\cdk-inventory-table.tsx
-- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\account-registration-dialog.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\login\mod.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\app_dirs.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\login\commands.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\two_factor_backfill\task.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\browser\mod.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\engine.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\lib.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\browser_runner.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\login\execution.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\store.rs
 - C:\Users\mrc\Documents\projects\JnmBrowser\src\hooks\use-registration-events.ts
-- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\artifacts\audit-recorder\audit.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\artifacts\audit-recorder\audit-cdk-quota.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-cnu\prd.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\config.yaml
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\metadata.json
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-cnu\prd.json
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-cnu\progress.txt
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\prd.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-8qs\plan.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\plan.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\app\page.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\i18n\locales\en.json
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\account-checker-dialog.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\commands.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\vpn\mod.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\vpn\storage.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\Cargo.toml
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\harness\twofa_backfill_live.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\mod.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\downloaded_browsers_registry.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\harness\account_check_live.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\login\engine.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\vpn\nord.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\workflows\audit-pattern.md
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\account-registration-dialog.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\profile-data-table.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\two-factor-backfill-dialog.tsx
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\types.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\types.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\hooks\use-account-checker-events.ts
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\hooks\use-two-factor-backfill-events.ts
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\engine.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\execution.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\profile\mod.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\profile\types.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\profile\manager.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\chromium_manager.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\commands.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\two_factor_backfill\commands.rs
 
-## Files Modified (30)
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\app_dirs.rs — assert!(dns_blocklist_dir().ends_with("dns_blocklists"));
-    assert!(recordings
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder.rs — /// Internal session state held by the manager.
-struct RecorderSession {
-  id: S
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\player.rs —   let path = profile_data_path(profile);
-  // Retry get_active_page for a few se
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\lib.rs — // Synchronizer commands
-      synchronizer::start_sync_session,
-      synchroni
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\types.ts — export interface SyncSessionInfo {
-  id: string;
-  leader_profile_id: string;
-  
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\components\recorder-dialog.tsx — {loading ? (
-            <div className="py-8 text-center text-muted-foreground 
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\capture.rs — use crate::camoufox_manager::CamoufoxManager;
-use crate::chromium_manager::Chrom
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\mcp_server.rs — fn mcp_profile_path(profile: &BrowserProfile) -> String {
-  crate::ephemeral_dir
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\components\profile-data-table.tsx — onCloneProfile={onCloneProfile}
-              onLaunchWithSync={onLaunchWithSync
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\app\page.tsx — const handleLaunchWithRecord = useCallback(
-    async (profile: BrowserProfile) 
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\commands.rs —     "camoufox" => {
-      let path = profile_data_path(&profile);
-      let shar
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\browser.rs — #[cfg(target_os = "linux")]
-    return linux::get_chromium_executable_path(insta
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\downloader.rs — #[cfg(test)]
+## Files Modified (17)
+- C:\Users\mrc\Documents\projects\JnmBrowser\AGENTS.md — - **Sidecar prerequisite**: `prebuild` / `pretauri:dev` / `precargo` call `copy-
+- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\memory\project\tech-stack.md — - Frontend browser process control and profile file I/O stay in Rust; use Tauri 
+- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\memory\project\project.md — - `src/` owns presentation and crosses backend boundaries through Tauri commands
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\mod.rs — //! OpenAI / ChatGPT / Codex auto-service provider.
+//!
+//! - `register` — creat
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\store.rs — #[cfg(test)]
 mod tests {
-  use super::*;
+  use super::super::types::{AccountCheckResult, Account
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\engine.rs —   // Adapter borrow ends here; session released for direct password fill
+  // (B
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\mod.rs — pub mod classify;
+pub mod commands;
+pub(crate) mod engine;
+pub mod store;
+pub(cr
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\lib.rs —       auto_service::openai::two_factor_backfill::commands::list_two_factor_backf
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\chatgpt_auth\mod.rs — pub(crate) const EMAIL_INPUT_SELECTOR: &str = r#"input[type="email"], input[name
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\commands.rs —   Ok(())
+}
 
-  #[cfg(target_os = "macos")]
-  use st
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\storage.rs — /// Load a recording by id. Returns `None` if the file is missing or unparsable.
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\dns_blocklist.rs — #[test]
-  fn test_cache_fresh_returns_false_when_missing() {
-    // Isolate from
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\components\profile-info-dialog.tsx — {
-      icon: <LuUsers className="w-4 h-4" />,
-      label: t("profiles.synchron
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\Cargo.toml — [[test]]
-name = "vpn_integration"
-path = "tests/vpn_integration.rs"
+/// Fetch fresh WireGuard configs from NordVPN API.
+async fn refresh
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\task.rs — // TODO: remove allow when browser integration is complete.
+#![allow(dead_code)]
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\home-header.tsx —   LuCheckCheck,
+  LuCircle,
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\app\page.tsx — import { AccountCheckerDialog } from "@/components/account-checker-dialog";
+impo
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\account-checker-dialog.tsx — LuX
+- C:\Users\mrc\Documents\projects\JnmBrowser\docs\auto-registration.md — # ChatGPT Auto-Registration
 
-[[test]]
-na
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\tauri.conf.json —     "beforeBuildCommand": "node scripts/tauri-before-build.mjs",
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/registration-progress-card.tsx —             <CredentialRow label={t("registration.accessToken")} value={progress
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/engine.rs — }
+## Account Checker
 
-// --------------------------------------------------------------------------
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/hooks/use-registration-events.ts — export interface RegistrationResult {
-  success: boolean;
-  email: string;
-  pas
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src/components/account-registration-dialog.tsx —             <Button
-              className="w-full"
-              onClick={hand
-- C:/Users/PC/Documents/Project/JnmHub/JnmBrowser/src-tauri/src/auto_register/types.rs —   pub account_id: String,
-  pub access_token: String,
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\types.rs —       created_at: now,
-      updated_at: now,
-      task_id: task_id.to_string()
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\store.rs —   #[test]
-  fn release_slot_without_claim_is_noop_on_usage() {
-    let temp = Te
-- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\register\engine.rs —       let msg = format!(
-        "All CDKs are at max capacity ({MAX_ACCOUNTS_PE
-- C:\Users\mrc\Documents\projects\JnmBrowser\docs\auto-registration.md — Every CDK used is persisted under app data `cdk_inventory/`:
+The Account Checker verifies ex
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\Cargo.toml — [[bin]]
+name = "download-chromium"
+path = "src/harness/download_chromium.rs"
+req
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\harness\account_check_live.rs —   eprintln!("=== Account Checker Live Test ===");
+  let account_count = credenti
 
-| Field | Meaning 
-- C:\Users\mrc\Documents\projects\JnmBrowser\src\hooks\use-registration-events.ts — export interface CdkInventoryRecord {
-  cdk: string;
-  baseEmail: string;
-  targ
-- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\account-registration-dialog.tsx —                 <Input
-                  id="perCdk"
-                  type="num
-- C:\Users\mrc\Documents\projects\JnmBrowser\src\components\cdk-inventory-table.tsx —                             title={
-                              isRunning
-    
-
-## Files Created (16)
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.zcode\specs\action-recording\audit.md
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\types.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\inject_script.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\src\recorder\recipe_export.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src\hooks\use-recorder-session.ts
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\scripts\_tmp_add_recorder_i18n.py
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.beads\artifacts\jnmbrowser-8bo\prd.md
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.beads\artifacts\jnmbrowser-8bo\prd.json
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.beads\artifacts\jnmbrowser-8bo\progress.txt
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\src-tauri\tests\recorder_integration.rs
-- C:\Users\PC\Documents\Project\JnmHub\JnmBrowser\.zcode\artifacts\audit-recorder\audit.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\artifacts\audit-recorder\audit-cdk-quota.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\prd.md
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\prd.json
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\progress.txt
-- C:\Users\mrc\Documents\projects\JnmBrowser\.beads\artifacts\jnmbrowser-ctu\plan.md
+## Files Created (5)
+- C:\Users\mrc\Documents\projects\JnmBrowser\.zcode\config.json
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\types.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\auto_service\openai\account_checker\classify.rs
+- C:\Users\mrc\Documents\projects\JnmBrowser\src\hooks\use-account-checker-events.ts
+- C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\src\bin\account_check_live.rs
 
 ## Decisions (0)
 - (none)

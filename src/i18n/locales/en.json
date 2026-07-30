@@ -98,6 +98,29 @@
       "copied": "Copied"
     }
   },
+  "automationProfile": {
+    "profileLabel": "Automation profile",
+    "generatedWorker": "Generated worker",
+    "runningOption": "{{name}} — Running",
+    "leasedOption": "{{name}} — Used by automation",
+    "ephemeralData": "Ephemeral disposable data",
+    "ephemeralDescription": "Uses a fresh temporary data directory and removes it after the browser closes.",
+    "persistentData": "Persistent source data",
+    "persistentDescription": "Uses the selected profile's cookies and storage directly; website changes may persist.",
+    "randomFingerprint": "Random fingerprint per launch",
+    "randomFingerprintDescription": "Generates a runtime-only fingerprint for every launch without changing the stored profile.",
+    "stableFingerprint": "Stable stored fingerprint",
+    "stableFingerprintDescription": "Uses the fingerprint already stored on the selected profile.",
+    "ephemeralUnsupported": "Selected Camoufox/Firefox profiles require persistent data; ephemeral data is not supported.",
+    "profileConcurrencyOne": "A selected profile is exclusive to this task, so CDK concurrency is fixed at 1.",
+    "errors": {
+      "profileBusy": "This profile is running or used by another automation task. Stop it or wait for that task to finish, then retry.",
+      "invalidProfile": "The selected profile is unavailable or incompatible. Choose another stopped profile and retry.",
+      "cleanupFailed": "Browser cleanup did not finish. The profile remains reserved to prevent unsafe reuse; close the browser and retry after cleanup.",
+      "startFailed": "The automation task could not start. Review the selected profile and settings, then retry.",
+      "operationFailed": "The automation operation failed. Review the current state and retry."
+    }
+  },
   "settings": {
     "title": "Settings",
     "appearance": {
@@ -190,7 +213,8 @@
       "recordings": "Recordings",
       "autoRegister": "ChatGPT Auto Registration",
       "smsVerification": "SMS / OTP",
-      "autoLogin": "ChatGPT/Codex Login"
+      "autoLogin": "ChatGPT/Codex Login",
+      "accountChecker": "ChatGPT Account Checker"
     },
     "appName": "JnmBrowser"
   },
@@ -1778,6 +1802,103 @@
     "fields": "Fields",
     "selectedCount": "{count} selected",
     "selectAll": "Select all",
+    "twoFactorBackfill": {
+      "action": "Enable 2FA",
+      "actionTooltip": "Enable 2FA for selected accounts",
+      "title": "Two-factor authentication backfill",
+      "mode": "Run mode",
+      "canary": "Canary",
+      "bulk": "Bulk",
+      "canaryRequiresOne": "Canary mode requires exactly one eligible account.",
+      "bulkRequiresCanary": "Bulk mode requires a successful canary using this browser, email provider, and network route.",
+      "proxy": "Proxy",
+      "proxyLoading": "Loading proxies...",
+      "proxyPlaceholder": "Select a stored proxy",
+      "preview": "Selected accounts",
+      "eligibilityCount": "{{eligible}} of {{total}} eligible",
+      "previewing": "Checking eligibility...",
+      "unknownAccount": "Unknown account",
+      "eligible": "Eligible",
+      "ineligible": "Ineligible",
+      "allowFreeTrialNo": "Allow accounts marked as no free trial",
+      "acknowledgeLegacyAccess": "I acknowledge that legacy access may require manual verification",
+      "recovery": "Recovery journal",
+      "recover": "Review recovery",
+      "recoveryStates": {
+        "secret_captured": "Secret captured",
+        "remote_confirmed": "Remote confirmed",
+        "manual_review": "Manual review"
+      },
+      "progress": "Backfill progress",
+      "summaryEnabled": "Enabled: {{count}}",
+      "summaryFailed": "Failed: {{count}}",
+      "summaryReview": "Review: {{count}}",
+      "summaryCancelled": "Cancelled: {{count}}",
+      "backendError": "The backfill request failed.",
+      "task": "Backfill task",
+      "errorCode": "Error: {{code}}",
+      "retryable": "Retryable",
+      "terminal": "Backfill finished",
+      "cancelTooltip": "Cancel the running backfill",
+      "start": "Start backfill",
+      "steps": {
+        "eligibility": "Checking eligibility",
+        "providerMigration": "Migrating provider metadata",
+        "login": "Signing in",
+        "emailOtp": "Verifying email code",
+        "inspectTwoFactor": "Inspecting 2FA status",
+        "captureSecret": "Preparing authenticator",
+        "confirmTwoFactor": "Confirming 2FA",
+        "verifyRemote": "Verifying remote state",
+        "persistAccount": "Saving account state",
+        "journalComplete": "Recording completion",
+        "batchPaused": "Batch paused",
+        "cancelled": "Cancelled",
+        "completed": "Completed",
+        "failed": "Failed"
+      },
+      "outcomes": {
+        "enabled": "Enabled",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+        "reconciliationRequired": "Manual review required",
+        "batchPaused": "Batch paused"
+      },
+      "registrationOutcomes": {
+        "registered": "Registered",
+        "freeTrialNo": "No free trial",
+        "registrationFailed": "Registration failed",
+        "batchSummary": "Batch summary"
+      },
+      "exclusions": {
+        "operatorExcluded": "Excluded by operator",
+        "manualReview": "Held for manual review"
+      },
+      "reasons": {
+        "accountNotFound": "Account was not found.",
+        "missingAccountKey": "Account key is missing.",
+        "registrationUnsuccessful": "Registration was not successful.",
+        "missingEmail": "Email is missing.",
+        "missingPassword": "Required account password is missing.",
+        "freeTrialNoOverrideRequired": "This account has no free trial; acknowledgement is required.",
+        "twoFactorAlreadyEnabled": "2FA is already enabled.",
+        "inconsistentLocalTwoFactorState": "Local 2FA state is inconsistent.",
+        "missingCdk": "CDK metadata is missing.",
+        "unknownCdkPrefix": "CDK provider prefix is unknown.",
+        "missingEmailProviderProvenance": "Email provider provenance is missing.",
+        "legacyAccessAcknowledgementRequired": "Legacy access acknowledgement is required.",
+        "accessLocked": "Account access is locked.",
+        "backfillInProgress": "A backfill is already in progress.",
+        "backfillCompleted": "Backfill was already completed.",
+        "reconciliationManualReview": "Previous reconciliation requires manual review.",
+        "completedOutcomeMissing": "The completed backfill outcome is missing.",
+        "inventoryStatusNotAvailable": "Inventory status is {{status}}.",
+        "invalidOutcomeNotEligible": "Registration outcome is not eligible: {{reason}}.",
+        "explicitlyExcluded": "Account was explicitly excluded: {{reason}}.",
+        "unknownOutcome": "Unknown outcome",
+        "unknown": "Unknown eligibility reason."
+      }
+    },
     "smsSection": "SMS phone verification (optional)",
     "smsEnable": "Enable SMS provider for add-phone step",
     "smsServiceId": "SMS service ID",
@@ -1948,5 +2069,28 @@
     "saving": "Saving...",
     "tabSettings": "Settings",
     "settingsHint": "Configure network, Sub2API, and SMS here. The Login tab only enables options."
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "Input",
+      "passed": "Passed",
+      "deactivated": "Deactivated",
+      "unresolved": "Unresolved"
+    },
+    "credentialsLabel": "Credentials",
+    "credentialsPlaceholder": "email|password|2fa (one per line)",
+    "inputCount": "{{count}} account(s)",
+    "start": "Start Check",
+    "running": "Checking...",
+    "cancel": "Cancel",
+    "noCredentials": "Enter at least one account",
+    "startFailed": "Failed to start account check",
+    "copied": "{{label}} accounts copied to clipboard",
+    "nothingToExport": "No accounts to export",
+    "noPassed": "No passed accounts",
+    "noDeactivated": "No deactivated accounts",
+    "noUnresolved": "No unresolved accounts",
+    "exportPassed": "Copy passed accounts",
+    "exportDeactivated": "Copy deactivated accounts"
   }
 }

@@ -98,6 +98,29 @@
       "copied": "Copiado"
     }
   },
+  "automationProfile": {
+    "profileLabel": "Perfil de automação",
+    "generatedWorker": "Trabalhador gerado",
+    "runningOption": "{{name}} — Em execução",
+    "leasedOption": "{{name}} — Em uso pela automação",
+    "ephemeralData": "Dados efêmeros descartáveis",
+    "ephemeralDescription": "Usa um novo diretório de dados temporário e o remove após o navegador fechar.",
+    "persistentData": "Dados persistentes do perfil",
+    "persistentDescription": "Usa diretamente os cookies e o armazenamento do perfil selecionado; alterações do site podem persistir.",
+    "randomFingerprint": "Impressão digital aleatória por inicialização",
+    "randomFingerprintDescription": "Gera uma impressão digital somente de execução em cada inicialização sem alterar o perfil salvo.",
+    "stableFingerprint": "Impressão digital salva estável",
+    "stableFingerprintDescription": "Usa a impressão digital já salva no perfil selecionado.",
+    "ephemeralUnsupported": "Perfis Camoufox/Firefox selecionados exigem dados persistentes; dados efêmeros não são compatíveis.",
+    "profileConcurrencyOne": "Um perfil selecionado é exclusivo desta tarefa, portanto a concorrência de CDK é fixada em 1.",
+    "errors": {
+      "profileBusy": "Este perfil está em execução ou é usado por outra tarefa de automação. Pare-o ou aguarde essa tarefa terminar e tente novamente.",
+      "invalidProfile": "O perfil selecionado está indisponível ou é incompatível. Escolha outro perfil parado e tente novamente.",
+      "cleanupFailed": "A limpeza do navegador não terminou. O perfil permanece reservado para impedir reutilização insegura; feche o navegador e tente novamente após a limpeza.",
+      "startFailed": "Não foi possível iniciar a tarefa de automação. Revise o perfil selecionado e as configurações e tente novamente.",
+      "operationFailed": "A operação de automação falhou. Revise o estado atual e tente novamente."
+    }
+  },
   "settings": {
     "title": "Configurações",
     "appearance": {
@@ -190,7 +213,8 @@
       "recordings": "Gravações",
       "autoRegister": "Registro automático do ChatGPT",
       "smsVerification": "SMS / OTP",
-      "autoLogin": "ChatGPT/Codex Login"
+      "autoLogin": "ChatGPT/Codex Login",
+      "accountChecker": "Verificador de contas ChatGPT"
     },
     "appName": "JnmBrowser"
   },
@@ -1755,6 +1779,103 @@
     "fields": "Fields",
     "selectedCount": "{count} selected",
     "selectAll": "Select all",
+    "twoFactorBackfill": {
+      "action": "Ativar 2FA",
+      "actionTooltip": "Ativar 2FA nas contas selecionadas",
+      "title": "Preenchimento da autenticação de dois fatores",
+      "mode": "Modo de execução",
+      "canary": "Canário",
+      "bulk": "Em massa",
+      "canaryRequiresOne": "O modo canário requer exatamente uma conta elegível.",
+      "bulkRequiresCanary": "O modo em massa exige um canário bem-sucedido com este navegador, provedor de e-mail e rota de rede.",
+      "proxy": "Proxy",
+      "proxyLoading": "Carregando proxies...",
+      "proxyPlaceholder": "Selecione um proxy salvo",
+      "preview": "Contas selecionadas",
+      "eligibilityCount": "{{eligible}} de {{total}} elegíveis",
+      "previewing": "Verificando elegibilidade...",
+      "unknownAccount": "Conta desconhecida",
+      "eligible": "Elegível",
+      "ineligible": "Não elegível",
+      "allowFreeTrialNo": "Permitir contas marcadas sem teste grátis",
+      "acknowledgeLegacyAccess": "Reconheço que o acesso legado pode exigir verificação manual",
+      "recovery": "Diário de recuperação",
+      "recover": "Revisar recuperação",
+      "recoveryStates": {
+        "secret_captured": "Segredo capturado",
+        "remote_confirmed": "Remoto confirmado",
+        "manual_review": "Revisão manual"
+      },
+      "progress": "Progresso do preenchimento",
+      "summaryEnabled": "Ativadas: {{count}}",
+      "summaryFailed": "Falhas: {{count}}",
+      "summaryReview": "Revisão: {{count}}",
+      "summaryCancelled": "Canceladas: {{count}}",
+      "backendError": "A solicitação de preenchimento falhou.",
+      "task": "Tarefa de preenchimento",
+      "errorCode": "Erro: {{code}}",
+      "retryable": "Pode tentar novamente",
+      "terminal": "Preenchimento concluído",
+      "cancelTooltip": "Cancelar o preenchimento em execução",
+      "start": "Iniciar preenchimento",
+      "steps": {
+        "eligibility": "Verificando elegibilidade",
+        "providerMigration": "Migrando metadados do provedor",
+        "login": "Entrando",
+        "emailOtp": "Verificando código de e-mail",
+        "inspectTwoFactor": "Verificando estado da 2FA",
+        "captureSecret": "Preparando autenticador",
+        "confirmTwoFactor": "Confirmando 2FA",
+        "verifyRemote": "Verificando estado remoto",
+        "persistAccount": "Salvando estado da conta",
+        "journalComplete": "Registrando conclusão",
+        "batchPaused": "Lote pausado",
+        "cancelled": "Cancelado",
+        "completed": "Concluído",
+        "failed": "Falhou"
+      },
+      "outcomes": {
+        "enabled": "Ativada",
+        "failed": "Falhou",
+        "cancelled": "Cancelada",
+        "reconciliationRequired": "Revisão manual necessária",
+        "batchPaused": "Lote pausado"
+      },
+      "registrationOutcomes": {
+        "registered": "Registrada",
+        "freeTrialNo": "Sem teste grátis",
+        "registrationFailed": "Falha no registro",
+        "batchSummary": "Resumo do lote"
+      },
+      "exclusions": {
+        "operatorExcluded": "Excluída pelo operador",
+        "manualReview": "Retida para revisão manual"
+      },
+      "reasons": {
+        "accountNotFound": "A conta não foi encontrada.",
+        "missingAccountKey": "A chave da conta está ausente.",
+        "registrationUnsuccessful": "O registro não foi concluído com sucesso.",
+        "missingEmail": "O e-mail está ausente.",
+        "missingPassword": "A senha obrigatória da conta está ausente.",
+        "freeTrialNoOverrideRequired": "Esta conta não tem teste grátis; é necessária confirmação.",
+        "twoFactorAlreadyEnabled": "A 2FA já está ativada.",
+        "inconsistentLocalTwoFactorState": "O estado local da 2FA está inconsistente.",
+        "missingCdk": "Os metadados do CDK estão ausentes.",
+        "unknownCdkPrefix": "O prefixo do provedor CDK é desconhecido.",
+        "missingEmailProviderProvenance": "A origem do provedor de e-mail está ausente.",
+        "legacyAccessAcknowledgementRequired": "É necessário confirmar o acesso legado.",
+        "accessLocked": "O acesso à conta está bloqueado.",
+        "backfillInProgress": "Já existe um preenchimento em execução.",
+        "backfillCompleted": "O preenchimento já foi concluído.",
+        "reconciliationManualReview": "A reconciliação anterior exige revisão manual.",
+        "completedOutcomeMissing": "O resultado do preenchimento concluído está ausente.",
+        "inventoryStatusNotAvailable": "O status do inventário é {{status}}.",
+        "invalidOutcomeNotEligible": "O resultado do registro não é elegível: {{reason}}.",
+        "explicitlyExcluded": "A conta foi excluída explicitamente: {{reason}}.",
+        "unknownOutcome": "Resultado desconhecido",
+        "unknown": "Motivo de elegibilidade desconhecido."
+      }
+    },
     "proxyRequired": "O modo proxy requer um ID de proxy.",
     "networkMode": "Rede",
     "networkModeNone": "Nenhuma (IP do host)",
@@ -1948,5 +2069,28 @@
     "saving": "Salvando...",
     "tabSettings": "Configurações",
     "settingsHint": "Configure rede, Sub2API e SMS aqui. A aba Login só ativa opções."
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "Entrada",
+      "passed": "Aprovadas",
+      "deactivated": "Desativadas",
+      "unresolved": "Não resolvidas"
+    },
+    "credentialsLabel": "Credenciais",
+    "credentialsPlaceholder": "email|senha|2fa (uma por linha)",
+    "inputCount": "{{count}} conta(s)",
+    "start": "Iniciar verificação",
+    "running": "Verificando...",
+    "cancel": "Cancelar",
+    "noCredentials": "Insira pelo menos uma conta",
+    "startFailed": "Falha ao iniciar verificação",
+    "copied": "Contas {{label}} copiadas",
+    "nothingToExport": "Nenhuma conta para exportar",
+    "noPassed": "Nenhuma conta aprovada",
+    "noDeactivated": "Nenhuma conta desativada",
+    "noUnresolved": "Nenhuma conta não resolvida",
+    "exportPassed": "Copiar aprovadas",
+    "exportDeactivated": "Copiar desativadas"
   }
 }

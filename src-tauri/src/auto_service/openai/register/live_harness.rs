@@ -22,6 +22,8 @@ mod tests {
     let config = RegistrationConfig {
       cdks: vec![cdk],
       profile_id,
+      data_mode: crate::profile_runtime::DataMode::Ephemeral,
+      fingerprint_mode: crate::profile_runtime::FingerprintMode::RandomPerLaunch,
       proxy_id: None,
       vpn_id: None,
       browser_type,

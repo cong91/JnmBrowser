@@ -98,6 +98,29 @@
       "copied": "已复制"
     }
   },
+  "automationProfile": {
+    "profileLabel": "自动化配置文件",
+    "generatedWorker": "自动生成工作配置",
+    "runningOption": "{{name}} — 运行中",
+    "leasedOption": "{{name}} — 正被自动化任务使用",
+    "ephemeralData": "一次性临时数据",
+    "ephemeralDescription": "每次使用新的临时数据目录，并在浏览器关闭后删除。",
+    "persistentData": "持久化源配置数据",
+    "persistentDescription": "直接使用所选配置文件的 Cookie 和存储；网站产生的更改可能会保留。",
+    "randomFingerprint": "每次启动使用随机指纹",
+    "randomFingerprintDescription": "每次启动生成仅用于本次运行的指纹，不修改已保存的配置文件。",
+    "stableFingerprint": "使用稳定的已保存指纹",
+    "stableFingerprintDescription": "使用所选配置文件中已保存的指纹。",
+    "ephemeralUnsupported": "所选 Camoufox/Firefox 配置文件必须使用持久化数据；不支持临时数据。",
+    "profileConcurrencyOne": "所选配置文件由此任务独占，因此 CDK 并发数固定为 1。",
+    "errors": {
+      "profileBusy": "此配置文件正在运行或被其他自动化任务使用。请停止它或等待该任务完成后重试。",
+      "invalidProfile": "所选配置文件不可用或不兼容。请选择另一个已停止的配置文件后重试。",
+      "cleanupFailed": "浏览器清理尚未完成。为防止不安全的重复使用，该配置文件会保持占用；请关闭浏览器并在清理完成后重试。",
+      "startFailed": "无法启动自动化任务。请检查所选配置文件和设置后重试。",
+      "operationFailed": "自动化操作失败。请检查当前状态后重试。"
+    }
+  },
   "settings": {
     "title": "设置",
     "appearance": {
@@ -190,7 +213,8 @@
       "recordings": "录制列表",
       "autoRegister": "ChatGPT 自动注册",
       "smsVerification": "短信 / OTP",
-      "autoLogin": "ChatGPT/Codex 登录"
+      "autoLogin": "ChatGPT/Codex 登录",
+      "accountChecker": "ChatGPT 账号检测"
     },
     "appName": "JnmBrowser"
   },
@@ -1755,6 +1779,103 @@
     "fields": "字段",
     "selectedCount": "已选 {count}",
     "selectAll": "全选",
+    "twoFactorBackfill": {
+      "action": "启用 2FA",
+      "actionTooltip": "为所选账号启用 2FA",
+      "title": "双重身份验证补录",
+      "mode": "运行模式",
+      "canary": "金丝雀",
+      "bulk": "批量",
+      "canaryRequiresOne": "金丝雀模式必须且只能选择一个符合条件的账号。",
+      "bulkRequiresCanary": "批量模式需要使用此浏览器、邮箱服务商和网络路由成功运行金丝雀任务。",
+      "proxy": "代理",
+      "proxyLoading": "正在加载代理...",
+      "proxyPlaceholder": "选择已保存的代理",
+      "preview": "所选账号",
+      "eligibilityCount": "{{total}} 个账号中有 {{eligible}} 个符合条件",
+      "previewing": "正在检查条件...",
+      "unknownAccount": "未知账号",
+      "eligible": "符合条件",
+      "ineligible": "不符合条件",
+      "allowFreeTrialNo": "允许标记为无免费试用的账号",
+      "acknowledgeLegacyAccess": "我确认旧版访问方式可能需要人工验证",
+      "recovery": "恢复日志",
+      "recover": "检查恢复状态",
+      "recoveryStates": {
+        "secret_captured": "已捕获密钥",
+        "remote_confirmed": "已确认远程状态",
+        "manual_review": "需要人工复核"
+      },
+      "progress": "补录进度",
+      "summaryEnabled": "已启用: {{count}}",
+      "summaryFailed": "失败: {{count}}",
+      "summaryReview": "待复核: {{count}}",
+      "summaryCancelled": "已取消: {{count}}",
+      "backendError": "补录请求失败。",
+      "task": "补录任务",
+      "errorCode": "错误: {{code}}",
+      "retryable": "可重试",
+      "terminal": "补录已结束",
+      "cancelTooltip": "取消正在运行的补录",
+      "start": "开始补录",
+      "steps": {
+        "eligibility": "正在检查条件",
+        "providerMigration": "正在迁移服务商元数据",
+        "login": "正在登录",
+        "emailOtp": "正在验证邮箱验证码",
+        "inspectTwoFactor": "正在检查 2FA 状态",
+        "captureSecret": "正在准备身份验证器",
+        "confirmTwoFactor": "正在确认 2FA",
+        "verifyRemote": "正在验证远程状态",
+        "persistAccount": "正在保存账号状态",
+        "journalComplete": "正在记录完成状态",
+        "batchPaused": "批次已暂停",
+        "cancelled": "已取消",
+        "completed": "已完成",
+        "failed": "失败"
+      },
+      "outcomes": {
+        "enabled": "已启用",
+        "failed": "失败",
+        "cancelled": "已取消",
+        "reconciliationRequired": "需要人工复核",
+        "batchPaused": "批次已暂停"
+      },
+      "registrationOutcomes": {
+        "registered": "已注册",
+        "freeTrialNo": "无免费试用",
+        "registrationFailed": "注册失败",
+        "batchSummary": "批次摘要"
+      },
+      "exclusions": {
+        "operatorExcluded": "操作员已排除",
+        "manualReview": "等待人工复核"
+      },
+      "reasons": {
+        "accountNotFound": "未找到账号。",
+        "missingAccountKey": "缺少账号键。",
+        "registrationUnsuccessful": "账号注册未成功。",
+        "missingEmail": "缺少邮箱地址。",
+        "missingPassword": "缺少必需的账号密码。",
+        "freeTrialNoOverrideRequired": "此账号无免费试用，需要确认。",
+        "twoFactorAlreadyEnabled": "2FA 已启用。",
+        "inconsistentLocalTwoFactorState": "本地 2FA 状态不一致。",
+        "missingCdk": "缺少 CDK 元数据。",
+        "unknownCdkPrefix": "CDK 服务商前缀未知。",
+        "missingEmailProviderProvenance": "缺少邮箱服务商来源信息。",
+        "legacyAccessAcknowledgementRequired": "需要确认旧版访问方式。",
+        "accessLocked": "账号访问已锁定。",
+        "backfillInProgress": "补录已在进行中。",
+        "backfillCompleted": "补录已经完成。",
+        "reconciliationManualReview": "之前的核对结果需要人工复核。",
+        "completedOutcomeMissing": "缺少已完成补录的结果。",
+        "inventoryStatusNotAvailable": "库存状态为 {{status}}。",
+        "invalidOutcomeNotEligible": "注册结果不符合条件: {{reason}}。",
+        "explicitlyExcluded": "账号已被明确排除: {{reason}}。",
+        "unknownOutcome": "未知结果",
+        "unknown": "未知的不符合条件原因。"
+      }
+    },
     "proxyRequired": "代理模式需要填写代理 ID。",
     "networkMode": "网络",
     "networkModeNone": "无（主机 IP）",
@@ -1948,5 +2069,28 @@
     "saving": "保存中...",
     "tabSettings": "设置",
     "settingsHint": "在此配置网络、Sub2API 和短信。登录页仅开关选项。"
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "输入",
+      "passed": "通过",
+      "deactivated": "已停用",
+      "unresolved": "未确定"
+    },
+    "credentialsLabel": "账号凭据",
+    "credentialsPlaceholder": "email|password|2fa（每行一个）",
+    "inputCount": "{{count}} 个账号",
+    "start": "开始检测",
+    "running": "检测中...",
+    "cancel": "取消",
+    "noCredentials": "请至少输入一个账号",
+    "startFailed": "启动账号检测失败",
+    "copied": "已复制{{label}}账号",
+    "nothingToExport": "没有可导出的账号",
+    "noPassed": "没有通过的账号",
+    "noDeactivated": "没有已停用的账号",
+    "noUnresolved": "没有未确定的账号",
+    "exportPassed": "复制通过账号",
+    "exportDeactivated": "复制已停用账号"
   }
 }

@@ -442,6 +442,35 @@ pub fn pick_rotated_nord_server<'a>(
   Ok(&servers[0])
 }
 
+/// Select the lowest-load server that is not present in the in-memory deny-list.
+/// Used for auth-challenge recovery where reusing a challenged egress is not useful.
+pub fn pick_nord_server_excluding<'a>(
+  servers: &'a [NordWireGuardServer],
+  avoided_stations: &[String],
+  avoided_public_keys: &[String],
+) -> Result<&'a NordWireGuardServer, String> {
+  if servers.is_empty() {
+    return Err("No WireGuard servers found for rotation".to_string());
+  }
+  servers
+    .iter()
+    .find(|server| {
+      let station = server.station.trim();
+      if !station.is_empty() {
+        // Nord Japan currently publishes many distinct stations with one
+        // shared WireGuard public key. Station/IP is therefore the peer
+        // identity; excluding that shared key would eliminate the whole pool.
+        return !avoided_stations
+          .iter()
+          .any(|item| station.eq_ignore_ascii_case(item.trim()));
+      }
+      !avoided_public_keys
+        .iter()
+        .any(|key| server.public_key.trim() == key.trim())
+    })
+    .ok_or_else(|| "No unused WireGuard peer remains for auth-challenge rotation".to_string())
+}
+
 /// Fetch a new Nord peer and build conf, avoiding the current endpoint when possible.
 pub async fn build_rotated_nord_wireguard_conf(
   private_key: &str,
@@ -826,6 +855,39 @@ mod tests {
     ];
     let s = pick_rotated_nord_server(&servers, Some("1.1.1.1"), Some("pkA")).unwrap();
     assert_eq!(s.hostname, "b.nordvpn.com");
+  }
+
+  #[test]
+  fn pick_excluding_never_reuses_challenged_peers() {
+    let servers = vec![
+      NordWireGuardServer {
+        name: "A".into(),
+        hostname: "a.nordvpn.com".into(),
+        station: "1.1.1.1".into(),
+        load: 1,
+        public_key: "pkA".into(),
+        country_code: Some("JP".into()),
+        country_name: Some("Japan".into()),
+      },
+      NordWireGuardServer {
+        name: "B".into(),
+        hostname: "b.nordvpn.com".into(),
+        station: "2.2.2.2".into(),
+        load: 2,
+        // Nord Japan commonly shares one WireGuard key across stations.
+        public_key: "pkA".into(),
+        country_code: Some("JP".into()),
+        country_name: Some("Japan".into()),
+      },
+    ];
+    let first = pick_nord_server_excluding(&servers, &["1.1.1.1".into()], &["pkA".into()]).unwrap();
+    assert_eq!(first.hostname, "b.nordvpn.com");
+    assert!(pick_nord_server_excluding(
+      &servers,
+      &["1.1.1.1".into(), "2.2.2.2".into()],
+      &["pkA".into()]
+    )
+    .is_err());
   }
 
   #[test]

@@ -5,7 +5,18 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuLogIn, LuRocket } from "react-icons/lu";
 import { toast } from "sonner";
+import {
+  type AutomationProfilePolicy,
+  automationErrorTranslationKey,
+  automationProfilePolicyPayload,
+  DEFAULT_AUTOMATION_PROFILE_POLICY,
+} from "@/components/automation-profile-policy";
+import { AutomationProfilePolicyFields } from "@/components/automation-profile-policy-fields";
 import { LoginAccountsTable } from "@/components/login-accounts-table";
+import {
+  loginProgressLiveRegion,
+  selectLoginProgressList,
+} from "@/components/login-progress-selection";
 import { SmsProviderFields } from "@/components/sms-provider-fields";
 import { Button } from "@/components/ui/button";
 import {
@@ -60,6 +71,9 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
   const [vpnId, setVpnId] = useState("");
   const [rotateEveryN, setRotateEveryN] = useState(1);
   const [browserType, setBrowserType] = useState("chromium");
+  const [profilePolicy, setProfilePolicy] = useState<AutomationProfilePolicy>({
+    ...DEFAULT_AUTOMATION_PROFILE_POLICY,
+  });
   const [maxRetries, setMaxRetries] = useState(3);
   const [headless, setHeadless] = useState(false);
   // none | proxy | vpn (inventory WireGuard / Nord conf). Prefer VPN over Nord CLI.
@@ -254,7 +268,16 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
     headless,
   ]);
 
-  const progressList = Array.from(progressMap.values());
+  const progressList = selectLoginProgressList(progressMap);
+  const batchTerminal = Array.from(progressMap.values()).find(
+    (progress) => progress.eventKind === "batch" && progress.terminal,
+  );
+
+  useEffect(() => {
+    if (activeTaskId && batchTerminal?.taskId === activeTaskId) {
+      setActiveTaskId(null);
+    }
+  }, [activeTaskId, batchTerminal]);
 
   const parseCredentials = (
     text: string,
@@ -312,6 +335,7 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       const taskId = await startLogin({
         credentialsText,
         credentials,
+        ...automationProfilePolicyPayload(profilePolicy),
         browserType: browserType as "chromium" | "camoufox",
         maxRetries,
         headless,
@@ -335,8 +359,8 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       });
       setActiveTaskId(taskId);
       setActiveTab("progress");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+    } catch (error) {
+      toast.error(t(automationErrorTranslationKey(error)));
     }
   };
 
@@ -345,8 +369,15 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
     try {
       await cancelLogin(activeTaskId);
       toast.success(t("common.buttons.cancel"));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+    } catch (error) {
+      toast.error(
+        t(
+          automationErrorTranslationKey(
+            error,
+            "automationProfile.errors.operationFailed",
+          ),
+        ),
+      );
     }
   };
 
@@ -419,6 +450,7 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       const taskId = await startLogin({
         credentialsText: text,
         credentials,
+        ...automationProfilePolicyPayload(profilePolicy),
         browserType: browserType as "chromium" | "camoufox",
         maxRetries,
         headless,
@@ -442,8 +474,8 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
       setActiveTaskId(taskId);
       setActiveTab("progress");
       toast.success(t("autoLogin.retryStarted", { count: credentials.length }));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+    } catch (error) {
+      toast.error(t(automationErrorTranslationKey(error)));
     }
   };
 
@@ -527,6 +559,15 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
                   />
                 </div>
               </div>
+
+              <AutomationProfilePolicyFields
+                idPrefix="auto-login"
+                browserType={browserType}
+                value={profilePolicy}
+                onChange={setProfilePolicy}
+                disabled={loading || Boolean(activeTaskId)}
+                active={open}
+              />
 
               <div className="space-y-2">
                 <Label>{t("registration.networkMode")}</Label>
@@ -804,38 +845,48 @@ export function AccountLoginDialog({ open, onOpenChange }: Props) {
                 {t("autoLogin.noProgress")}
               </p>
             ) : (
-              progressList.map((progress) => (
-                <div
-                  key={`${progress.taskId}-${progress.credentialIndex}-${progress.step}-${progress.timestamp}`}
-                  className="rounded-lg border border-border p-3"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">
-                      {progress.credentialIndex + 1}/{progress.totalCredentials}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {progress.step}
-                    </span>
-                  </div>
-                  <p className="text-sm">{progress.message}</p>
-                  {progress.result && (
-                    <p
-                      className={`mt-1 text-xs ${
-                        progress.result.success
-                          ? "text-success"
-                          : "text-destructive"
-                      }`}
-                    >
-                      {progress.result.success
-                        ? t("autoLogin.successMessage")
-                        : progress.result.errorMessage}
-                      {progress.result.pushError
-                        ? ` · ${progress.result.pushError}`
-                        : ""}
+              progressList.map((progress) => {
+                const { role, ariaLive } = loginProgressLiveRegion(progress);
+                return (
+                  <div
+                    key={`${progress.taskId}-${progress.credentialIndex}-${progress.step}-${progress.timestamp}`}
+                    className="rounded-lg border border-border p-3"
+                    role={role}
+                    aria-live={ariaLive}
+                    aria-atomic="true"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        {progress.credentialIndex + 1}/
+                        {progress.totalCredentials}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {progress.step}
+                      </span>
+                    </div>
+                    <p className="text-sm">
+                      {progress.terminal
+                        ? progress.terminal.success
+                          ? t("autoLogin.successMessage")
+                          : t("registration.twoFactorBackfill.steps.failed")
+                        : progress.message}
                     </p>
-                  )}
-                </div>
-              ))
+                    {progress.terminal && (
+                      <p
+                        className={`mt-1 text-xs ${
+                          progress.terminal.success
+                            ? "text-success"
+                            : "text-destructive"
+                        }`}
+                      >
+                        {progress.terminal.success
+                          ? t("registration.twoFactorBackfill.steps.completed")
+                          : t("registration.twoFactorBackfill.steps.failed")}
+                      </p>
+                    )}
+                  </div>
+                );
+              })
             )}
           </TabsContent>
 

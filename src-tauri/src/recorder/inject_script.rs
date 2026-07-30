@@ -20,6 +20,7 @@ pub fn recorder_script() -> String {
   window.__jnmbrowserRecorderInstalled = true;
   var TAG = {tag:?};
   var startTs = performance.now();
+  var sensitiveElements = new WeakSet();
   // Dual-write sink used by Camoufox (poll path). Chromium still harvests
   // Runtime.consoleAPICalled; Camoufox Playwright Console events are unreliable
   // so the capture task drains this buffer instead.
@@ -168,6 +169,70 @@ pub fn recorder_script() -> String {
     return undefined;
   }}
 
+  function sensitiveHint(value) {{
+    return /(?:password|passwd|passcode|one[-_ ]?time(?:[-_ ]?code)?|otp|totp|2fa|two[-_ ]?factor|verification[-_ ]?code|security[-_ ]?code|auth(?:entication)?[-_ ]?code)/i.test(value || '');
+  }}
+
+  function hasSensitiveMetadata(el, typeOverride) {{
+    if (!el || el.nodeType !== 1 || el.tagName !== 'INPUT') return false;
+    var type = String(typeOverride === undefined ? (el.getAttribute('type') || '') : typeOverride).toLowerCase();
+    if (type === 'password') return true;
+    var autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+    if (autocomplete.split(/\s+/).indexOf('one-time-code') !== -1) return true;
+    if (sensitiveHint(el.getAttribute('name')) || sensitiveHint(el.id) || sensitiveHint(elementLabel(el))) return true;
+    var inputMode = (el.inputMode || el.getAttribute('inputmode') || '').toLowerCase();
+    var maxLength = Number(el.maxLength || el.getAttribute('maxlength'));
+    return (inputMode === 'numeric' || inputMode === 'decimal' || type === 'tel') && maxLength >= 4 && maxLength <= 10;
+  }}
+
+  function isSensitiveElement(el) {{
+    if (!el || el.nodeType !== 1) return false;
+    if (sensitiveElements.has(el)) return true;
+    if (hasSensitiveMetadata(el)) {{
+      sensitiveElements.add(el);
+      return true;
+    }}
+    return false;
+  }}
+
+  function markSensitiveInputs(root) {{
+    if (!root) return;
+    if (root.nodeType === 1 && hasSensitiveMetadata(root)) sensitiveElements.add(root);
+    if (!root.querySelectorAll) return;
+    Array.from(root.querySelectorAll('input')).forEach(function (el) {{
+      if (hasSensitiveMetadata(el)) sensitiveElements.add(el);
+    }});
+  }}
+
+  markSensitiveInputs(document);
+  new MutationObserver(function (mutations) {{
+    mutations.forEach(function (mutation) {{
+      if (mutation.type === 'attributes') {{
+        var el = mutation.target;
+        if (mutation.attributeName === 'type' && String(mutation.oldValue || '').toLowerCase() === 'password') {{
+          sensitiveElements.add(el);
+        }}
+        if (hasSensitiveMetadata(el)) sensitiveElements.add(el);
+      }} else {{
+        Array.from(mutation.addedNodes || []).forEach(markSensitiveInputs);
+      }}
+    }});
+  }}).observe(document.documentElement || document, {{
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeOldValue: true,
+    attributeFilter: ['type', 'autocomplete', 'name', 'id', 'aria-label', 'aria-labelledby', 'inputmode', 'maxlength']
+  }});
+
+  function isPrintableKey(event) {{
+    return typeof event.key === 'string'
+      && Array.from(event.key).length === 1
+      && !event.ctrlKey
+      && !event.altKey
+      && !event.metaKey;
+  }}
+
   function cssSelector(el) {{
     if (!el || el.nodeType !== 1) return undefined;
     if (el.id && /^[A-Za-z][\w-]*$/.test(el.id)) return '#' + cssEscape(el.id);
@@ -208,7 +273,7 @@ pub fn recorder_script() -> String {
     var attrs = {{}};
     for (var i = 0; i < (el.attributes || []).length && i < 16; i++) {{
       var a = el.attributes[i];
-      if (a.name && a.name.indexOf('data-') !== 0 && ['style','src','href','onclick','class'].indexOf(a.name) === -1) {{
+      if (a.name && a.name.toLowerCase() !== 'value' && a.name.indexOf('data-') !== 0 && ['style','src','href','onclick','class'].indexOf(a.name) === -1) {{
         attrs[a.name] = a.value;
       }}
     }}
@@ -232,15 +297,16 @@ pub fn recorder_script() -> String {
   document.addEventListener('input', function (e) {{
     var el = e.target;
     if (!el || el.nodeType !== 1) return;
-    // Skip password fields entirely per the recorder's privacy policy.
-    var isPassword = el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'password';
-    emit({{ t_ms: now(), kind: 'input', target: targetInfo(el), payload: {{ value: isPassword ? '<password>' : (el.value || '').slice(0, 4096), inputType: e.inputType }} }});
+    var sensitive = isSensitiveElement(el);
+    emit({{ t_ms: now(), kind: 'input', target: targetInfo(el), payload: {{ value: sensitive ? '<password>' : (el.value || '').slice(0, 4096), inputType: e.inputType, redacted: sensitive ? true : undefined }} }});
   }}, true);
 
   // Keydown - skip modifier-only events; capture printable keys and short keys.
   document.addEventListener('keydown', function (e) {{
     if (e.ctrlKey && e.altKey) return;
-    emit({{ t_ms: now(), kind: 'keydown', target: targetInfo(e.target), payload: {{ key: e.key, code: e.code, keyCode: e.keyCode, repeat: e.repeat, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, altKey: e.altKey, metaKey: e.metaKey }} }});
+    var sensitive = isSensitiveElement(e.target);
+    if (sensitive && isPrintableKey(e)) return;
+    emit({{ t_ms: now(), kind: 'keydown', target: targetInfo(e.target), payload: {{ key: e.key, code: e.code, keyCode: e.keyCode, repeat: e.repeat, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, altKey: e.altKey, metaKey: e.metaKey, redacted: sensitive ? true : undefined }} }});
   }}, true);
 
   // Scroll - throttled, only the window scroll (large documents sum scroll).
@@ -316,6 +382,57 @@ mod tests {
     assert!(
       s.contains("window.__jnmbrowserRecorderDrain"),
       "must expose drain helper for capture task"
+    );
+  }
+
+  #[test]
+  fn test_recorder_script_keeps_sensitive_classification_sticky() {
+    let s = recorder_script();
+    assert!(
+      s.contains("new WeakSet()"),
+      "must remember sensitive elements"
+    );
+    assert!(
+      s.contains("attributeOldValue: true"),
+      "must observe password type changes"
+    );
+    assert!(
+      s.contains("mutation.oldValue") && s.contains("sensitiveElements.add"),
+      "must retain sensitivity after password changes to text"
+    );
+  }
+
+  #[test]
+  fn test_recorder_script_omits_dom_value_attributes() {
+    let s = recorder_script();
+    assert!(
+      s.contains("a.name.toLowerCase() !== 'value'"),
+      "target attributes must universally omit DOM value"
+    );
+  }
+
+  #[test]
+  fn test_recorder_script_redacts_password_and_otp_payloads() {
+    let s = recorder_script();
+    for heuristic in [
+      "one-time-code",
+      "totp",
+      "inputMode",
+      "maxLength",
+      "elementLabel",
+    ] {
+      assert!(
+        s.contains(heuristic),
+        "missing sensitive heuristic {heuristic}"
+      );
+    }
+    assert!(
+      s.contains("redacted: sensitive ? true : undefined") && s.contains("<password>"),
+      "sensitive input values need structured and legacy markers"
+    );
+    assert!(
+      s.contains("isPrintableKey(e)") && s.contains("if (sensitive && isPrintableKey(e)) return"),
+      "printable sensitive keydown events must be suppressed"
     );
   }
 }

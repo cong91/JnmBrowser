@@ -393,45 +393,51 @@ pub async fn start_proxy_process_with_profile(
 
 pub async fn stop_proxy_process(id: &str) -> Result<bool, Box<dyn std::error::Error>> {
   let config = get_proxy_config(id);
+  let tracked_pid = PROXY_PROCESSES.lock().unwrap().get(id).copied();
+  let process_id = config
+    .as_ref()
+    .and_then(|config| config.pid)
+    .or(tracked_pid);
 
-  if let Some(config) = config {
-    if let Some(pid) = config.pid {
-      // Kill the process
+  if let Some(pid) = process_id {
+    if is_process_running(pid) {
       #[cfg(unix)]
-      {
-        use std::process::Command;
-        let _ = Command::new("kill")
-          .arg("-TERM")
-          .arg(pid.to_string())
-          .output();
-      }
+      let output = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .output()?;
       #[cfg(windows)]
-      {
+      let output = {
         use std::os::windows::process::CommandExt;
-        use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = Command::new("taskkill")
+        std::process::Command::new("taskkill")
           .args(["/F", "/PID", &pid.to_string()])
           .creation_flags(CREATE_NO_WINDOW)
-          .output();
+          .output()?
+      };
+
+      if !output.status.success() && is_process_running(pid) {
+        return Err(
+          format!(
+            "proxy worker {id} termination command failed with status {}",
+            output.status
+          )
+          .into(),
+        );
       }
 
-      // Wait a bit for the process to exit
       tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-      // Remove from tracking
-      {
-        let mut processes = PROXY_PROCESSES.lock().unwrap();
-        processes.remove(id);
+      if is_process_running(pid) {
+        return Err(format!("proxy worker {id} process {pid} is still running").into());
       }
-
-      // Delete the config file
-      delete_proxy_config(id);
-      return Ok(true);
     }
   }
 
-  Ok(false)
+  if config.is_some() && !delete_proxy_config(id) && get_proxy_config(id).is_some() {
+    return Err(format!("failed to delete proxy worker config for {id}").into());
+  }
+  PROXY_PROCESSES.lock().unwrap().remove(id);
+  Ok(config.is_some() || process_id.is_some())
 }
 
 pub async fn stop_all_proxy_processes() -> Result<(), Box<dyn std::error::Error>> {

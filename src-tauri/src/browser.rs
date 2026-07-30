@@ -15,6 +15,7 @@ pub struct ProxySettings {
 pub enum BrowserType {
   Camoufox,
   Chromium,
+  Firefox,
 }
 
 impl BrowserType {
@@ -22,6 +23,7 @@ impl BrowserType {
     match self {
       BrowserType::Camoufox => "camoufox",
       BrowserType::Chromium => "chromium",
+      BrowserType::Firefox => "firefox",
     }
   }
 
@@ -29,6 +31,7 @@ impl BrowserType {
     match s {
       "camoufox" => Ok(BrowserType::Camoufox),
       "chromium" => Ok(BrowserType::Chromium),
+      "firefox" => Ok(BrowserType::Firefox),
       _ => Err(format!("Unknown browser type: {s}")),
     }
   }
@@ -39,7 +42,8 @@ pub fn normalize_browser_name(name: &str) -> &str {
 }
 
 pub fn is_chromium_browser_name(name: &str) -> bool {
-  normalize_browser_name(name) == "chromium"
+  let n = normalize_browser_name(name);
+  n == "chromium"
 }
 
 pub fn canonical_browser_name(name: &str) -> &str {
@@ -51,10 +55,11 @@ pub fn canonical_browser_name(name: &str) -> &str {
 }
 
 pub fn browser_storage_dir_name(name: &str) -> &str {
-  if is_chromium_browser_name(name) {
+  let n = normalize_browser_name(name);
+  if n == "chromium" {
     "fingerprint-chromium"
   } else {
-    normalize_browser_name(name)
+    n
   }
 }
 
@@ -331,7 +336,7 @@ mod linux {
     browser_type: &BrowserType,
   ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let possible_executables = match browser_type {
-      BrowserType::Chromium => {
+      BrowserType::Chromium | BrowserType::Firefox => {
         let mut candidates = vec![
           install_dir.join("chromium"),
           install_dir.join("chrome"),
@@ -391,7 +396,7 @@ mod linux {
 
   pub fn is_chromium_version_downloaded(install_dir: &Path, browser_type: &BrowserType) -> bool {
     let possible_executables = match browser_type {
-      BrowserType::Chromium => {
+      BrowserType::Chromium | BrowserType::Firefox => {
         let mut candidates = vec![
           install_dir.join("chromium"),
           install_dir.join("chrome"),
@@ -445,7 +450,18 @@ mod windows {
   pub fn get_firefox_executable_path(
     install_dir: &Path,
   ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    // On Windows, look for firefox.exe
+    // System Firefox install paths (checked first)
+    let system_paths = [
+      PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+      PathBuf::from(r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"),
+    ];
+    for path in &system_paths {
+      if path.exists() && path.is_file() {
+        return Ok(path.clone());
+      }
+    }
+
+    // On Windows, look for firefox.exe in the install directory
     let possible_paths = [
       install_dir.join("firefox.exe"),
       install_dir.join("firefox").join("firefox.exe"),
@@ -498,6 +514,14 @@ mod windows {
           candidates.push(install_dir.join(legacy_name).join("chrome.exe"));
         }
         candidates
+      }
+      BrowserType::Firefox => {
+        // System Firefox — check common install locations
+        vec![
+          PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+          PathBuf::from(r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"),
+          install_dir.join("firefox.exe"),
+        ]
       }
       _ => vec![],
     };
@@ -567,7 +591,7 @@ mod windows {
   pub fn is_chromium_version_downloaded(install_dir: &Path, browser_type: &BrowserType) -> bool {
     // On Windows, check for .exe files
     let possible_executables = match browser_type {
-      BrowserType::Chromium => {
+      BrowserType::Chromium | BrowserType::Firefox => {
         let mut candidates = vec![
           install_dir.join("chromium.exe"),
           install_dir.join("chrome.exe"),
@@ -827,7 +851,7 @@ impl BrowserFactory {
 
   pub fn create_browser(&self, browser_type: BrowserType) -> Box<dyn Browser> {
     match browser_type {
-      BrowserType::Camoufox => Box::new(CamoufoxBrowser::new()),
+      BrowserType::Camoufox | BrowserType::Firefox => Box::new(CamoufoxBrowser::new()),
       BrowserType::Chromium => Box::new(ChromiumBrowser::new()),
     }
   }
@@ -943,9 +967,9 @@ mod tests {
     let empty_result = BrowserType::from_str("");
     assert!(empty_result.is_err(), "Empty string should return error");
 
-    assert!(
-      BrowserType::from_str("firefox").is_err(),
-      "Removed browser types should return error"
+    assert_eq!(
+      BrowserType::from_str("firefox").expect("firefox should be valid"),
+      BrowserType::Firefox
     );
     assert!(
       BrowserType::from_str("wayfern").is_err(),

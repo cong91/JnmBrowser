@@ -43,15 +43,19 @@ fn main() {
     println!("cargo:rustc-env=DONUT_BROWSER_VAULT_PASSWORD=donutbrowser-api-vault-password");
   }
 
-  // Tell Cargo to rebuild if the proxy binary source changes
-  println!("cargo:rerun-if-changed=src/bin/proxy_server.rs");
+  // Rebuild when proxy sources change (affects donut-proxy sidecar logic).
+  println!("cargo:rerun-if-changed=src/sidecar/proxy_server.rs");
   println!("cargo:rerun-if-changed=src/proxy_server.rs");
   println!("cargo:rerun-if-changed=src/proxy_runner.rs");
   println!("cargo:rerun-if-changed=src/proxy_storage.rs");
 
-  // Tell Cargo to rebuild when binaries directory contents change
-  // This ensures tauri_build is re-run after sidecar binaries are copied
-  println!("cargo:rerun-if-changed=binaries");
+  // Watch only existing sidecar paths. Cargo treats MISSING rerun-if-changed
+  // paths as always-dirty, which forced a full multi-minute recompile on every
+  // `cargo build` / `tauri build` even when nothing changed. Never emit bare
+  // names like binaries/donut-proxy (Windows uses the triple + .exe suffix).
+  // Also avoid watching the whole binaries/ directory: copy-proxy-binary used
+  // to bump mtimes there and trigger the same full rebuild loop.
+  watch_existing_sidecars();
 
   // Only run tauri_build if all external binaries exist
   // This allows building donut-proxy sidecar without the other binaries present
@@ -73,6 +77,39 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     embed_windows_manifest();
+  }
+}
+
+fn watch_existing_sidecars() {
+  use std::env;
+  use std::path::PathBuf;
+
+  let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") else {
+    return;
+  };
+  let Ok(target) = env::var("TARGET") else {
+    return;
+  };
+
+  let binaries_dir = PathBuf::from(&manifest_dir).join("binaries");
+  let names = if target.contains("windows") {
+    [
+      format!("donut-proxy-{target}.exe"),
+      format!("donut-daemon-{target}.exe"),
+    ]
+  } else {
+    [
+      format!("donut-proxy-{target}"),
+      format!("donut-daemon-{target}"),
+    ]
+  };
+
+  for name in names {
+    let path = binaries_dir.join(&name);
+    if path.exists() {
+      // Prefer relative path so fingerprints stay stable across machines.
+      println!("cargo:rerun-if-changed=binaries/{name}");
+    }
   }
 }
 
@@ -128,7 +165,10 @@ fn ensure_dist_folder_exists() {
     );
   }
 
-  println!("cargo:rerun-if-changed=../dist");
+  // Do NOT cargo:rerun-if-changed on ../dist. beforeBuildCommand always runs
+  // `next build`, which rewrites dist/* every time and would force a full Rust
+  // recompile on every `pnpm tauri build`. Tauri packages frontendDist at
+  // bundle time; the stub above is only so generate_context! compiles.
 }
 
 #[cfg(target_os = "windows")]

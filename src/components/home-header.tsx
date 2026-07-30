@@ -4,6 +4,7 @@ import { FaDownload } from "react-icons/fa";
 import { FiWifi } from "react-icons/fi";
 import { GoGear, GoKebabHorizontal, GoPlus } from "react-icons/go";
 import {
+  LuCheckCheck,
   LuCircle,
   LuCloud,
   LuLogIn,
@@ -181,6 +182,7 @@ interface Props {
   onExtensionManagementDialogOpen: (open: boolean) => void;
   onAutoRegisterDialogOpen: (open: boolean) => void;
   onAutoLoginDialogOpen: (open: boolean) => void;
+  onAccountCheckerDialogOpen: (open: boolean) => void;
   onRecordingsDialogOpen: (open: boolean) => void;
   onSmsDialogOpen: (open: boolean) => void;
   searchQuery: string;
@@ -198,6 +200,7 @@ const HomeHeader = ({
   onExtensionManagementDialogOpen,
   onAutoRegisterDialogOpen,
   onAutoLoginDialogOpen,
+  onAccountCheckerDialogOpen,
   onRecordingsDialogOpen,
   onSmsDialogOpen,
   searchQuery,
@@ -310,6 +313,14 @@ const HomeHeader = ({
             >
               <LuLogIn className="mr-2 w-4 h-4" />
               {t("header.menu.autoLogin")}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                onAccountCheckerDialogOpen(true);
+              }}
+            >
+              <LuCheckCheck className="mr-2 w-4 h-4" />
+              {t("header.menu.accountChecker")}
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => {

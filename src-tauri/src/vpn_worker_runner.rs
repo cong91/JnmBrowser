@@ -2,13 +2,146 @@ use crate::proxy_runner::find_sidecar_executable;
 use crate::proxy_storage::is_process_running;
 use crate::vpn_worker_storage::{
   delete_vpn_worker_config, find_vpn_worker_by_vpn_id, generate_vpn_worker_id,
-  get_vpn_worker_config, list_vpn_worker_configs, save_vpn_worker_config, vpn_worker_config_path,
-  VpnWorkerConfig,
+  get_vpn_worker_config, list_vpn_worker_configs, save_vpn_worker_config_to_path,
+  vpn_worker_config_path, VpnWorkerConfig,
 };
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Stdio};
 
 const VPN_WORKER_POLL_INTERVAL_MS: u64 = 100;
 const VPN_WORKER_STARTUP_TIMEOUT_MS: u64 = 30_000;
+
+lazy_static::lazy_static! {
+  static ref VPN_WORKER_PROCESSES: std::sync::Mutex<std::collections::HashMap<String, u32>> =
+    std::sync::Mutex::new(std::collections::HashMap::new());
+}
+
+trait StartupProcess: Send {
+  fn id(&self) -> u32;
+  fn terminate(&mut self) -> std::io::Result<()>;
+}
+
+impl StartupProcess for Child {
+  fn id(&self) -> u32 {
+    Child::id(self)
+  }
+
+  fn terminate(&mut self) -> std::io::Result<()> {
+    if self.try_wait()?.is_some() {
+      return Ok(());
+    }
+
+    match self.kill() {
+      Ok(()) => {
+        let _ = self.wait()?;
+        Ok(())
+      }
+      Err(error) => {
+        if self.try_wait()?.is_some() {
+          Ok(())
+        } else {
+          Err(error)
+        }
+      }
+    }
+  }
+}
+
+struct VpnWorkerStartupGuard {
+  worker_id: String,
+  process: Option<Box<dyn StartupProcess>>,
+  config_file_path: PathBuf,
+  mapping_path: PathBuf,
+  armed: bool,
+}
+
+impl VpnWorkerStartupGuard {
+  fn new(worker_id: String, config_file_path: PathBuf, mapping_path: PathBuf) -> Self {
+    Self {
+      worker_id,
+      process: None,
+      config_file_path,
+      mapping_path,
+      armed: true,
+    }
+  }
+
+  fn attach_process(&mut self, process: impl StartupProcess + 'static) {
+    debug_assert!(self.process.is_none());
+    VPN_WORKER_PROCESSES
+      .lock()
+      .unwrap()
+      .insert(self.worker_id.clone(), process.id());
+    self.process = Some(Box::new(process));
+  }
+
+  fn process_id(&self) -> Option<u32> {
+    self.process.as_ref().map(|process| process.id())
+  }
+
+  fn disarm(&mut self) {
+    VPN_WORKER_PROCESSES.lock().unwrap().remove(&self.worker_id);
+    self.armed = false;
+  }
+}
+
+impl Drop for VpnWorkerStartupGuard {
+  fn drop(&mut self) {
+    if !self.armed {
+      return;
+    }
+
+    let terminated = self.process.as_mut().is_none_or(|process| {
+      if let Err(error) = process.terminate() {
+        log::warn!(
+          "Failed to terminate VPN worker process {} during startup rollback: {error}",
+          process.id()
+        );
+        false
+      } else {
+        true
+      }
+    });
+
+    if terminated {
+      VPN_WORKER_PROCESSES.lock().unwrap().remove(&self.worker_id);
+      if let Err(error) = cleanup_vpn_worker_artifacts(&self.config_file_path, &self.mapping_path) {
+        log::warn!("Failed to clean VPN worker startup artifacts: {error}");
+      }
+    } else {
+      log::error!("VPN worker startup rollback retained artifacts for retry");
+    }
+  }
+}
+
+fn remove_worker_artifact(kind: &str, path: &Path) -> Result<(), String> {
+  match std::fs::remove_file(path) {
+    Ok(()) => Ok(()),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(format!(
+      "failed to remove VPN worker {kind} {}: {error}",
+      path.display()
+    )),
+  }
+}
+
+fn cleanup_vpn_worker_artifacts(
+  config_file_path: &Path,
+  mapping_path: &Path,
+) -> Result<(), String> {
+  remove_worker_artifact("temporary config", config_file_path)?;
+  remove_worker_artifact("worker mapping", mapping_path)
+}
+
+fn tracked_vpn_worker_pid(config: &VpnWorkerConfig) -> Option<u32> {
+  config.pid.or_else(|| {
+    VPN_WORKER_PROCESSES
+      .lock()
+      .unwrap()
+      .get(&config.id)
+      .copied()
+  })
+}
 
 async fn vpn_worker_accepting_connections(config: &VpnWorkerConfig) -> bool {
   let Some(port) = config.local_port else {
@@ -65,7 +198,6 @@ async fn wait_for_vpn_worker_ready(
 
       if !process_running && attempts > 2 {
         let log_output = read_worker_log(id);
-        delete_vpn_worker_config(id);
         return Err(format!("VPN worker process crashed. Log output:\n{}", log_output).into());
       }
 
@@ -79,7 +211,6 @@ async fn wait_for_vpn_worker_ready(
       if let Some(config) = get_vpn_worker_config(id) {
         let process_running = config.pid.map(is_process_running).unwrap_or(false);
         let log_output = read_worker_log(id);
-        delete_vpn_worker_config(id);
         return Err(
           format!(
             "VPN worker failed to start within {:.1}s. pid={:?}, process_running={}, local_url={:?}\n\nVPN worker log:\n{}",
@@ -93,7 +224,6 @@ async fn wait_for_vpn_worker_ready(
         );
       }
 
-      delete_vpn_worker_config(id);
       return Err("VPN worker config not found after spawn".into());
     }
   }
@@ -101,27 +231,37 @@ async fn wait_for_vpn_worker_ready(
 
 pub async fn start_vpn_worker(vpn_id: &str) -> Result<VpnWorkerConfig, Box<dyn std::error::Error>> {
   for config in list_vpn_worker_configs() {
-    if let Some(pid) = config.pid {
-      if !is_process_running(pid) {
+    match tracked_vpn_worker_pid(&config) {
+      Some(pid) if !is_process_running(pid) => {
+        VPN_WORKER_PROCESSES.lock().unwrap().remove(&config.id);
         delete_vpn_worker_config(&config.id);
       }
-    } else {
-      delete_vpn_worker_config(&config.id);
+      None => {
+        delete_vpn_worker_config(&config.id);
+      }
+      Some(_) => {}
     }
   }
 
   // Check if a VPN worker for this vpn_id already exists and is running
   if let Some(existing) = find_vpn_worker_by_vpn_id(vpn_id) {
-    if let Some(pid) = existing.pid {
+    if let Some(pid) = tracked_vpn_worker_pid(&existing) {
       if is_process_running(pid) {
         if vpn_worker_accepting_connections(&existing).await {
           return Ok(existing);
         }
-
-        return wait_for_vpn_worker_ready(&existing.id).await;
+        if existing.pid.is_some() {
+          return wait_for_vpn_worker_ready(&existing.id).await;
+        }
+        return Err(format!(
+          "VPN worker {} is still running after an incomplete startup; cleanup must finish before retry",
+          existing.id
+        )
+        .into());
       }
     }
     // Worker config exists but process is dead, clean up
+    VPN_WORKER_PROCESSES.lock().unwrap().remove(&existing.id);
     delete_vpn_worker_config(&existing.id);
   }
 
@@ -137,21 +277,26 @@ pub async fn start_vpn_worker(vpn_id: &str) -> Result<VpnWorkerConfig, Box<dyn s
 
   let vpn_type_str = "wireguard";
 
-  // Write decrypted config to a temp file
+  let id = generate_vpn_worker_id();
   let config_file_path = std::env::temp_dir()
-    .join(format!("donut_vpn_{}.conf", vpn_id))
+    .join(format!("donut_vpn_{id}.conf"))
     .to_string_lossy()
     .to_string();
+  let config_json_path = vpn_worker_config_path(&id);
+  let mut startup_guard = VpnWorkerStartupGuard::new(
+    id.clone(),
+    PathBuf::from(&config_file_path),
+    config_json_path.clone(),
+  );
 
+  // Write decrypted config to a worker-unique temp file.
   std::fs::write(&config_file_path, &vpn_config.config_data)?;
 
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&config_file_path, std::fs::Permissions::from_mode(0o600));
+    std::fs::set_permissions(&config_file_path, std::fs::Permissions::from_mode(0o600))?;
   }
-
-  let id = generate_vpn_worker_id();
 
   // Find an available port
   let local_port = {
@@ -165,9 +310,7 @@ pub async fn start_vpn_worker(vpn_id: &str) -> Result<VpnWorkerConfig, Box<dyn s
     vpn_type_str.to_string(),
     config_file_path,
   );
-  save_vpn_worker_config(&config)?;
-
-  let config_json_path = vpn_worker_config_path(&id);
+  save_vpn_worker_config_to_path(&config, &config_json_path)?;
 
   // Spawn detached VPN worker process
   let exe = find_sidecar_executable("donut-proxy")?;
@@ -209,14 +352,15 @@ pub async fn start_vpn_worker(vpn_id: &str) -> Result<VpnWorkerConfig, Box<dyn s
     }
 
     let child = cmd.spawn()?;
-    let pid = child.id();
+    startup_guard.attach_process(child);
+    let pid = startup_guard
+      .process_id()
+      .expect("spawned VPN worker guard must own a process");
 
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
     config_with_pid.local_port = Some(local_port);
-    save_vpn_worker_config(&config_with_pid)?;
-
-    drop(child);
+    save_vpn_worker_config_to_path(&config_with_pid, &config_json_path)?;
   }
 
   #[cfg(windows)]
@@ -251,54 +395,72 @@ pub async fn start_vpn_worker(vpn_id: &str) -> Result<VpnWorkerConfig, Box<dyn s
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 
     let child = cmd.spawn()?;
-    let pid = child.id();
+    startup_guard.attach_process(child);
+    let pid = startup_guard
+      .process_id()
+      .expect("spawned VPN worker guard must own a process");
 
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
     config_with_pid.local_port = Some(local_port);
-    save_vpn_worker_config(&config_with_pid)?;
-
-    drop(child);
+    save_vpn_worker_config_to_path(&config_with_pid, &config_json_path)?;
   }
 
-  wait_for_vpn_worker_ready(&id).await
+  let ready_config = wait_for_vpn_worker_ready(&id).await?;
+  startup_guard.disarm();
+  Ok(ready_config)
 }
 
 pub async fn stop_vpn_worker(id: &str) -> Result<bool, Box<dyn std::error::Error>> {
   let config = get_vpn_worker_config(id);
+  let tracked_pid = VPN_WORKER_PROCESSES.lock().unwrap().get(id).copied();
+  let process_id = config
+    .as_ref()
+    .and_then(|config| config.pid)
+    .or(tracked_pid);
 
-  if let Some(config) = config {
-    if let Some(pid) = config.pid {
+  if let Some(pid) = process_id {
+    if is_process_running(pid) {
       #[cfg(unix)]
-      {
-        use std::process::Command;
-        let _ = Command::new("kill")
-          .arg("-TERM")
-          .arg(pid.to_string())
-          .output();
-      }
+      let output = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .output()?;
       #[cfg(windows)]
-      {
+      let output = {
         use std::os::windows::process::CommandExt;
-        use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = Command::new("taskkill")
+        std::process::Command::new("taskkill")
           .args(["/F", "/PID", &pid.to_string()])
           .creation_flags(CREATE_NO_WINDOW)
-          .output();
+          .output()?
+      };
+
+      if !output.status.success() && is_process_running(pid) {
+        return Err(
+          format!(
+            "VPN worker {id} termination command failed with status {}",
+            output.status
+          )
+          .into(),
+        );
       }
 
       tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+      if is_process_running(pid) {
+        return Err(format!("VPN worker {id} process {pid} is still running").into());
+      }
     }
-
-    // Clean up temp config file
-    let _ = std::fs::remove_file(&config.config_file_path);
-
-    delete_vpn_worker_config(id);
-    return Ok(true);
   }
 
-  Ok(false)
+  if let Some(config) = config.as_ref() {
+    cleanup_vpn_worker_artifacts(
+      Path::new(&config.config_file_path),
+      &vpn_worker_config_path(id),
+    )?;
+  }
+  VPN_WORKER_PROCESSES.lock().unwrap().remove(id);
+  Ok(config.is_some() || process_id.is_some())
 }
 
 pub async fn stop_vpn_worker_by_vpn_id(vpn_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
@@ -314,4 +476,215 @@ pub async fn stop_all_vpn_workers() -> Result<(), Box<dyn std::error::Error>> {
     let _ = stop_vpn_worker(&config.id).await;
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::path::{Path, PathBuf};
+  use std::sync::{Arc, Mutex};
+
+  struct FakeProcess {
+    id: u32,
+    terminated_processes: Arc<Mutex<Vec<u32>>>,
+  }
+
+  impl StartupProcess for FakeProcess {
+    fn id(&self) -> u32 {
+      self.id
+    }
+
+    fn terminate(&mut self) -> std::io::Result<()> {
+      self.terminated_processes.lock().unwrap().push(self.id);
+      Ok(())
+    }
+  }
+
+  struct FailingProcess {
+    id: u32,
+    attempts: Arc<Mutex<Vec<u32>>>,
+  }
+
+  impl StartupProcess for FailingProcess {
+    fn id(&self) -> u32 {
+      self.id
+    }
+
+    fn terminate(&mut self) -> std::io::Result<()> {
+      self.attempts.lock().unwrap().push(self.id);
+      Err(std::io::Error::other("injected termination failure"))
+    }
+  }
+
+  fn create_worker_artifacts(root: &Path, worker_id: &str, vpn_id: &str) -> (PathBuf, PathBuf) {
+    let config_path = root.join(format!("{worker_id}.conf"));
+    std::fs::write(&config_path, format!("config for {vpn_id}")).unwrap();
+
+    let mapping_path = root.join(format!("vpn_worker_{worker_id}.json"));
+    let config = VpnWorkerConfig::new(
+      worker_id.to_string(),
+      vpn_id.to_string(),
+      "wireguard".to_string(),
+      config_path.to_string_lossy().into_owned(),
+    );
+    crate::vpn_worker_storage::save_vpn_worker_config_to_path(&config, &mapping_path).unwrap();
+
+    (config_path, mapping_path)
+  }
+
+  #[test]
+  fn startup_error_after_spawn_terminates_exact_child_and_removes_owned_config() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("spawned.conf");
+    let mapping_path = temp_dir.path().join("not-yet-created.json");
+    std::fs::write(&config_path, "secret").unwrap();
+    let terminated_processes = Arc::new(Mutex::new(Vec::new()));
+
+    let result: Result<(), &'static str> = {
+      let mut guard = VpnWorkerStartupGuard::new(
+        "spawned-worker".to_string(),
+        config_path.clone(),
+        mapping_path.clone(),
+      );
+      guard.attach_process(FakeProcess {
+        id: 41,
+        terminated_processes: Arc::clone(&terminated_processes),
+      });
+      Err("failure after spawn")
+    };
+
+    assert_eq!(result, Err("failure after spawn"));
+    assert_eq!(*terminated_processes.lock().unwrap(), vec![41]);
+    assert!(!config_path.exists());
+    assert!(!mapping_path.exists());
+  }
+
+  #[test]
+  fn startup_error_after_mapping_removes_only_owned_same_vpn_worker() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (owned_config, owned_mapping) =
+      create_worker_artifacts(temp_dir.path(), "owned-worker", "shared-vpn");
+    let (peer_config, peer_mapping) =
+      create_worker_artifacts(temp_dir.path(), "peer-worker", "shared-vpn");
+    let terminated_processes = Arc::new(Mutex::new(Vec::new()));
+
+    let result: Result<(), &'static str> = {
+      let mut guard = VpnWorkerStartupGuard::new(
+        "owned-worker".to_string(),
+        owned_config.clone(),
+        owned_mapping.clone(),
+      );
+      guard.attach_process(FakeProcess {
+        id: 42,
+        terminated_processes: Arc::clone(&terminated_processes),
+      });
+      Err("failure after mapping")
+    };
+
+    assert_eq!(result, Err("failure after mapping"));
+    assert_eq!(*terminated_processes.lock().unwrap(), vec![42]);
+    assert!(!owned_config.exists());
+    assert!(!owned_mapping.exists());
+    assert!(peer_config.exists());
+    assert!(peer_mapping.exists());
+  }
+
+  #[test]
+  fn startup_panic_terminates_exact_child_and_removes_owned_artifacts() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (config_path, mapping_path) =
+      create_worker_artifacts(temp_dir.path(), "panicked-worker", "shared-vpn");
+    let terminated_processes = Arc::new(Mutex::new(Vec::new()));
+
+    let panic_result = std::panic::catch_unwind({
+      let terminated_processes = Arc::clone(&terminated_processes);
+      let config_path = config_path.clone();
+      let mapping_path = mapping_path.clone();
+      move || {
+        let mut guard =
+          VpnWorkerStartupGuard::new("panicked-worker".to_string(), config_path, mapping_path);
+        guard.attach_process(FakeProcess {
+          id: 44,
+          terminated_processes,
+        });
+        panic!("failure during startup");
+      }
+    });
+
+    assert!(panic_result.is_err());
+    assert_eq!(*terminated_processes.lock().unwrap(), vec![44]);
+    assert!(!config_path.exists());
+    assert!(!mapping_path.exists());
+  }
+
+  #[test]
+  fn startup_termination_failure_retains_owned_artifacts_for_retry() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (config_path, mapping_path) =
+      create_worker_artifacts(temp_dir.path(), "retry-worker", "shared-vpn");
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+
+    {
+      let mut guard = VpnWorkerStartupGuard::new(
+        "retry-worker".to_string(),
+        config_path.clone(),
+        mapping_path.clone(),
+      );
+      guard.attach_process(FailingProcess {
+        id: 45,
+        attempts: Arc::clone(&attempts),
+      });
+    }
+
+    assert_eq!(*attempts.lock().unwrap(), vec![45]);
+    let retained_config =
+      crate::vpn_worker_storage::get_vpn_worker_config_from_path(&mapping_path).unwrap();
+    assert_eq!(tracked_vpn_worker_pid(&retained_config), Some(45));
+    assert_eq!(
+      VPN_WORKER_PROCESSES
+        .lock()
+        .unwrap()
+        .get("retry-worker")
+        .copied(),
+      Some(45)
+    );
+    assert!(config_path.exists());
+    assert!(mapping_path.exists());
+    VPN_WORKER_PROCESSES.lock().unwrap().remove("retry-worker");
+    cleanup_vpn_worker_artifacts(&config_path, &mapping_path).unwrap();
+  }
+
+  #[test]
+  fn successful_startup_disarms_guard_and_normal_cleanup_removes_artifacts() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (config_path, mapping_path) =
+      create_worker_artifacts(temp_dir.path(), "successful-worker", "shared-vpn");
+    let terminated_processes = Arc::new(Mutex::new(Vec::new()));
+
+    let mut guard = VpnWorkerStartupGuard::new(
+      "successful-worker".to_string(),
+      config_path.clone(),
+      mapping_path.clone(),
+    );
+    guard.attach_process(FakeProcess {
+      id: 43,
+      terminated_processes: Arc::clone(&terminated_processes),
+    });
+    guard.disarm();
+
+    assert!(VPN_WORKER_PROCESSES
+      .lock()
+      .unwrap()
+      .get("successful-worker")
+      .is_none());
+    assert!(terminated_processes.lock().unwrap().is_empty());
+    assert!(config_path.exists());
+    assert!(mapping_path.exists());
+
+    cleanup_vpn_worker_artifacts(&config_path, &mapping_path).unwrap();
+
+    assert!(terminated_processes.lock().unwrap().is_empty());
+    assert!(!config_path.exists());
+    assert!(!mapping_path.exists());
+  }
 }

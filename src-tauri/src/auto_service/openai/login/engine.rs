@@ -6,6 +6,7 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[allow(unused_imports)]
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -15,11 +16,14 @@ use uuid::Uuid;
 use super::store::save_login_result;
 use super::sub2api::Sub2ApiClient;
 use super::types::{
-  should_rotate, LoginConfig, LoginCredential, LoginNetworkMode, LoginProgress, LoginResult,
-  LoginResultStatus, LoginStep,
+  should_rotate, LoginConfig, LoginCredential, LoginProgress, LoginProgressEventKind, LoginResult,
+  LoginResultStatus, LoginStep, LoginTerminalSummary,
 };
-use super::{oauth, pkce};
-use crate::sms::{NumberRequest, SmsService};
+use super::worker_runtime::WorkerRuntime;
+use super::{oauth, pkce, safe_browser_url_for_log};
+use crate::profile::BrowserProfile;
+use crate::profile_runtime::RuntimeLease;
+use crate::sms::{poll_otp_with_cancel, NumberRequest, SmsService};
 
 type CdpWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -35,6 +39,13 @@ const CLOUDFLARE_SOFT_WAIT_SECS: u64 = 20;
 /// Extra relaunches dedicated to Cloudflare recovery (on top of normal retries).
 const MAX_CLOUDFLARE_RECOVERIES: u32 = 2;
 
+fn is_whatsapp_phone_fallback(text: &str) -> bool {
+  let normalized = text.to_ascii_lowercase();
+  normalized.contains("switched to whatsapp")
+    && normalized.contains("continue")
+    && normalized.contains("verification code")
+}
+
 /// Short-lived local HTTP listener for OpenAI OAuth redirect.
 ///
 /// OpenAI redirects to `http://localhost:1455/auth/callback?code=...&state=...`.
@@ -46,29 +57,38 @@ struct OAuthCallbackListener {
 }
 
 impl OAuthCallbackListener {
-  async fn start() -> Result<Self, String> {
-    let addr = format!("{OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}");
-    Self::start_on_addr(&addr).await
-  }
-
   async fn start_on_addr(addr: &str) -> Result<Self, String> {
     // Windows keeps sockets in TIME_WAIT after close. Retries of the same login
-    // attempt can hit os error 10048 unless we wait for the previous accept-loop
-    // task to drop its TcpListener.
+    // attempt can hit os error 10048. Use SO_REUSEADDR so the port can be
+    // re-bound immediately across batch login iterations.
+    let addr: std::net::SocketAddr = addr
+      .parse()
+      .map_err(|e| format!("Invalid OAuth callback addr '{addr}': {e}"))?;
+
     let mut last_err = String::new();
     let mut listener = None;
     for attempt in 0..20 {
       if attempt > 0 {
         sleep(std::time::Duration::from_millis(150)).await;
       }
-      match TcpListener::bind(&addr).await {
-        Ok(l) => {
-          listener = Some(l);
-          break;
+      match tokio::net::TcpSocket::new_v4() {
+        Ok(socket) => {
+          if let Err(e) = socket.set_reuseaddr(true) {
+            last_err = format!("set_reuseaddr: {e}");
+            continue;
+          }
+          match socket.bind(addr) {
+            Ok(()) => match socket.listen(128) {
+              Ok(l) => {
+                listener = Some(l);
+                break;
+              }
+              Err(e) => last_err = e.to_string(),
+            },
+            Err(e) => last_err = e.to_string(),
+          }
         }
-        Err(e) => {
-          last_err = e.to_string();
-        }
+        Err(e) => last_err = e.to_string(),
       }
     }
     let listener = listener
@@ -84,12 +104,17 @@ impl OAuthCallbackListener {
           accept = listener.accept() => {
             match accept {
               Ok((mut socket, _)) => {
-                if let Some(result) = handle_oauth_callback_connection(&mut socket).await {
-                  if let Some(sender) = tx.take() {
-                    let _ = sender.send(Ok(result));
+                tokio::select! {
+                  _ = &mut shutdown_rx => break,
+                  result = handle_oauth_callback_connection(&mut socket) => {
+                    if let Some(result) = result {
+                      if let Some(sender) = tx.take() {
+                        let _ = sender.send(Ok(result));
+                      }
+                      // Keep accepting briefly so Chrome can finish loading success HTML,
+                      // but only the first valid code is returned.
+                    }
                   }
-                  // Keep accepting briefly so Chrome can finish loading success HTML,
-                  // but only the first valid code is returned.
                 }
               }
               Err(_) => break,
@@ -148,6 +173,26 @@ impl Drop for OAuthCallbackListener {
     if let Some(task) = self.task.take() {
       task.abort();
     }
+  }
+}
+
+#[derive(Debug)]
+enum CallbackAfterLaunchError<T> {
+  Launch(String),
+  Bind { launched: T, error: String },
+}
+
+async fn start_callback_after<T, F>(
+  launch: F,
+  addr: &str,
+) -> Result<(T, OAuthCallbackListener), CallbackAfterLaunchError<T>>
+where
+  F: std::future::Future<Output = Result<T, String>>,
+{
+  let launched = launch.await.map_err(CallbackAfterLaunchError::Launch)?;
+  match OAuthCallbackListener::start_on_addr(addr).await {
+    Ok(listener) => Ok((launched, listener)),
+    Err(error) => Err(CallbackAfterLaunchError::Bind { launched, error }),
   }
 }
 
@@ -682,6 +727,8 @@ enum LoginPageType {
   LoginEmail,
   LoginPassword,
   TwoFactor,
+  /// Email OTP verification (distinct from TOTP authenticator).
+  EmailOtp,
   /// Enter phone number (country select + tel input).
   AddPhone,
   /// Enter SMS OTP after phone number was submitted.
@@ -801,13 +848,16 @@ fn detect_login_page_type(url: &str) -> LoginPageType {
     || path.contains("create-account/password");
   // "authorize" alone is the OAuth start URL — only treat as email entry when it looks like login.
   let is_email_entry = path.contains("identifier")
-    || path.contains("email-otp")
     || path.contains("/log-in")
     || path.contains("/login")
     || path.contains("log-in-or-create")
     || (path.contains("oauth/authorize") && !path.contains("consent"));
   if is_password {
     LoginPageType::LoginPassword
+  } else if path.contains("email-otp") {
+    // Email OTP verification page (distinct from TOTP authenticator).
+    // Must check before generic "mfa"/"challenge" to avoid misclassification.
+    LoginPageType::EmailOtp
   } else if path.contains("mfa")
     || path.contains("totp")
     || path.contains("2fa")
@@ -851,10 +901,8 @@ pub struct LoginEngine {
   task_id: String,
   logs: Vec<String>,
   used_phones: HashSet<String>,
-  /// Reused worker profile for this engine (one slot for sequential batch).
-  worker_profile_id: Option<String>,
-  /// True when we created the worker and must delete it at batch end.
-  owns_worker_profile: bool,
+  /// Prepared worker snapshot, task-local policy, and full-lifecycle lease.
+  worker_runtime: Option<WorkerRuntime>,
 }
 
 impl LoginEngine {
@@ -865,13 +913,44 @@ impl LoginEngine {
       task_id: Uuid::new_v4().to_string(),
       logs: Vec::new(),
       used_phones: HashSet::new(),
-      worker_profile_id: None,
-      owns_worker_profile: false,
+      worker_runtime: None,
     }
+  }
+
+  pub fn install_worker_runtime(&mut self, profile: BrowserProfile, lease: RuntimeLease) {
+    self.worker_runtime = Some(WorkerRuntime::new(&self.config, profile, lease));
+  }
+
+  pub(super) fn worker_runtime(&self) -> Option<WorkerRuntime> {
+    self.worker_runtime.clone()
   }
 
   pub fn task_id(&self) -> &str {
     &self.task_id
+  }
+
+  pub fn emit_deferred_batch_terminal(
+    &self,
+    app_handle: &tauri::AppHandle,
+    results: &[LoginResult],
+    cleanup_succeeded: bool,
+  ) {
+    let ok = results.iter().filter(|result| result.success).count();
+    let fail = results.len().saturating_sub(ok);
+    self.emit_batch_terminal(
+      app_handle,
+      if cleanup_succeeded {
+        "completed"
+      } else {
+        "failed"
+      },
+      self.config.credentials.len() as u32,
+      cleanup_succeeded && fail == 0 && ok > 0,
+    );
+  }
+
+  fn should_emit_batch_terminal_in_run(&self) -> bool {
+    self.worker_runtime.is_none()
   }
 
   #[allow(dead_code)]
@@ -896,16 +975,59 @@ impl LoginEngine {
     message: &str,
     credential_index: u32,
     total_credentials: u32,
-    result: Option<LoginResult>,
+    terminal: Option<LoginTerminalSummary>,
   ) {
+    let safe_message = if let Some(summary) = terminal.as_ref() {
+      summary.status_code.clone()
+    } else if step == LoginStep::Failed {
+      "failed".into()
+    } else {
+      super::sanitize_browser_urls_for_log(message)
+    };
     let payload = LoginProgress {
       task_id: self.task_id.clone(),
       credential_index,
       total_credentials,
       step,
-      message: message.to_string(),
+      message: safe_message,
       timestamp: Utc::now(),
-      result,
+      event_kind: LoginProgressEventKind::Account,
+      terminal,
+    };
+    let _ = app_handle.emit("login-progress", payload);
+  }
+
+  fn emit_batch_terminal(
+    &self,
+    app_handle: &tauri::AppHandle,
+    _message: &str,
+    total_credentials: u32,
+    success: bool,
+  ) {
+    let payload = LoginProgress {
+      task_id: self.task_id.clone(),
+      credential_index: 0,
+      total_credentials,
+      step: if success {
+        LoginStep::Completed
+      } else {
+        LoginStep::Failed
+      },
+      message: if success {
+        "completed".into()
+      } else {
+        "failed".into()
+      },
+      timestamp: Utc::now(),
+      event_kind: LoginProgressEventKind::Batch,
+      terminal: Some(LoginTerminalSummary {
+        success,
+        status_code: if success {
+          "completed".into()
+        } else {
+          "failed".into()
+        },
+      }),
     };
     let _ = app_handle.emit("login-progress", payload);
   }
@@ -1067,7 +1189,14 @@ impl LoginEngine {
               ),
               idx as u32,
               total,
-              Some(result.clone()),
+              Some(LoginTerminalSummary {
+                success: login_ok,
+                status_code: if login_ok {
+                  "completed".into()
+                } else {
+                  "failed".into()
+                },
+              }),
             );
             results.push(result);
             succeeded = true;
@@ -1181,20 +1310,22 @@ impl LoginEngine {
           &format!("[{}/{}] {}", idx + 1, total, result.error_message),
           idx as u32,
           total,
-          Some(result.clone()),
+          Some(LoginTerminalSummary {
+            success: false,
+            status_code: "failed".into(),
+          }),
         );
         results.push(result);
       }
     }
 
-    // Batch end: delete only auto-created worker profile (never user profiles).
-    self.dispose_worker_profile(&app_handle).await;
-
     let ok = results.iter().filter(|r| r.success).count();
     let fail = results.iter().filter(|r| !r.success).count();
     let msg = format!("Done: {ok} logged in, {fail} failed");
 
-    self.emit(&app_handle, LoginStep::Completed, &msg, 0, total, None);
+    if self.should_emit_batch_terminal_in_run() {
+      self.emit_batch_terminal(&app_handle, &msg, total, fail == 0 && ok > 0);
+    }
 
     results
   }
@@ -1233,14 +1364,9 @@ impl LoginEngine {
       "{prefix} Auth URL ready (PKCE, client=codex, redirect=localhost:1455)"
     ));
 
-    // Start local callback listener BEFORE browser navigates to auth.
-    // OpenAI redirects to localhost:1455; without a listener Chromium shows chrome-error.
-    let mut callback_listener = OAuthCallbackListener::start().await?;
-    self.log(&format!(
-      "{prefix} OAuth callback listener bound on {OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}"
-    ));
-
-    // Step 2: Launch browser
+    // Step 2: Launch browser before binding the callback socket. Detached Windows
+    // workers inherit open handles, so binding first can leave :1455 owned by a
+    // child after listener shutdown and make the next retry fail with EADDRINUSE.
     self.emit(
       app_handle,
       LoginStep::LaunchingBrowser,
@@ -1250,15 +1376,28 @@ impl LoginEngine {
       None,
     );
 
-    let (profile, mut cdp) = match self.launch_browser(app_handle).await {
-      Ok(v) => v,
-      Err(e) => {
-        // Await socket release so the next retry can re-bind :1455 on Windows.
-        callback_listener.shutdown().await;
-        return Err(e);
+    let ((profile, mut cdp), mut callback_listener) = match start_callback_after(
+      self.launch_browser(app_handle),
+      &format!("{OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}"),
+    )
+    .await
+    {
+      Ok(started) => started,
+      Err(CallbackAfterLaunchError::Launch(error)) => return Err(error),
+      Err(CallbackAfterLaunchError::Bind { launched, error }) => {
+        let (profile, _) = launched;
+        if let Err(kill_error) = self.kill_browser_only(app_handle, &profile).await {
+          return Err(format!(
+            "{error}; browser cleanup after callback bind failure also failed: {kill_error}"
+          ));
+        }
+        return Err(error);
       }
     };
     self.log(&format!("{prefix} Browser launched: {}", profile.name));
+    self.log(&format!(
+      "{prefix} OAuth callback listener bound on {OAUTH_CALLBACK_HOST}:{OAUTH_CALLBACK_PORT}"
+    ));
 
     let result = self
       .run_login_in_browser(
@@ -1322,7 +1461,10 @@ impl LoginEngine {
     sleep(std::time::Duration::from_secs(2)).await;
 
     let mut cur_url = cdp.current_url().await.unwrap_or_default();
-    self.log(&format!("{prefix} Auth page URL: {cur_url}"));
+    self.log(&format!(
+      "{prefix} Auth page URL: {}",
+      safe_browser_url_for_log(&cur_url)
+    ));
     if let Some(error) = self.detect_unsupported_region_error_from_dom(cdp).await {
       return Err(error);
     }
@@ -1339,6 +1481,8 @@ impl LoginEngine {
     let mut sms_number_attempts: u32 = 0;
     // Loops spent waiting for AddPhone → PhoneOtp after a submit (detect stuck form).
     let mut add_phone_wait_loops: u32 = 0;
+    // Email OTP must switch to the authenticator challenge; never submit TOTP to email input.
+    let mut email_otp_switch_attempts: u32 = 0;
 
     // Step 4-8: Login flow state machine.
     // Returning accounts (phone already verified) skip AddPhone/PhoneOtp and land on Consent.
@@ -1363,19 +1507,26 @@ impl LoginEngine {
       // URL can lag SPA transitions (or be chrome-error without path). Probe DOM.
       if matches!(
         page,
-        LoginPageType::Unknown | LoginPageType::LoginEmail | LoginPageType::AddPhone
+        LoginPageType::Unknown
+          | LoginPageType::LoginEmail
+          | LoginPageType::TwoFactor
+          | LoginPageType::AddPhone
       ) {
         if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
           let resolved_page = resolve_dom_page_override(page, dom_page);
           if resolved_page != page {
             self.log(&format!(
-              "{prefix} DOM page override: {page:?} -> {resolved_page:?} (url={cur_url})"
+              "{prefix} DOM page override: {page:?} -> {resolved_page:?} (url={})",
+              safe_browser_url_for_log(&cur_url)
             ));
             page = resolved_page;
           }
         }
       }
-      self.log(&format!("{prefix} Page[{step_i}]: {page:?} url={cur_url}"));
+      self.log(&format!(
+        "{prefix} Page[{step_i}]: {page:?} url={}",
+        safe_browser_url_for_log(&cur_url)
+      ));
 
       match page {
         LoginPageType::LoginEmail => {
@@ -1442,6 +1593,35 @@ impl LoginEngine {
           self.fill_and_submit_2fa(cdp, &totp_code).await?;
           sleep(std::time::Duration::from_secs(2)).await;
           cur_url = cdp.current_url().await.unwrap_or_default();
+        }
+
+        LoginPageType::EmailOtp => {
+          if credential.totp_secret.is_empty() {
+            return Err("Email OTP shown but no TOTP secret was provided".into());
+          }
+          email_otp_switch_attempts += 1;
+          if email_otp_switch_attempts > 3 {
+            return Err(
+              "Could not switch OpenAI email OTP challenge to authenticator TOTP after 3 attempts"
+                .into(),
+            );
+          }
+          self.log(&format!(
+            "{prefix} Email OTP challenge detected; switching to authenticator TOTP ({email_otp_switch_attempts}/3)"
+          ));
+          match self.select_totp_mfa_method(cdp, prefix).await {
+            Ok(true) => {
+              sleep(std::time::Duration::from_secs(2)).await;
+              cur_url = cdp.current_url().await.unwrap_or_default();
+              continue;
+            }
+            Ok(false) => {
+              return Err(
+                "OpenAI email OTP challenge did not expose an authenticator TOTP method".into(),
+              );
+            }
+            Err(e) => return Err(e),
+          }
         }
 
         LoginPageType::AddPhone => {
@@ -1530,21 +1710,71 @@ impl LoginEngine {
             number_info.request_id, number_info.phone_number
           ));
 
-          // First number: normal country select. After OTP timeout / re-rent: force
-          // reselect Vietnam + clear leftover digits (SPA often leaves +1 active).
-          let force_country = sms_number_attempts > 1;
+          // Re-rent: clear leftover digits. Avoid force-opening country Select when UI
+          // already shows Vietnam — force reselect collapses listbox (no_listbox).
+          if sms_number_attempts > 1 {
+            let _ = self.clear_phone_input(cdp).await;
+            sleep(std::time::Duration::from_millis(250)).await;
+          }
           self
-            .fill_phone_and_submit_inner(cdp, &number_info.phone_number, force_country)
+            .fill_phone_and_submit_inner(cdp, &number_info.phone_number, false)
             .await?;
-          // Wait for OpenAI to move to /phone-verification.
-          for _ in 0..10 {
+          // Wait for OpenAI to move to /phone-verification. Capture page error text
+          // when still stuck on add-phone (invalid number / rate limit / bot flags).
+          for _ in 0..12 {
             sleep(std::time::Duration::from_millis(500)).await;
             cur_url = cdp.current_url().await.unwrap_or_default();
             if matches!(detect_login_page_type(&cur_url), LoginPageType::PhoneOtp) {
               break;
             }
           }
-          self.log(&format!("{prefix} After phone submit, URL: {cur_url}"));
+          if matches!(detect_login_page_type(&cur_url), LoginPageType::AddPhone)
+            && self.confirm_whatsapp_phone_fallback(cdp, prefix).await?
+          {
+            for _ in 0..12 {
+              sleep(std::time::Duration::from_millis(500)).await;
+              cur_url = cdp.current_url().await.unwrap_or_default();
+              let page = detect_login_page_type(&cur_url);
+              if matches!(page, LoginPageType::PhoneOtp) {
+                break;
+              }
+              if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
+                if dom_page == LoginPageType::PhoneOtp {
+                  cur_url = cdp.current_url().await.unwrap_or_default();
+                  break;
+                }
+              }
+            }
+          }
+          if matches!(detect_login_page_type(&cur_url), LoginPageType::AddPhone) {
+            if let Ok(err_probe) = cdp
+              .evaluate(
+                r#"(function(){
+                  const body = (document.body && document.body.innerText || '').replace(/\s+/g,' ').trim();
+                  const alerts = Array.from(document.querySelectorAll('[role="alert"], .error, [data-error], [class*="error"]'))
+                    .map((el) => (el.innerText||'').replace(/\s+/g,' ').trim()).filter(Boolean).slice(0,4);
+                  return { alerts, body: body.slice(0,280) };
+                })()"#,
+                false,
+              )
+              .await
+            {
+              self.log(&format!(
+                "{prefix} Still on AddPhone after submit: {}",
+                err_probe
+                  .get("value")
+                  .map(|v| v.to_string())
+                  .unwrap_or_default()
+                  .chars()
+                  .take(320)
+                  .collect::<String>()
+              ));
+            }
+          }
+          self.log(&format!(
+            "{prefix} After phone submit, URL: {}",
+            safe_browser_url_for_log(&cur_url)
+          ));
         }
 
         LoginPageType::PhoneOtp => {
@@ -1581,9 +1811,17 @@ impl LoginEngine {
           );
           // On timeout/no SMS: do NOT fail the whole login_once. Blacklist the number,
           // return to AddPhone, and rent a different Viotp number within this attempt.
-          let otp_info = match sms.get_otp(&request_id, SMS_OTP_TIMEOUT_SECS) {
+          let otp_info = match poll_otp_with_cancel(
+            sms,
+            &request_id,
+            SMS_OTP_TIMEOUT_SECS,
+            self.cancel_flag.as_ref(),
+          ) {
             Ok(info) => info,
             Err(e) => {
+              if self.is_cancelled() {
+                return Err("Cancelled during SMS OTP polling".into());
+              }
               let err = e.to_string();
               self.log(&format!(
                 "{prefix} SMS OTP poll failed for request {request_id}: {err}"
@@ -1649,7 +1887,8 @@ impl LoginEngine {
             cur_url = cdp.current_url().await.unwrap_or_default();
             let after = detect_login_page_type(&cur_url);
             self.log(&format!(
-              "{prefix} After phone OTP poll: {after:?} url={cur_url}"
+              "{prefix} After phone OTP poll: {after:?} url={}",
+              safe_browser_url_for_log(&cur_url)
             ));
             if matches!(
               after,
@@ -1672,7 +1911,8 @@ impl LoginEngine {
             None,
           );
           self.log(&format!(
-            "{prefix} Consent page detected, clicking Continue... url={cur_url}"
+            "{prefix} Consent page detected, clicking Continue... url={}",
+            safe_browser_url_for_log(&cur_url)
           ));
           // A few robust click strategies, then stop re-looping forever on the same page.
           // Camoufox often lands on Remix "Try again" after Continue — recover and re-click.
@@ -1688,7 +1928,8 @@ impl LoginEngine {
               if let Ok(dom_page) = self.probe_page_type_from_dom(cdp).await {
                 if dom_page != LoginPageType::Consent && dom_page != LoginPageType::Unknown {
                   self.log(&format!(
-                    "{prefix} Left consent via recover/DOM -> {dom_page:?} url={cur_url}"
+                    "{prefix} Left consent via recover/DOM -> {dom_page:?} url={}",
+                    safe_browser_url_for_log(&cur_url)
                   ));
                   if matches!(
                     dom_page,
@@ -1708,7 +1949,10 @@ impl LoginEngine {
               cur_url = cdp.current_url().await.unwrap_or_default();
               let after = detect_login_page_type(&cur_url);
               if matches!(after, LoginPageType::Callback | LoginPageType::ChatgptHome) {
-                self.log(&format!("{prefix} Left consent -> {after:?} url={cur_url}"));
+                self.log(&format!(
+                  "{prefix} Left consent -> {after:?} url={}",
+                  safe_browser_url_for_log(&cur_url)
+                ));
                 left_consent = true;
                 break;
               }
@@ -1726,22 +1970,27 @@ impl LoginEngine {
               break;
             }
             self.log(&format!(
-              "{prefix} Still on consent after attempt {}: {cur_url}",
-              attempt + 1
+              "{prefix} Still on consent after attempt {}: {}",
+              attempt + 1,
+              safe_browser_url_for_log(&cur_url)
             ));
           }
           if !left_consent {
             // Break out of the state machine so extract_callback can wait on the listener
             // in case a late redirect arrives, instead of clicking forever.
             self.log(&format!(
-              "{prefix} Consent did not navigate away; waiting on callback listener. url={cur_url}"
+              "{prefix} Consent did not navigate away; waiting on callback listener. url={}",
+              safe_browser_url_for_log(&cur_url)
             ));
             break;
           }
         }
 
         LoginPageType::Callback | LoginPageType::ChatgptHome => {
-          self.log(&format!("{prefix} Login flow reached end: {cur_url}"));
+          self.log(&format!(
+            "{prefix} Login flow reached end: {}",
+            safe_browser_url_for_log(&cur_url)
+          ));
           break;
         }
 
@@ -2028,15 +2277,7 @@ impl LoginEngine {
         }
         continue;
       }
-      let dump = value_json
-        .get("dump")
-        .map(|d| d.to_string())
-        .unwrap_or_default();
       let url = value_json.get("url").and_then(|u| u.as_str()).unwrap_or("");
-      let body = value_json
-        .get("bodyText")
-        .and_then(|u| u.as_str())
-        .unwrap_or("");
       let ready = value_json
         .get("ready")
         .and_then(|u| u.as_str())
@@ -2045,8 +2286,9 @@ impl LoginEngine {
         .get("iframeCount")
         .and_then(|u| u.as_u64())
         .unwrap_or(0);
+      let safe_url = safe_browser_url_for_log(url);
       last_err = format!(
-        "fill {field}: {} url={url} ready={ready} iframes={iframes} body={body:?} dump={dump}",
+        "fill {field}: {} url={safe_url} ready={ready} iframes={iframes}",
         value_json["reason"].as_str().unwrap_or("failed")
       );
     }
@@ -2107,33 +2349,77 @@ impl LoginEngine {
     cdp: &mut BrowserSession,
     prefix: &str,
   ) -> Result<bool, String> {
+    // Prefer trusted selector clicks for React controls; DOM .click() remains fallback.
+    for selector in [
+      r#"button:has-text("Google Authenticator")"#,
+      r#"[role="button"]:has-text("Google Authenticator")"#,
+      r#"button:has-text("Authentication app")"#,
+      r#"[role="button"]:has-text("Authentication app")"#,
+    ] {
+      if cdp.selector_click(selector).await.is_ok() {
+        self.log(&format!(
+          "{prefix} Selected authenticator TOTP method via {selector}"
+        ));
+        return Ok(true);
+      }
+    }
+
+    let current_url = cdp.current_url().await.unwrap_or_default();
+    if current_url.to_ascii_lowercase().contains("email-otp") {
+      for selector in [
+        r#"button:has-text("Try another method")"#,
+        r#"[role="button"]:has-text("Try another method")"#,
+        r#"button:has-text("Use another method")"#,
+        r#"[role="button"]:has-text("Use another method")"#,
+      ] {
+        if cdp.selector_click(selector).await.is_ok() {
+          self.log(&format!(
+            "{prefix} Opened MFA method chooser via {selector}"
+          ));
+          return Ok(true);
+        }
+      }
+    }
+
     let js = r#"(function(){
-      // If OTP input already present, no method selection needed.
-      const codeInput = document.querySelector(
-        'input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="tel"], input[type="text"]'
-      );
-      if (codeInput) {
-        const r = codeInput.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) return { action: 'input_ready' };
+      const url = location.href.toLowerCase();
+      const isEmailOtpPage = url.includes('email-otp');
+
+      // If OTP input already present AND NOT on email-otp page, no method selection needed.
+      // On email-otp page, the input is for email code — must switch to authenticator method.
+      if (!isEmailOtpPage) {
+        const codeInput = document.querySelector(
+          'input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="tel"], input[type="text"]'
+        );
+        if (codeInput) {
+          const r = codeInput.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) return { action: 'input_ready' };
+        }
       }
 
       const body = (document.body && document.body.innerText || '').replace(/\s+/g, ' ');
       const hasChooser = /Select a method to verify your identity/i.test(body)
         || /Google Authenticator or similar/i.test(body);
-      if (!hasChooser) return { action: 'none' };
-
-      // Authenticator unavailable on chooser.
-      if (/Google Authenticator or similar[\s\S]{0,120}temporarily unavailable/i.test(body)
-          || (/temporarily unavailable/i.test(body) && /Google Authenticator/i.test(body))) {
-        // Prefer Email fallback if listed.
-        const emailNodes = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-        for (const el of emailNodes) {
+      if (!hasChooser && isEmailOtpPage) {
+        const nodes = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+        for (const el of nodes) {
           const t = (el.innerText || el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
-          if (t === 'email' || t.startsWith('email')) {
-            el.click();
-            return { action: 'clicked_email_fallback', text: t.slice(0, 80) };
+          if (!t || t.length > 80) continue;
+          if (/try another method|use another method|choose another method|other verification method|different method/.test(t)) {
+            try {
+              el.scrollIntoView({ block: 'center' });
+              el.click();
+              return { action: 'clicked_method_chooser', text: t.slice(0, 80) };
+            } catch (_) {}
           }
         }
+      }
+      if (!hasChooser) return { action: 'none' };
+
+      // Authenticator unavailable on chooser. Login credentials are TOTP-only;
+      // never fall back to email OTP because no email code is available here.
+      if (/Google Authenticator or similar[\s\S]{0,120}temporarily unavailable/i.test(body)
+          || (/temporarily unavailable/i.test(body) && /Google Authenticator/i.test(body))) {
         return { action: 'totp_unavailable', body: body.slice(0, 240) };
       }
 
@@ -2161,7 +2447,7 @@ impl LoginEngine {
       .unwrap_or("none");
     match action {
       "none" | "input_ready" => Ok(false),
-      "clicked" | "clicked_email_fallback" => {
+      "clicked" | "clicked_method_chooser" => {
         let text = value
           .get("text")
           .and_then(|t| t.as_str())
@@ -2502,50 +2788,75 @@ impl LoginEngine {
 
     // Wait until the virtualized listbox actually mounts options.
     // Camoufox often needs longer than Chromium before rows appear.
+    // If DOM .click() left an empty shell, retry with a trusted mouse click on the trigger.
     let mut options_ready = false;
-    for _ in 0..20 {
-      let state = cdp
-        .evaluate(
-          r#"(function(){
-            const lb = document.querySelector('[role="listbox"]');
-            const opts = Array.from(document.querySelectorAll('[role="option"]'));
-            return {
-              hasListbox: !!lb,
-              optionCount: opts.length,
-              sample: opts.slice(0, 5).map((el) => ({
-                key: el.getAttribute('data-key') || '',
-                text: (el.innerText||'').replace(/\s+/g,' ').trim().slice(0,40)
-              }))
-            };
-          })()"#,
-          false,
-        )
-        .await
-        .ok()
-        .and_then(|r| r.get("value").cloned())
-        .unwrap_or_default();
-      let count = state
-        .get("optionCount")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-      if state.get("hasListbox").and_then(|v| v.as_bool()) == Some(true) && count > 0 {
-        options_ready = true;
-        self.log(&format!(
-          "Country listbox ready: {count} options mounted, sample={}",
-          state
-            .get("sample")
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-            .chars()
-            .take(180)
-            .collect::<String>()
-        ));
+    for open_try in 0..3 {
+      for _ in 0..16 {
+        let state = cdp
+          .evaluate(
+            r#"(function(){
+              const lb = document.querySelector('[role="listbox"]');
+              const opts = Array.from(document.querySelectorAll('[role="option"]'));
+              return {
+                hasListbox: !!lb,
+                optionCount: opts.length,
+                sample: opts.slice(0, 5).map((el) => ({
+                  key: el.getAttribute('data-key') || '',
+                  text: (el.innerText||'').replace(/\s+/g,' ').trim().slice(0,40)
+                }))
+              };
+            })()"#,
+            false,
+          )
+          .await
+          .ok()
+          .and_then(|r| r.get("value").cloned())
+          .unwrap_or_default();
+        let count = state
+          .get("optionCount")
+          .and_then(|v| v.as_u64())
+          .unwrap_or(0);
+        if state.get("hasListbox").and_then(|v| v.as_bool()) == Some(true) && count > 0 {
+          options_ready = true;
+          self.log(&format!(
+            "Country listbox ready: {count} options mounted, sample={}",
+            state
+              .get("sample")
+              .map(|s| s.to_string())
+              .unwrap_or_default()
+              .chars()
+              .take(180)
+              .collect::<String>()
+          ));
+          break;
+        }
+        sleep(std::time::Duration::from_millis(200)).await;
+      }
+      if options_ready {
         break;
       }
-      sleep(std::time::Duration::from_millis(200)).await;
-    }
-    if !options_ready {
-      // Re-click trigger once if first open left an empty shell.
+      self.log(&format!(
+        "Country listbox not ready after open try {}; retrying with mouse click",
+        open_try + 1
+      ));
+      // Trusted pointer on the trigger is more reliable than synthetic DOM events.
+      let rect_js = r#"(function(){
+        const trigger = document.querySelector('button[aria-haspopup="listbox"]');
+        if (!trigger) return null;
+        try { trigger.scrollIntoView({ block: 'center' }); } catch(_) {}
+        const r = trigger.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) return null;
+        return { x: r.left + r.width/2, y: r.top + r.height/2 };
+      })()"#;
+      if let Ok(rect_res) = cdp.evaluate(rect_js, false).await {
+        if let Some(rect) = rect_res.get("value") {
+          let x = rect.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0);
+          let y = rect.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0);
+          if x > 1.0 && y > 1.0 {
+            let _ = cdp.mouse_click(x, y).await;
+          }
+        }
+      }
       let _ = cdp.evaluate(open_js, false).await;
       sleep(std::time::Duration::from_millis(600)).await;
     }
@@ -3083,6 +3394,63 @@ impl LoginEngine {
     }
   }
 
+  async fn confirm_whatsapp_phone_fallback(
+    &mut self,
+    cdp: &mut BrowserSession,
+    prefix: &str,
+  ) -> Result<bool, String> {
+    let body = cdp
+      .evaluate(
+        "(document.body && (document.body.innerText || document.body.textContent) || '').slice(0,4000)",
+        false,
+      )
+      .await?
+      .get("value")
+      .and_then(serde_json::Value::as_str)
+      .unwrap_or("")
+      .to_string();
+    if !is_whatsapp_phone_fallback(&body) {
+      return Ok(false);
+    }
+    let probe_js = r#"(function(){
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0
+          && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const control = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))
+        .find((el) => {
+          if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+          const text = (el.innerText || el.textContent || el.value || '').trim().toLowerCase();
+          return text === 'continue' || text.includes('continue');
+        });
+      if (!control) return { ready: false };
+      control.scrollIntoView({ block: 'center', inline: 'nearest' });
+      const rect = control.getBoundingClientRect();
+      return {
+        ready: true,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      };
+    })()"#;
+    let probe = cdp.evaluate(probe_js, false).await?;
+    let value = probe.get("value").cloned().unwrap_or_default();
+    let x = value
+      .get("x")
+      .and_then(serde_json::Value::as_f64)
+      .ok_or_else(|| "WhatsApp phone fallback Continue control is unavailable".to_string())?;
+    let y = value
+      .get("y")
+      .and_then(serde_json::Value::as_f64)
+      .ok_or_else(|| "WhatsApp phone fallback Continue control is unavailable".to_string())?;
+    self.log(&format!(
+      "{prefix} SMS unavailable; confirming OpenAI WhatsApp verification fallback"
+    ));
+    cdp.mouse_click(x, y).await?;
+    Ok(true)
+  }
+
   /// Fill phone number and submit.
   ///
   /// `force_country_reselect`: after SMS timeout we always re-pick Vietnam even
@@ -3311,6 +3679,12 @@ impl LoginEngine {
       const hasPwd = !!document.querySelector('input[type="password"], input[name="password"], input[autocomplete="current-password"]');
       if (hasPwd) return 'password';
       const hasCode = !!document.querySelector('input[autocomplete="one-time-code"], input[name="code"], input[inputmode="numeric"]');
+      // Email OTP page: URL has email-otp, or body mentions email verification/code explicitly.
+      const emailOtpSignal = href.includes('email-otp')
+        || (hasCode
+          && /email|inbox|sent.*code.*email|code.*email/i.test(body)
+          && !/authenticator|google authenticator|two-factor|2fa|mfa/i.test(body));
+      if (emailOtpSignal) return 'email_otp';
       // Phone SMS OTP page (after add-phone submit): code field + phone wording, not authenticator.
       if (hasCode && /phone|sms|text message|verification code/i.test(body)
           && !/authenticator|google authenticator|two-factor|2fa|mfa/i.test(body)) {
@@ -3344,6 +3718,7 @@ impl LoginEngine {
       "callback" => LoginPageType::Callback,
       "phone" => LoginPageType::AddPhone,
       "phone_otp" => LoginPageType::PhoneOtp,
+      "email_otp" => LoginPageType::EmailOtp,
       "password" => LoginPageType::LoginPassword,
       "totp" => LoginPageType::TwoFactor,
       "email" => LoginPageType::LoginEmail,
@@ -3699,84 +4074,6 @@ impl LoginEngine {
     }
   }
 
-  /// Attach proxy or inventory VPN to the worker profile (mutually exclusive).
-  async fn apply_network_to_worker(
-    &mut self,
-    app_handle: &tauri::AppHandle,
-    mut found: crate::profile::BrowserProfile,
-  ) -> Result<crate::profile::BrowserProfile, String> {
-    match self.config.network_mode {
-      LoginNetworkMode::Proxy => {
-        if let Some(proxy_id) = self.config.proxy_id.as_ref() {
-          if found.proxy_id.as_deref() != Some(proxy_id.as_str()) || found.vpn_id.is_some() {
-            match crate::profile::ProfileManager::instance()
-              .update_profile_proxy(
-                app_handle.clone(),
-                &found.id.to_string(),
-                Some(proxy_id.clone()),
-              )
-              .await
-            {
-              Ok(updated) => {
-                found = updated;
-                self.log(&format!("Worker profile proxy set to {proxy_id}"));
-              }
-              Err(e) => {
-                self.log(&format!(
-                  "Warning: failed to set worker proxy_id={proxy_id}: {e}"
-                ));
-              }
-            }
-          }
-        }
-      }
-      LoginNetworkMode::Vpn => {
-        if let Some(vpn_id) = self.config.effective_vpn_id() {
-          if found.vpn_id.as_deref() != Some(vpn_id.as_str()) || found.proxy_id.is_some() {
-            match crate::profile::ProfileManager::instance()
-              .update_profile_vpn(
-                app_handle.clone(),
-                &found.id.to_string(),
-                Some(vpn_id.clone()),
-              )
-              .await
-            {
-              Ok(updated) => {
-                found = updated;
-                self.log(&format!("Worker profile VPN set to {vpn_id}"));
-              }
-              Err(e) => {
-                self.log(&format!(
-                  "Warning: failed to set worker vpn_id={vpn_id}: {e}"
-                ));
-              }
-            }
-          }
-        }
-      }
-      LoginNetworkMode::None | LoginNetworkMode::Nord => {
-        // Clear residual network bindings so direct/Nord-CLI runs don't inherit old VPN/proxy.
-        if found.proxy_id.is_some() {
-          if let Ok(updated) = crate::profile::ProfileManager::instance()
-            .update_profile_proxy(app_handle.clone(), &found.id.to_string(), None)
-            .await
-          {
-            found = updated;
-          }
-        }
-        if found.vpn_id.is_some() {
-          if let Ok(updated) = crate::profile::ProfileManager::instance()
-            .update_profile_vpn(app_handle.clone(), &found.id.to_string(), None)
-            .await
-          {
-            found = updated;
-          }
-        }
-      }
-    }
-    Ok(found)
-  }
-
   /// Mid-batch WireGuard peer hop (same approach as auto-reg): keep PrivateKey,
   /// pick a new Nord peer, rewrite inventory conf, restart vpn-worker.
   async fn rotate_wireguard_peer(&mut self, vpn_id: &str) -> Result<(String, String), String> {
@@ -3896,242 +4193,54 @@ impl LoginEngine {
     Ok(true)
   }
 
-  /// Ensure one reusable worker profile for the whole batch.
-  /// Creates only when missing; reuses already-created auto-login workers of the same browser.
-  async fn ensure_worker_profile(
-    &mut self,
-    app_handle: &tauri::AppHandle,
-  ) -> Result<crate::profile::BrowserProfile, String> {
-    use crate::browser::BrowserType;
-    use crate::profile::manager::create_browser_profile_with_group;
-
-    // Already have a worker for this engine — reload latest metadata.
-    if let Some(id) = self.worker_profile_id.clone() {
-      if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-        if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
-          return Ok(found);
-        }
-      }
-      self.log(&format!(
-        "Worker profile {id} missing from store — will recreate"
-      ));
-      self.worker_profile_id = None;
-      self.owns_worker_profile = false;
-    }
-
-    let browser_str = if self.config.browser_type.eq_ignore_ascii_case("camoufox") {
-      "camoufox"
-    } else {
-      "chromium"
-    };
-
-    // Prefer the stable auto-login worker for this browser (cross-batch reuse).
-    // Exact name first, then any auto-login-worker-* of the same browser.
-    let stable_name = format!("auto-login-worker-{browser_str}");
-    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-      if let Some(mut found) = profiles.into_iter().find(|p| {
-        p.browser.eq_ignore_ascii_case(browser_str)
-          && (p.name.eq_ignore_ascii_case(&stable_name) || p.name.starts_with("auto-login-worker-"))
-      }) {
-        if found.browser.eq_ignore_ascii_case("camoufox") {
-          let mut cfg = found.camoufox_config.clone().unwrap_or_default();
-          if cfg.randomize_fingerprint_on_launch != Some(true) {
-            cfg.randomize_fingerprint_on_launch = Some(true);
-            found.camoufox_config = Some(cfg.clone());
-            if let Err(e) = crate::profile::ProfileManager::instance()
-              .update_camoufox_config(app_handle.clone(), &found.id.to_string(), cfg)
-              .await
-            {
-              self.log(&format!(
-                "Warning: failed to enable Camoufox FP renew on worker: {e}"
-              ));
-            }
-          }
-        } else if found.browser.eq_ignore_ascii_case("chromium") {
-          let mut cfg = found.chromium_config.clone().unwrap_or_default();
-          if cfg.randomize_fingerprint_on_launch != Some(true) {
-            cfg.randomize_fingerprint_on_launch = Some(true);
-            found.chromium_config = Some(cfg.clone());
-            if let Err(e) = crate::profile::ProfileManager::instance()
-              .update_chromium_config(app_handle.clone(), &found.id.to_string(), cfg)
-              .await
-            {
-              self.log(&format!(
-                "Warning: failed to enable Chromium FP renew on worker: {e}"
-              ));
-            }
-          }
-        }
-
-        // Attach proxy or VPN to the reused worker (mutually exclusive).
-        found = self.apply_network_to_worker(app_handle, found).await?;
-
-        self.log(&format!(
-          "Reusing existing auto-login worker: {} ({}) browser={} version={}",
-          found.name, found.id, found.browser, found.version
-        ));
-        // Existing worker was created earlier — keep it after this batch too.
-        self.worker_profile_id = Some(found.id.to_string());
-        self.owns_worker_profile = false;
-        return Ok(found);
-      }
-    }
-
-    let mut version = String::new();
-    let mut release_type = "stable".to_string();
-
-    // Prefer an installed version from any existing profile of the same browser.
-    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-      if let Some(found) = profiles
-        .into_iter()
-        .find(|p| p.browser.eq_ignore_ascii_case(browser_str) && !p.version.is_empty())
-      {
-        version = found.version;
-        if !found.release_type.is_empty() {
-          release_type = found.release_type;
-        }
-        self.log(&format!(
-          "Using installed {browser_str} version from existing profile: {version}"
-        ));
-      }
-    }
-
-    // Fallback: downloaded browsers registry (critical for chromium — empty version
-    // resolves to binaries/fingerprint-chromium/ and fails to find chrome.exe).
-    if version.is_empty() {
-      let registry = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
-      let mut versions = registry.get_downloaded_versions(browser_str);
-      versions.sort_by(|a, b| {
-        crate::api_client::VersionComponent::parse(b)
-          .cmp(&crate::api_client::VersionComponent::parse(a))
-      });
-      if let Some(v) = versions.into_iter().next() {
-        version = v;
-        self.log(&format!(
-          "Using installed {browser_str} version from registry: {version}"
-        ));
-      }
-    }
-
-    if version.is_empty() && browser_str == "camoufox" {
-      version = "v135.0.1-beta.24".into();
-      self.log(&format!("Using default Camoufox version: {version}"));
-    }
-    if version.is_empty() {
-      return Err(format!(
-        "No downloaded {browser_str} version found. Install the browser in JnmBrowser first."
-      ));
-    }
-
-    let browser =
-      BrowserType::from_str(browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
-
-    // One stable worker name per browser type (reused across batches).
-    let profile_name = stable_name;
-
-    let camoufox_config = if browser_str == "camoufox" {
-      Some(crate::camoufox_manager::CamoufoxConfig {
-        fingerprint: None,
-        randomize_fingerprint_on_launch: Some(true),
-        geoip: Some(serde_json::Value::Bool(true)),
-        ..Default::default()
-      })
-    } else {
-      None
-    };
-    let chromium_config = if browser_str == "chromium" {
-      Some(crate::chromium_manager::ChromiumConfig {
-        fingerprint: None,
-        randomize_fingerprint_on_launch: Some(true),
-        ..Default::default()
-      })
-    } else {
-      None
-    };
-
-    let (create_proxy_id, create_vpn_id) = match self.config.network_mode {
-      LoginNetworkMode::Proxy => (self.config.proxy_id.clone(), None),
-      LoginNetworkMode::Vpn => (None, self.config.effective_vpn_id()),
-      _ => (None, None),
-    };
-
-    let mut created = create_browser_profile_with_group(
-      app_handle.clone(),
-      profile_name,
-      browser.as_str().to_string(),
-      version,
-      release_type,
-      create_proxy_id,
-      create_vpn_id,
-      camoufox_config,
-      chromium_config,
-      None,
-      true, // ephemeral worker: data dir wiped on kill, metadata reused
-      None,
-      None,
-    )
-    .await
-    .map_err(|e| format!("Create worker profile: {e}"))?;
-
-    // Persist randomize flags so relaunches keep renewing fingerprints.
-    if created.browser.eq_ignore_ascii_case("camoufox") {
-      let mut cfg = created.camoufox_config.clone().unwrap_or_default();
-      cfg.randomize_fingerprint_on_launch = Some(true);
-      created.camoufox_config = Some(cfg);
-    } else if created.browser.eq_ignore_ascii_case("chromium") {
-      let mut cfg = created.chromium_config.clone().unwrap_or_default();
-      cfg.randomize_fingerprint_on_launch = Some(true);
-      created.chromium_config = Some(cfg.clone());
-      if let Err(e) = crate::profile::ProfileManager::instance()
-        .update_chromium_config(app_handle.clone(), &created.id.to_string(), cfg)
-        .await
-      {
-        self.log(&format!(
-          "Warning: failed to persist Chromium randomize flag: {e}"
-        ));
-      }
-    }
-
-    // Keep the worker after batch so later auto-login runs reuse it (no storage spam).
-    self.worker_profile_id = Some(created.id.to_string());
-    self.owns_worker_profile = false;
-    self.log(&format!(
-      "Created reusable worker profile {} (id={}) browser={} — relaunch renews fingerprint + data",
-      created.name, created.id, created.browser
-    ));
-
-    Ok(created)
+  /// Return the worker snapshot resolved and leased before task publication.
+  fn ensure_worker_profile(&self) -> Result<BrowserProfile, String> {
+    self
+      .worker_runtime
+      .as_ref()
+      .map(|runtime| runtime.profile().clone())
+      .ok_or_else(|| "Auto Login worker runtime was not installed before execution".to_string())
   }
 
-  /// Launch the reused worker profile and attach CDP / Playwright.
+  /// Launch the prepared worker profile and attach CDP / Playwright.
   async fn launch_browser(
     &mut self,
     app_handle: &tauri::AppHandle,
   ) -> Result<(crate::profile::BrowserProfile, BrowserSession), String> {
-    use crate::browser_runner::BrowserRunner;
-
-    let worker = self.ensure_worker_profile(app_handle).await?;
+    let worker = self.ensure_worker_profile()?;
     self.log(&format!(
-      "Launching worker {} ({}) — fingerprint renew + fresh ephemeral dir",
+      "Launching worker {} ({}) with configured runtime policy",
       worker.name, worker.id
     ));
 
-    let launched = BrowserRunner::instance()
-      .launch_browser(
-        app_handle.clone(),
-        &worker,
-        Some("about:blank".into()),
-        None,
-      )
-      .await
-      .map_err(|e| format!("Launch: {e}"))?;
+    let launch_result = self
+      .worker_runtime
+      .as_mut()
+      .ok_or_else(|| "Auto Login worker runtime is missing".to_string())?
+      .launch(app_handle)
+      .await;
+    let launched = match launch_result {
+      Ok(launched) => launched,
+      Err(error) => {
+        if let Err(cleanup_error) = self.kill_browser_only(app_handle, &worker).await {
+          return Err(format!(
+            "Launch: {error}; failed-launch cleanup also failed: {cleanup_error}"
+          ));
+        }
+        return Err(format!("Launch: {error}"));
+      }
+    };
 
     sleep(std::time::Duration::from_secs(2)).await;
 
     let browser_str = launched.browser.as_str();
-    let profile_path = crate::ephemeral_dirs::get_effective_profile_path(
+    let profile_path = crate::ephemeral_dirs::get_effective_profile_path_for_key(
       &launched,
       &crate::profile::ProfileManager::instance().get_profiles_dir(),
+      self
+        .worker_runtime
+        .as_ref()
+        .and_then(WorkerRuntime::ephemeral_runtime_key),
     );
     let profile_path_str = profile_path.to_string_lossy().to_string();
 
@@ -4162,20 +4271,39 @@ impl LoginEngine {
           Err(e) => last_err = e.to_string(),
         }
       }
-      return Err(format!(
-        "Failed to attach Camoufox Playwright page for {profile_path_str}: {last_err}"
-      ));
+      let error =
+        format!("Failed to attach Camoufox Playwright page for {profile_path_str}: {last_err}");
+      if let Err(cleanup_error) = self.kill_browser_only(app_handle, &launched).await {
+        return Err(format!(
+          "{error}; browser cleanup after attach failure also failed: {cleanup_error}"
+        ));
+      }
+      return Err(error);
     }
 
     // Chromium: wait for CDP port then open debugger websocket.
     // Prefer PID lookup: ephemeral path can race with status checks.
-    let cdp_port = self
-      .wait_for_cdp_port(&launched.browser, &profile_path_str, launched.process_id)
-      .await?;
-    self.log(&format!("CDP port ready: {cdp_port}"));
-    let ws_url = get_page_ws_url(cdp_port).await?;
-    let cdp = CdpConnection::connect(&ws_url).await?;
-    Ok((launched, BrowserSession::Cdp(cdp)))
+    let attach_result = async {
+      let cdp_port = self
+        .wait_for_cdp_port(&launched.browser, &profile_path_str, launched.process_id)
+        .await?;
+      self.log(&format!("CDP port ready: {cdp_port}"));
+      let ws_url = get_page_ws_url(cdp_port).await?;
+      let cdp = CdpConnection::connect(&ws_url).await?;
+      Ok::<BrowserSession, String>(BrowserSession::Cdp(cdp))
+    }
+    .await;
+    match attach_result {
+      Ok(session) => Ok((launched, session)),
+      Err(error) => {
+        if let Err(cleanup_error) = self.kill_browser_only(app_handle, &launched).await {
+          return Err(format!(
+            "{error}; browser cleanup after attach failure also failed: {cleanup_error}"
+          ));
+        }
+        Err(error)
+      }
+    }
   }
 
   async fn wait_for_cdp_port(
@@ -4219,12 +4347,14 @@ impl LoginEngine {
     app_handle: &tauri::AppHandle,
     profile: &crate::profile::BrowserProfile,
   ) -> Result<(), String> {
-    use crate::browser_runner::BrowserRunner;
+    let cleanup_result = self
+      .worker_runtime
+      .as_mut()
+      .ok_or_else(|| "Auto Login worker runtime is missing".to_string())?
+      .kill(app_handle, profile)
+      .await;
 
-    match BrowserRunner::instance()
-      .kill_browser_process(app_handle.clone(), profile)
-      .await
-    {
+    match cleanup_result {
       Ok(()) => {
         self.log(&format!(
           "Browser killed for worker profile {} ({})",
@@ -4240,39 +4370,6 @@ impl LoginEngine {
         self.log(&msg);
         Err(msg)
       }
-    }
-  }
-
-  /// Delete the auto-created worker only when this engine owns it.
-  /// Cross-batch workers are kept on disk for reuse (`owns_worker_profile = false`).
-  async fn dispose_worker_profile(&mut self, app_handle: &tauri::AppHandle) {
-    let Some(id) = self.worker_profile_id.take() else {
-      return;
-    };
-    if !self.owns_worker_profile {
-      self.log(&format!(
-        "Keeping reusable auto-login worker profile on disk: {id}"
-      ));
-      return;
-    }
-    self.owns_worker_profile = false;
-
-    if let Ok(profiles) = crate::profile::ProfileManager::instance().list_profiles() {
-      if let Some(found) = profiles.into_iter().find(|p| p.id.to_string() == id) {
-        // Best-effort: dispose proceeds regardless so the profile metadata is
-        // removed. Kill failure is logged inside kill_browser_only.
-        let _ = self.kill_browser_only(app_handle, &found).await;
-      }
-    }
-
-    sleep(std::time::Duration::from_millis(500)).await;
-
-    if let Err(e) = crate::profile::ProfileManager::instance().delete_profile(app_handle, &id) {
-      self.log(&format!(
-        "Warning: failed to delete worker profile {id}: {e}"
-      ));
-    } else {
-      self.log(&format!("Worker profile deleted: {id}"));
     }
   }
 }
@@ -4306,6 +4403,64 @@ mod tests {
   use super::*;
 
   #[test]
+  fn prepared_worker_runtime_is_installed_without_delete_ownership() {
+    let mut config: LoginConfig = serde_json::from_value(serde_json::json!({
+      "credentialsText": "user@example.com|password"
+    }))
+    .unwrap();
+    config.parse_credentials();
+    config.normalize();
+    let profile = crate::profile::BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "selected".to_string(),
+      browser: "chromium".to_string(),
+      version: "1.0.0".to_string(),
+      ..crate::profile::BrowserProfile::default()
+    };
+    let registry = crate::profile_runtime::LeaseRegistry::new();
+    let lease = registry
+      .try_acquire(&profile.id.to_string())
+      .expect("worker lease");
+    let mut engine = LoginEngine::with_cancel_flag(config, Arc::new(AtomicBool::new(false)));
+
+    engine.install_worker_runtime(profile.clone(), lease.clone());
+
+    let runtime = engine
+      .worker_runtime()
+      .expect("worker runtime should be installed");
+    assert_eq!(runtime.profile().id, profile.id);
+    assert_eq!(runtime.lease_id(), lease.lease_id);
+    registry.release(&lease.lease_id);
+  }
+
+  #[test]
+  fn browser_url_log_removes_query_fragment_and_userinfo() {
+    assert_eq!(
+      safe_browser_url_for_log(
+        "http://user:pass@localhost:1455/auth/callback?code=secret&state=secret#done"
+      ),
+      "http://localhost:1455/auth/callback"
+    );
+    assert_eq!(
+      safe_browser_url_for_log("https://auth.openai.com/log-in/password"),
+      "https://auth.openai.com/log-in/password"
+    );
+  }
+
+  #[test]
+  fn whatsapp_phone_fallback_requires_switch_and_continue_signal() {
+    assert!(is_whatsapp_phone_fallback(
+      "We couldn't send a text message to this phone number, so we switched to WhatsApp. Continue to send a verification code on WhatsApp."
+    ));
+    assert!(!is_whatsapp_phone_fallback(
+      "Continue to add your phone number"
+    ));
+    assert!(!is_whatsapp_phone_fallback(
+      "Send a verification code by text message"
+    ));
+  }
+
+  #[test]
   fn submit_probe_never_submits_from_javascript() {
     let js = submit_control_probe_js(r#"button[type="submit"]"#);
 
@@ -4314,6 +4469,15 @@ mod tests {
     assert!(!js.contains(".submit()"));
     assert!(js.contains("__reactProps$"));
     assert!(js.contains("aria-disabled"));
+  }
+
+  #[test]
+  fn email_otp_url_is_classified_separately_from_login_and_totp() {
+    let url = "https://auth.openai.com/mfa-challenge/email-otp?state=test";
+
+    assert_eq!(detect_login_page_type(url), LoginPageType::EmailOtp);
+    assert_ne!(detect_login_page_type(url), LoginPageType::LoginEmail);
+    assert_ne!(detect_login_page_type(url), LoginPageType::TwoFactor);
   }
 
   #[test]
@@ -4419,6 +4583,37 @@ mod tests {
     addr.to_string()
   }
 
+  #[cfg(windows)]
+  #[tokio::test(flavor = "current_thread")]
+  #[serial_test::serial]
+  async fn callback_listener_is_bound_after_child_process_launch() {
+    use std::process::{Command, Stdio};
+
+    let addr = free_callback_test_addr();
+    let (mut child, mut listener) = start_callback_after(
+      async {
+        Command::new("cmd")
+          .args(["/C", "ping -n 4 127.0.0.1 >NUL"])
+          .stdin(Stdio::null())
+          .stdout(Stdio::null())
+          .stderr(Stdio::null())
+          .spawn()
+          .map_err(|error| error.to_string())
+      },
+      &addr,
+    )
+    .await
+    .expect("child must launch before callback listener binds");
+
+    listener.shutdown().await;
+    let rebound = TcpListener::bind(&addr)
+      .await
+      .expect("child must not inherit callback listener handle");
+    drop(rebound);
+    let _ = child.kill();
+    let _ = child.wait();
+  }
+
   #[tokio::test(flavor = "current_thread")]
   #[serial_test::serial]
   async fn callback_shutdown_releases_port_before_retry() {
@@ -4458,11 +4653,11 @@ mod tests {
     tokio::time::timeout(std::time::Duration::from_secs(3), listener.shutdown())
       .await
       .expect("callback shutdown should not wait for the stalled request");
-
-    let rebound = TcpListener::bind(&addr)
-      .await
-      .expect("callback listener must release the port before retry");
-    drop(rebound);
     drop(stalled_client);
+
+    let rebound = OAuthCallbackListener::start_on_addr(&addr)
+      .await
+      .expect("callback listener must retry until Windows releases the port");
+    drop(rebound);
   }
 }

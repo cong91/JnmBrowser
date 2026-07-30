@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 
+use super::sanitize_browser_urls_for_log;
 use super::types::{LoginResult, LoginResultStatus};
 use crate::app_dirs::data_dir;
 
@@ -17,6 +18,12 @@ struct LoginResultStore {
 }
 
 impl LoginResultStore {
+  fn sanitize_step_logs(result: &mut LoginResult) {
+    for line in &mut result.step_logs {
+      *line = sanitize_browser_urls_for_log(line);
+    }
+  }
+
   fn new() -> Self {
     let base_dir = data_dir().join("login_results");
     let _ = fs::create_dir_all(&base_dir);
@@ -34,9 +41,10 @@ impl LoginResultStore {
         let Ok(content) = fs::read_to_string(&path) else {
           continue;
         };
-        let Ok(result) = serde_json::from_str::<LoginResult>(&content) else {
+        let Ok(mut result) = serde_json::from_str::<LoginResult>(&content) else {
           continue;
         };
+        Self::sanitize_step_logs(&mut result);
         let key = Self::result_key(&result);
         // Prefer newer / successful row when multiple files map to same email.
         let replace = match accounts.get(&key) {
@@ -94,7 +102,9 @@ impl LoginResultStore {
   }
 
   fn save(&mut self, result: &LoginResult) {
-    let key = Self::result_key(result);
+    let mut result = result.clone();
+    Self::sanitize_step_logs(&mut result);
+    let key = Self::result_key(&result);
 
     // Drop any previous in-memory entries for the same email under a different key
     // (legacy account_id keys) before inserting the canonical one.
@@ -127,7 +137,7 @@ impl LoginResultStore {
     self.accounts.insert(key.clone(), result.clone());
 
     let file_path = self.base_dir.join(format!("{key}.json"));
-    if let Ok(json) = serde_json::to_string_pretty(result) {
+    if let Ok(json) = serde_json::to_string_pretty(&result) {
       let _ = fs::write(&file_path, json);
     }
   }
@@ -678,6 +688,28 @@ mod tests {
       password: "secret".into(),
       totp_secret: String::new(),
     }
+  }
+
+  #[test]
+  fn step_log_sanitization_preserves_credentials_and_tokens() {
+    let mut result = sample_result(LoginResultStatus::Available, true, "access-sentinel");
+    result.refresh_token = "refresh-sentinel".into();
+    result.password = "password-sentinel".into();
+    result.totp_secret = "totp-sentinel".into();
+    result.step_logs =
+      vec!["callback http://localhost:1455/auth/callback?code=secret&state=secret".into()];
+
+    LoginResultStore::sanitize_step_logs(&mut result);
+
+    assert_eq!(
+      result.step_logs,
+      vec!["callback http://localhost:1455/auth/callback"]
+    );
+    assert_eq!(result.access_token, "access-sentinel");
+    assert_eq!(result.refresh_token, "refresh-sentinel");
+    assert_eq!(result.password, "password-sentinel");
+    assert_eq!(result.totp_secret, "totp-sentinel");
+    assert_eq!(result.account_id, "id-1");
   }
 
   #[test]

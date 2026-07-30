@@ -1,5 +1,6 @@
 import { execSync, execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -70,14 +71,36 @@ function unlockSidecars() {
   }
 }
 
+function filesIdentical(a, b) {
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    if (sa.size !== sb.size) return false;
+    // Same size: compare blake-ish sha1 of full content (sidecars are small, ~4-7MB).
+    const ha = createHash("sha1").update(readFileSync(a)).digest("hex");
+    const hb = createHash("sha1").update(readFileSync(b)).digest("hex");
+    return ha === hb;
+  } catch {
+    return false;
+  }
+}
+
 function copyWithRetry(source, dest, label) {
+  // Avoid rewriting identical sidecar binaries. A no-op mtime bump on
+  // src-tauri/binaries/* forces cargo to re-run build.rs (rerun-if-changed)
+  // and can turn every tauri build into a multi-minute full recompile.
+  if (existsSync(dest) && filesIdentical(source, dest)) {
+    console.log(`Unchanged ${label} → ${dest} (skip copy)`);
+    return false;
+  }
+
   const maxAttempts = 3;
   let lastError;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       copyFileSync(source, dest);
-      return;
+      return true;
     } catch (err) {
       lastError = err;
       const code = err && err.code;
@@ -129,8 +152,9 @@ function copyBinary(baseName) {
   const dest = join(destDir, destName);
 
   if (existsSync(source)) {
-    copyWithRetry(source, dest, binName);
-    console.log(`Copied ${binName} to ${dest}`);
+    if (copyWithRetry(source, dest, binName)) {
+      console.log(`Copied ${binName} to ${dest}`);
+    }
   } else {
     console.log(`Warning: Binary not found at ${source}`);
     console.log(`Building ${baseName} binary...`);
@@ -164,8 +188,9 @@ function copyBinary(baseName) {
     }
 
     if (existsSync(source)) {
-      copyWithRetry(source, dest, binName);
-      console.log(`Built and copied ${binName} to ${dest}`);
+      if (copyWithRetry(source, dest, binName)) {
+        console.log(`Built and copied ${binName} to ${dest}`);
+      }
     } else {
       console.error(`Error: Failed to build ${baseName} binary`);
       process.exit(1);

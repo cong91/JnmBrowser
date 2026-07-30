@@ -8,10 +8,12 @@ interface UseProfileEventsReturn {
   profiles: BrowserProfile[];
   groups: GroupWithCount[];
   runningProfiles: Set<string>;
+  leasedProfiles: Set<string>;
   isLoading: boolean;
   error: string | null;
   loadProfiles: () => Promise<void>;
   loadGroups: () => Promise<void>;
+  loadLeasedProfiles: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -26,6 +28,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
   const [runningProfiles, setRunningProfiles] = useState<Set<string>>(
     new Set(),
   );
+  const [leasedProfiles, setLeasedProfiles] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,6 +45,17 @@ export function useProfileEvents(): UseProfileEventsReturn {
       setError(
         i18n.t("errors.loadProfilesFailed", { error: JSON.stringify(err) }),
       );
+    }
+  }, []);
+
+  const loadLeasedProfiles = useCallback(async () => {
+    try {
+      const profileIds = await invoke<string[]>(
+        "list_automation_leased_profile_ids",
+      );
+      setLeasedProfiles(new Set(profileIds));
+    } catch (err) {
+      console.error("Failed to load automation profile leases:", err);
     }
   }, []);
 
@@ -72,7 +86,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
     const setupListeners = async () => {
       try {
         // Initial load
-        await Promise.all([loadProfiles(), loadGroups()]);
+        await Promise.all([loadProfiles(), loadGroups(), loadLeasedProfiles()]);
 
         // Listen for profile changes (create, delete, rename, update, etc.)
         profilesUnlisten = await listen("profiles-changed", () => {
@@ -81,6 +95,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
           );
           void loadProfiles();
           void loadGroups();
+          void loadLeasedProfiles();
         });
 
         // Listen for profile running state changes
@@ -97,6 +112,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
               }
               return next;
             });
+            void loadLeasedProfiles();
           },
         );
 
@@ -120,11 +136,12 @@ export function useProfileEvents(): UseProfileEventsReturn {
       if (profilesUnlisten) profilesUnlisten();
       if (runningUnlisten) runningUnlisten();
     };
-  }, [loadProfiles, loadGroups]);
+  }, [loadProfiles, loadGroups, loadLeasedProfiles]);
 
   // Sync profile running states periodically to ensure consistency
   useEffect(() => {
     const syncRunningStates = async () => {
+      await loadLeasedProfiles();
       if (profiles.length === 0) return;
 
       try {
@@ -177,16 +194,18 @@ export function useProfileEvents(): UseProfileEventsReturn {
     return () => {
       clearInterval(interval);
     };
-  }, [profiles]);
+  }, [loadLeasedProfiles, profiles]);
 
   return {
     profiles,
     groups,
     runningProfiles,
+    leasedProfiles,
     isLoading,
     error,
     loadProfiles,
     loadGroups,
+    loadLeasedProfiles,
     clearError,
   };
 }

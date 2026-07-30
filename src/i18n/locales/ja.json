@@ -98,6 +98,29 @@
       "copied": "コピーしました"
     }
   },
+  "automationProfile": {
+    "profileLabel": "自動化プロファイル",
+    "generatedWorker": "生成ワーカー",
+    "runningOption": "{{name}} — 実行中",
+    "leasedOption": "{{name}} — 自動化で使用中",
+    "ephemeralData": "使い捨ての一時データ",
+    "ephemeralDescription": "起動ごとに新しい一時データディレクトリを使用し、ブラウザ終了後に削除します。",
+    "persistentData": "永続的な元プロファイルデータ",
+    "persistentDescription": "選択したプロファイルの Cookie とストレージを直接使用するため、サイトによる変更が残る場合があります。",
+    "randomFingerprint": "起動ごとのランダムフィンガープリント",
+    "randomFingerprintDescription": "保存済みプロファイルを変更せず、起動ごとに実行時専用のフィンガープリントを生成します。",
+    "stableFingerprint": "保存済みの固定フィンガープリント",
+    "stableFingerprintDescription": "選択したプロファイルに保存済みのフィンガープリントを使用します。",
+    "ephemeralUnsupported": "選択した Camoufox/Firefox プロファイルには永続データが必要です。一時データはサポートされていません。",
+    "profileConcurrencyOne": "選択したプロファイルはこのタスク専用になるため、CDK の同時実行数は 1 に固定されます。",
+    "errors": {
+      "profileBusy": "このプロファイルは実行中か、別の自動化タスクで使用されています。停止するか、そのタスクの完了を待ってから再試行してください。",
+      "invalidProfile": "選択したプロファイルは利用できないか互換性がありません。停止中の別のプロファイルを選択して再試行してください。",
+      "cleanupFailed": "ブラウザのクリーンアップが完了していません。安全でない再利用を防ぐためプロファイルは予約されたままです。ブラウザを閉じ、クリーンアップ後に再試行してください。",
+      "startFailed": "自動化タスクを開始できませんでした。選択したプロファイルと設定を確認して再試行してください。",
+      "operationFailed": "自動化操作に失敗しました。現在の状態を確認して再試行してください。"
+    }
+  },
   "settings": {
     "title": "設定",
     "appearance": {
@@ -190,7 +213,8 @@
       "recordings": "録画",
       "autoRegister": "ChatGPT 自動登録",
       "smsVerification": "SMS / OTP",
-      "autoLogin": "ChatGPT/Codex ログイン"
+      "autoLogin": "ChatGPT/Codex ログイン",
+      "accountChecker": "ChatGPTアカウントチェッカー"
     },
     "appName": "JnmBrowser"
   },
@@ -1755,6 +1779,103 @@
     "fields": "Fields",
     "selectedCount": "{count} selected",
     "selectAll": "Select all",
+    "twoFactorBackfill": {
+      "action": "2FA を有効化",
+      "actionTooltip": "選択したアカウントの 2FA を有効化",
+      "title": "2 要素認証のバックフィル",
+      "mode": "実行モード",
+      "canary": "カナリア",
+      "bulk": "一括",
+      "canaryRequiresOne": "カナリアモードには対象アカウントが 1 件だけ必要です。",
+      "bulkRequiresCanary": "一括モードには、このブラウザー、メールプロバイダー、ネットワーク経路で成功したカナリアが必要です。",
+      "proxy": "プロキシ",
+      "proxyLoading": "プロキシを読み込み中...",
+      "proxyPlaceholder": "保存済みプロキシを選択",
+      "preview": "選択したアカウント",
+      "eligibilityCount": "{{total}} 件中 {{eligible}} 件が対象",
+      "previewing": "対象条件を確認中...",
+      "unknownAccount": "不明なアカウント",
+      "eligible": "対象",
+      "ineligible": "対象外",
+      "allowFreeTrialNo": "無料トライアルなしのアカウントを許可",
+      "acknowledgeLegacyAccess": "旧形式のアクセスでは手動確認が必要な場合があることを了承します",
+      "recovery": "復旧ジャーナル",
+      "recover": "復旧を確認",
+      "recoveryStates": {
+        "secret_captured": "シークレット取得済み",
+        "remote_confirmed": "リモート確認済み",
+        "manual_review": "手動確認"
+      },
+      "progress": "バックフィルの進行状況",
+      "summaryEnabled": "有効化: {{count}}",
+      "summaryFailed": "失敗: {{count}}",
+      "summaryReview": "要確認: {{count}}",
+      "summaryCancelled": "キャンセル: {{count}}",
+      "backendError": "バックフィル要求に失敗しました。",
+      "task": "バックフィルタスク",
+      "errorCode": "エラー: {{code}}",
+      "retryable": "再試行可能",
+      "terminal": "バックフィルが終了しました",
+      "cancelTooltip": "実行中のバックフィルをキャンセル",
+      "start": "バックフィルを開始",
+      "steps": {
+        "eligibility": "対象条件を確認中",
+        "providerMigration": "プロバイダーメタデータを移行中",
+        "login": "サインイン中",
+        "emailOtp": "メールコードを確認中",
+        "inspectTwoFactor": "2FA 状態を確認中",
+        "captureSecret": "認証アプリを準備中",
+        "confirmTwoFactor": "2FA を確認中",
+        "verifyRemote": "リモート状態を確認中",
+        "persistAccount": "アカウント状態を保存中",
+        "journalComplete": "完了を記録中",
+        "batchPaused": "バッチ一時停止",
+        "cancelled": "キャンセル済み",
+        "completed": "完了",
+        "failed": "失敗"
+      },
+      "outcomes": {
+        "enabled": "有効化済み",
+        "failed": "失敗",
+        "cancelled": "キャンセル済み",
+        "reconciliationRequired": "手動確認が必要",
+        "batchPaused": "バッチ一時停止"
+      },
+      "registrationOutcomes": {
+        "registered": "登録済み",
+        "freeTrialNo": "無料トライアルなし",
+        "registrationFailed": "登録失敗",
+        "batchSummary": "バッチ概要"
+      },
+      "exclusions": {
+        "operatorExcluded": "オペレーターによる除外",
+        "manualReview": "手動確認のため保留"
+      },
+      "reasons": {
+        "accountNotFound": "アカウントが見つかりません。",
+        "missingAccountKey": "アカウントキーがありません。",
+        "registrationUnsuccessful": "登録が成功していません。",
+        "missingEmail": "メールアドレスがありません。",
+        "missingPassword": "必要なアカウントパスワードがありません。",
+        "freeTrialNoOverrideRequired": "このアカウントには無料トライアルがありません。確認が必要です。",
+        "twoFactorAlreadyEnabled": "2FA はすでに有効です。",
+        "inconsistentLocalTwoFactorState": "ローカルの 2FA 状態が一致しません。",
+        "missingCdk": "CDK メタデータがありません。",
+        "unknownCdkPrefix": "CDK プロバイダーのプレフィックスが不明です。",
+        "missingEmailProviderProvenance": "メールプロバイダーの出所がありません。",
+        "legacyAccessAcknowledgementRequired": "旧形式アクセスの確認が必要です。",
+        "accessLocked": "アカウントへのアクセスがロックされています。",
+        "backfillInProgress": "バックフィルはすでに実行中です。",
+        "backfillCompleted": "バックフィルはすでに完了しています。",
+        "reconciliationManualReview": "以前の照合には手動確認が必要です。",
+        "completedOutcomeMissing": "完了したバックフィルの結果がありません。",
+        "inventoryStatusNotAvailable": "在庫ステータスは {{status}} です。",
+        "invalidOutcomeNotEligible": "登録結果が対象外です: {{reason}}。",
+        "explicitlyExcluded": "アカウントは明示的に除外されています: {{reason}}。",
+        "unknownOutcome": "不明な結果",
+        "unknown": "対象外の理由が不明です。"
+      }
+    },
     "proxyRequired": "プロキシモードにはプロキシ ID が必要です。",
     "networkMode": "ネットワーク",
     "networkModeNone": "なし（ホスト IP）",
@@ -1948,5 +2069,28 @@
     "saving": "保存中...",
     "tabSettings": "設定",
     "settingsHint": "ネットワーク・Sub2API・SMS はここで設定。Login タブでは有効化のみ。"
+  },
+  "accountChecker": {
+    "tabs": {
+      "input": "入力",
+      "passed": "合格",
+      "deactivated": "無効化",
+      "unresolved": "未解決"
+    },
+    "credentialsLabel": "認証情報",
+    "credentialsPlaceholder": "email|password|2fa（1行に1件）",
+    "inputCount": "{{count}} 件",
+    "start": "チェック開始",
+    "running": "チェック中...",
+    "cancel": "キャンセル",
+    "noCredentials": "アカウントを入力してください",
+    "startFailed": "チェックを開始できませんでした",
+    "copied": "{{label}}アカウントをコピーしました",
+    "nothingToExport": "エクスポートするアカウントがありません",
+    "noPassed": "合格アカウントなし",
+    "noDeactivated": "無効化アカウントなし",
+    "noUnresolved": "未解決アカウントなし",
+    "exportPassed": "合格をコピー",
+    "exportDeactivated": "無効化をコピー"
   }
 }

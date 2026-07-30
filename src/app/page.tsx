@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrent } from "@tauri-apps/plugin-deep-link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AccountCheckerDialog } from "@/components/account-checker-dialog";
 import { AccountLoginDialog } from "@/components/account-login-dialog";
 import { AccountRegistrationDialog } from "@/components/account-registration-dialog";
 import { CamoufoxConfigDialog } from "@/components/camoufox-config-dialog";
@@ -102,6 +103,8 @@ export default function Home() {
   const [recorderDialogOpen, setRecorderDialogOpen] = useState(false);
   const [autoRegisterDialogOpen, setAutoRegisterDialogOpen] = useState(false);
   const [autoLoginDialogOpen, setAutoLoginDialogOpen] = useState(false);
+  const [accountCheckerDialogOpen, setAccountCheckerDialogOpen] =
+    useState(false);
   const [smsDialogOpen, setSmsDialogOpen] = useState(false);
 
   // Cloud auth for cross-OS unlock
@@ -1124,6 +1127,7 @@ export default function Home() {
             onExtensionManagementDialogOpen={setExtensionManagementDialogOpen}
             onAutoRegisterDialogOpen={setAutoRegisterDialogOpen}
             onAutoLoginDialogOpen={setAutoLoginDialogOpen}
+            onAccountCheckerDialogOpen={setAccountCheckerDialogOpen}
             onRecordingsDialogOpen={setRecorderDialogOpen}
             onSmsDialogOpen={setSmsDialogOpen}
             searchQuery={searchQuery}
@@ -1438,6 +1442,11 @@ export default function Home() {
       <AccountLoginDialog
         open={autoLoginDialogOpen}
         onOpenChange={setAutoLoginDialogOpen}
+      />
+
+      <AccountCheckerDialog
+        open={accountCheckerDialogOpen}
+        onOpenChange={setAccountCheckerDialogOpen}
       />
 
       <SmsVerificationDialog

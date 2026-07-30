@@ -2,9 +2,9 @@
 
 import { useTranslation } from "react-i18next";
 import { LuCheck, LuLoader, LuX } from "react-icons/lu";
+import { registrationProgressLiveRegion } from "@/components/registration-progress-selection";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import type { RegistrationProgress } from "@/hooks/use-registration-events";
 
 interface Props {
@@ -12,49 +12,33 @@ interface Props {
   onCancel?: () => void;
 }
 
-function maskValue(value: string): string {
-  if (!value) return "";
-  if (value.length <= 8) return "••••••••";
-  return `${value.slice(0, 4)}...${value.slice(-4)}`;
-}
-
-function CredentialRow({
-  label,
-  value,
-  masked = false,
-}: {
-  label: string;
-  value: string;
-  masked?: boolean;
-}) {
-  const display = masked ? maskValue(value) : value;
-  if (!display) return null;
-
-  const copy = () => navigator.clipboard.writeText(value);
-
-  return (
-    <div className="flex items-center justify-between py-1 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <button
-        type="button"
-        className="font-mono text-xs hover:underline cursor-pointer"
-        onClick={copy}
-        title={value}
-      >
-        {display}
-      </button>
-    </div>
-  );
+function terminalLabelKey(statusCode: string): string {
+  if (statusCode === "reconciliation_required") {
+    return "registration.twoFactorBackfill.outcomes.reconciliationRequired";
+  }
+  if (statusCode === "completed") {
+    return "registration.twoFactorBackfill.steps.completed";
+  }
+  return "registration.twoFactorBackfill.steps.failed";
 }
 
 export function RegistrationProgressCard({ progress, onCancel }: Props) {
   const { t } = useTranslation();
-
-  const isComplete = progress.result?.success;
-  const isFailed = progress.result && !progress.result.success;
+  const terminal = progress.terminal;
+  const isComplete = terminal?.success === true;
+  const isFailed = terminal?.success === false;
+  const { role, ariaLive } = registrationProgressLiveRegion(progress);
+  const displayMessage = terminal
+    ? t(terminalLabelKey(terminal.statusCode))
+    : progress.message || progress.step;
 
   return (
-    <Card className="w-full overflow-hidden">
+    <Card
+      className="w-full overflow-hidden"
+      role={role}
+      aria-live={ariaLive}
+      aria-atomic="true"
+    >
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm font-medium">
           <span
@@ -74,42 +58,11 @@ export function RegistrationProgressCard({ progress, onCancel }: Props) {
               <LuLoader className="h-4 w-4 animate-spin text-muted-foreground" />
             )}
           </span>
-          <span className="min-w-0 flex-1 truncate">
-            {progress.message || progress.step}
-          </span>
+          <span className="min-w-0 flex-1 truncate">{displayMessage}</span>
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {isComplete && progress.result && (
-          <div className="space-y-1 rounded-lg border bg-muted/20 p-3">
-            <CredentialRow
-              label={t("registration.email")}
-              value={progress.result.email}
-            />
-            <CredentialRow
-              label={t("registration.password")}
-              value={progress.result.password}
-              masked
-            />
-            <CredentialRow
-              label={t("registration.accountId")}
-              value={progress.result.accountId}
-            />
-            <CredentialRow
-              label={t("registration.accessToken")}
-              value={progress.result.accessToken}
-              masked
-            />
-          </div>
-        )}
-
-        {isFailed && (
-          <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">
-            {progress.result?.errorMessage || progress.message}
-          </div>
-        )}
-
-        {!isComplete && !isFailed && onCancel && (
+      {!terminal && onCancel && (
+        <CardContent>
           <Button
             variant="outline"
             size="sm"
@@ -118,23 +71,8 @@ export function RegistrationProgressCard({ progress, onCancel }: Props) {
           >
             {t("common.buttons.cancel")}
           </Button>
-        )}
-
-        {progress.result?.stepLogs && progress.result.stepLogs.length > 0 && (
-          <ScrollArea className="h-28 rounded-lg border">
-            <div className="space-y-0.5 p-2 font-mono text-[11px]">
-              {progress.result.stepLogs.map((log, i) => (
-                <div
-                  key={`${i}-${log.slice(0, 12)}`}
-                  className="text-muted-foreground"
-                >
-                  {log}
-                </div>
-              ))}
-            </div>
-          </ScrollArea>
-        )}
-      </CardContent>
+        </CardContent>
+      )}
     </Card>
   );
 }

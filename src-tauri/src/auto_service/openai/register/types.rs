@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::email::EmailProvider;
+use crate::profile_runtime::{DataMode, FingerprintMode};
 
 /// How auto-registration should exit the network.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -26,10 +27,16 @@ pub struct RegistrationConfig {
   /// List of CDK codes (e.g. ["GMAIL-K4L5-EUW5-PHBV-A6KW", ...])
   pub cdks: Vec<String>,
   /// Optional existing profile ID to reuse as the batch worker.
-  /// When set and found, auto-reg launches this profile (with FP renew + data wipe
-  /// on each relaunch) instead of creating an ephemeral worker. Not deleted at end.
+  /// When set and found, auto-reg launches this profile with the requested runtime
+  /// data/fingerprint policy instead of creating a worker. Not deleted at end.
   /// When unset, one ephemeral worker is created for the whole batch and deleted once.
   pub profile_id: Option<String>,
+  /// Whether runtime browser data is disposable or uses the source profile directory.
+  #[serde(default)]
+  pub data_mode: DataMode,
+  /// Whether each launch gets a new runtime fingerprint or preserves the stored one.
+  #[serde(default)]
+  pub fingerprint_mode: FingerprintMode,
   /// Optional proxy ID to attach (used when `network_mode` is Proxy)
   pub proxy_id: Option<String>,
   /// Optional VPN config ID from Proxies & VPNs (used when `network_mode` is Vpn)
@@ -52,8 +59,8 @@ pub struct RegistrationConfig {
   #[serde(default = "default_concurrency")]
   pub concurrency: u32,
   /// Nord simultaneous WireGuard session budget (device/session limit).
-  /// VPN mode: concurrency is auto-set to this budget (fixed policy max **6**).
-  /// Peer pool size follows it so multi-IP concurrency stays within Nord limits (~10 devices plan; we use 6).
+  /// VPN mode caps the operator-selected concurrency to this budget (fixed policy max **6**).
+  /// Peer pool size follows effective concurrency so multi-IP execution stays within Nord limits.
   #[serde(default = "default_nord_max_sessions")]
   pub nord_max_sessions: u32,
   /// Network mode: none | proxy | vpn | nord
@@ -329,6 +336,42 @@ mod network_config_tests {
   }
 
   #[test]
+  fn registration_config_defaults_to_ephemeral_random_runtime_policy() {
+    let json = r#"{"cdks":["GMAIL-X"]}"#;
+    let config: RegistrationConfig = serde_json::from_str(json).unwrap();
+
+    assert_eq!(
+      config.data_mode,
+      crate::profile_runtime::DataMode::Ephemeral
+    );
+    assert_eq!(
+      config.fingerprint_mode,
+      crate::profile_runtime::FingerprintMode::RandomPerLaunch
+    );
+  }
+
+  #[test]
+  fn registration_config_accepts_explicit_runtime_policy() {
+    let json = r#"{
+      "cdks":["GMAIL-X"],
+      "profileId":"profile-id",
+      "dataMode":"persistent",
+      "fingerprintMode":"stable"
+    }"#;
+    let config: RegistrationConfig = serde_json::from_str(json).unwrap();
+
+    assert_eq!(config.profile_id.as_deref(), Some("profile-id"));
+    assert_eq!(
+      config.data_mode,
+      crate::profile_runtime::DataMode::Persistent
+    );
+    assert_eq!(
+      config.fingerprint_mode,
+      crate::profile_runtime::FingerprintMode::Stable
+    );
+  }
+
+  #[test]
   fn validate_cdks_rejects_blank_codes() {
     let mut c = base_config(NetworkMode::None);
     c.cdks = vec!["GMAIL-X".into(), "  ".into()];
@@ -369,6 +412,8 @@ mod network_config_tests {
     RegistrationConfig {
       cdks: vec!["GMAIL-X".into()],
       profile_id: None,
+      data_mode: DataMode::Ephemeral,
+      fingerprint_mode: FingerprintMode::RandomPerLaunch,
       proxy_id: None,
       vpn_id: None,
       browser_type: "chromium".into(),
@@ -506,6 +551,58 @@ impl AccountInventoryStatus {
   }
 }
 
+/// How the email provider attached to a registration result was determined.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailProviderProvenance {
+  RegistrationConfig,
+  InferredFromCdk,
+}
+
+/// Structured registration outcome used by repair eligibility policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationOutcomeReason {
+  Registered,
+  FreeTrialNo,
+  RegistrationFailed,
+  BatchSummary,
+}
+
+/// Last known account access condition for 2FA repair.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillAccessState {
+  Accessible,
+  Locked,
+}
+
+/// Persisted policy reason preventing automatic 2FA repair.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillExclusion {
+  OperatorExcluded,
+  ManualReview,
+}
+
+/// Persisted lifecycle state for a 2FA repair attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillState {
+  InProgress,
+  Completed,
+}
+
+/// Persisted terminal outcome for a 2FA repair attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFactorBackfillOutcome {
+  Enabled,
+  Failed,
+  Cancelled,
+  ReconciliationRequired,
+}
+
 /// The result of a completed (or failed) registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -546,6 +643,68 @@ pub struct RegistrationResult {
   /// When this account was marked sold/used.
   #[serde(default)]
   pub sold_at: Option<DateTime<Utc>>,
+  /// Email OTP provider used when this account was registered.
+  #[serde(default)]
+  pub email_provider: Option<EmailProvider>,
+  /// Source of the persisted email provider metadata.
+  #[serde(default)]
+  pub email_provider_provenance: Option<EmailProviderProvenance>,
+  /// Structured reason for the registration result status.
+  #[serde(default)]
+  pub registration_outcome_reason: Option<RegistrationOutcomeReason>,
+  /// Last known access condition relevant to 2FA backfill.
+  #[serde(default)]
+  pub two_factor_backfill_access_state: Option<TwoFactorBackfillAccessState>,
+  /// Explicit policy exclusion for 2FA backfill.
+  #[serde(default)]
+  pub two_factor_backfill_exclusion: Option<TwoFactorBackfillExclusion>,
+  /// Persisted lifecycle state of the latest 2FA backfill attempt.
+  #[serde(default)]
+  pub two_factor_backfill_state: Option<TwoFactorBackfillState>,
+  /// Operation that owns the current or most recent 2FA backfill lifecycle.
+  #[serde(default)]
+  pub two_factor_backfill_operation_id: Option<String>,
+  /// Persisted terminal outcome of the latest 2FA backfill attempt.
+  #[serde(default)]
+  pub two_factor_backfill_outcome: Option<TwoFactorBackfillOutcome>,
+  /// Monotonic record version used by later compare-and-update persistence.
+  #[serde(default)]
+  pub record_revision: u64,
+}
+
+#[cfg(test)]
+mod registration_result_tests {
+  use super::*;
+
+  #[test]
+  fn legacy_minimal_json_defaults_backfill_metadata() {
+    let json = r#"{
+      "success": true,
+      "email": "legacy@example.com",
+      "password": "password",
+      "accountId": "account-1",
+      "accessToken": "token",
+      "deviceId": "device-1",
+      "errorMessage": "",
+      "stepLogs": [],
+      "createdAt": "2026-01-01T00:00:00Z",
+      "twoFaEnabled": false,
+      "cdk": "GMAIL-LEGACY",
+      "baseEmail": "legacy@example.com"
+    }"#;
+
+    let result: RegistrationResult = serde_json::from_str(json).unwrap();
+
+    assert_eq!(result.email_provider, None);
+    assert_eq!(result.email_provider_provenance, None);
+    assert_eq!(result.registration_outcome_reason, None);
+    assert_eq!(result.two_factor_backfill_access_state, None);
+    assert_eq!(result.two_factor_backfill_exclusion, None);
+    assert_eq!(result.two_factor_backfill_state, None);
+    assert_eq!(result.two_factor_backfill_operation_id, None);
+    assert_eq!(result.two_factor_backfill_outcome, None);
+    assert_eq!(result.record_revision, 0);
+  }
 }
 
 /// One account attempt recorded under a CDK inventory row.
@@ -677,6 +836,23 @@ impl CdkInventoryRecord {
   }
 }
 
+/// Distinguishes a per-account progress event from the final task summary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RegistrationProgressEventKind {
+  #[default]
+  Account,
+  Batch,
+}
+
+/// Secret-free terminal outcome emitted after persistence has completed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationTerminalSummary {
+  pub success: bool,
+  pub status_code: String,
+}
+
 /// Progress payload emitted to the frontend via Tauri events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -688,5 +864,58 @@ pub struct RegistrationProgress {
   pub step: RegistrationStep,
   pub message: String,
   pub timestamp: DateTime<Utc>,
-  pub result: Option<RegistrationResult>,
+  #[serde(default)]
+  pub event_kind: RegistrationProgressEventKind,
+  pub terminal: Option<RegistrationTerminalSummary>,
+}
+
+#[cfg(test)]
+mod registration_progress_tests {
+  use super::*;
+
+  #[test]
+  fn serialized_progress_has_only_secret_free_fields() {
+    let progress = RegistrationProgress {
+      task_id: "task-1".into(),
+      cdk_index: 0,
+      alias_index: 0,
+      total_cdks: 1,
+      step: RegistrationStep::Completed,
+      message: "completed".into(),
+      timestamp: Utc::now(),
+      event_kind: RegistrationProgressEventKind::Account,
+      terminal: Some(RegistrationTerminalSummary {
+        success: true,
+        status_code: "completed".into(),
+      }),
+    };
+
+    let value = serde_json::to_value(progress).unwrap();
+    let mut keys: Vec<_> = value
+      .as_object()
+      .unwrap()
+      .keys()
+      .map(String::as_str)
+      .collect();
+    keys.sort_unstable();
+
+    assert_eq!(
+      keys,
+      [
+        "aliasIndex",
+        "cdkIndex",
+        "eventKind",
+        "message",
+        "step",
+        "taskId",
+        "terminal",
+        "timestamp",
+        "totalCdks",
+      ]
+    );
+    assert_eq!(
+      value["terminal"],
+      serde_json::json!({ "success": true, "statusCode": "completed" })
+    );
+  }
 }

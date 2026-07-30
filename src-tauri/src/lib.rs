@@ -38,6 +38,7 @@ mod ip_utils;
 mod platform_browser;
 pub mod profile;
 mod profile_importer;
+pub mod profile_runtime;
 mod proxy_manager;
 pub mod proxy_runner;
 pub mod proxy_server;
@@ -69,6 +70,8 @@ pub mod vpn_worker_storage;
 use browser_runner::{
   check_browser_exists, kill_browser_profile, launch_browser_profile, open_url_with_profile,
 };
+
+use profile_runtime::list_automation_leased_profile_ids;
 
 use profile::manager::{
   check_browser_status, clone_profile, create_browser_profile_new, delete_profile,
@@ -2347,6 +2350,7 @@ pub fn run() {
       check_browser_exists,
       create_browser_profile_new,
       list_browser_profiles,
+      list_automation_leased_profile_ids,
       launch_browser_profile,
       fetch_browser_versions_with_count,
       fetch_browser_versions_cached_first,
@@ -2524,7 +2528,9 @@ pub fn run() {
       dns_blocklist::refresh_dns_blocklists,
       // OpenAI auto-registration (auto_service::openai::register)
       auto_service::openai::register::commands::start_auto_registration,
+      auto_service::openai::register::commands::start_parallel_registration,
       auto_service::openai::register::commands::cancel_registration,
+      auto_service::openai::register::commands::cancel_parallel_registration,
       auto_service::openai::register::commands::list_registered_accounts_cmd,
       auto_service::openai::register::commands::delete_registered_account_cmd,
       auto_service::openai::register::commands::update_registered_account_status_cmd,
@@ -2541,6 +2547,19 @@ pub fn run() {
       auto_service::openai::login::commands::update_login_result_fields_cmd,
       auto_service::openai::login::commands::export_login_results_cmd,
       auto_service::openai::login::commands::push_login_results_to_sub2api_cmd,
+      // OpenAI 2FA backfill repair (auto_service::openai::two_factor_backfill)
+      auto_service::openai::two_factor_backfill::commands::preview_two_factor_backfill,
+      auto_service::openai::two_factor_backfill::commands::start_two_factor_backfill,
+      auto_service::openai::two_factor_backfill::commands::cancel_two_factor_backfill,
+      auto_service::openai::two_factor_backfill::commands::list_two_factor_backfill_recovery,
+      auto_service::openai::two_factor_backfill::commands::recover_two_factor_backfill_journal,
+      // OpenAI account checker (auto_service::openai::account_checker)
+      auto_service::openai::account_checker::commands::start_openai_account_check,
+      auto_service::openai::account_checker::commands::cancel_openai_account_check,
+      auto_service::openai::account_checker::commands::list_openai_account_check_results,
+      auto_service::openai::account_checker::commands::delete_openai_account_check_result,
+      auto_service::openai::account_checker::commands::export_passed_accounts,
+      auto_service::openai::account_checker::commands::export_deactivated_accounts,
       // Sub2API settings commands
       settings_manager::get_sub2api_settings_cmd,
       settings_manager::set_sub2api_settings_cmd,
@@ -2640,6 +2659,15 @@ mod tests {
       "cloud_get_proxy_usage",
       // Action recorder: full recording payload is used by MCP / future UI
       "get_recording",
+      // 2FA backfill: operator workflow and secret-free recovery commands
+      "preview_two_factor_backfill",
+      "start_two_factor_backfill",
+      "cancel_two_factor_backfill",
+      "list_two_factor_backfill_recovery",
+      "recover_two_factor_backfill_journal",
+      // Parallel batch registration (used by CLI + future UI)
+      "start_parallel_registration",
+      "cancel_parallel_registration",
     ];
 
     // Extract command names from the generate_handler! macro in this file

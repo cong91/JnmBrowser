@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  AutomationDataMode,
+  AutomationFingerprintMode,
+} from "@/components/automation-profile-policy";
+import { upsertLoginProgress } from "@/components/login-progress-selection";
 
 export interface LoginProgress {
   taskId: string;
@@ -9,7 +14,11 @@ export interface LoginProgress {
   step: string;
   message: string;
   timestamp: string;
-  result?: LoginResult;
+  eventKind: "account" | "batch";
+  terminal?: {
+    success: boolean;
+    statusCode: string;
+  } | null;
 }
 
 export interface LoginResult {
@@ -40,6 +49,9 @@ export type LoginNetworkMode = "none" | "proxy" | "vpn" | "nord";
 export interface LoginConfig {
   credentialsText: string;
   credentials: Array<{ email: string; password: string; totpSecret: string }>;
+  profileId?: string;
+  dataMode: AutomationDataMode;
+  fingerprintMode: AutomationFingerprintMode;
   browserType: "chromium" | "camoufox";
   maxRetries: number;
   headless: boolean;
@@ -68,6 +80,10 @@ export function useLoginEvents() {
   );
   const [accounts, setAccounts] = useState<LoginResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const listenerPromiseRef = useRef<Promise<void> | null>(null);
+  const listenerGenerationRef = useRef(0);
+  const unlistenRef = useRef<UnlistenFn | null>(null);
+  const disposedRef = useRef(false);
 
   const refreshAccounts = useCallback(async () => {
     try {
@@ -78,46 +94,66 @@ export function useLoginEvents() {
     }
   }, []);
 
+  const ensureListener = useCallback(async () => {
+    if (!listenerPromiseRef.current) {
+      const generation = ++listenerGenerationRef.current;
+      listenerPromiseRef.current = listen<LoginProgress>(
+        "login-progress",
+        (event) => {
+          const progress = event.payload;
+          setProgressMap((prev) => upsertLoginProgress(prev, progress));
+          if (progress.terminal) {
+            void refreshAccounts();
+          }
+        },
+      )
+        .then((unlisten) => {
+          if (
+            disposedRef.current ||
+            generation !== listenerGenerationRef.current
+          ) {
+            unlisten();
+          } else {
+            unlistenRef.current = unlisten;
+          }
+        })
+        .catch((error) => {
+          if (generation === listenerGenerationRef.current) {
+            listenerPromiseRef.current = null;
+          }
+          throw error;
+        });
+    }
+    await listenerPromiseRef.current;
+  }, [refreshAccounts]);
+
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
-    let cancelled = false;
-
-    void listen<LoginProgress>("login-progress", (event) => {
-      const progress = event.payload;
-      setProgressMap((prev) => {
-        const newMap = new Map(prev);
-        newMap.set(progress.taskId, progress);
-        return newMap;
-      });
-      if (progress.result) {
-        void refreshAccounts();
-      }
-    }).then((fn) => {
-      if (cancelled) {
-        fn();
-      } else {
-        unlistenFn = fn;
-      }
+    disposedRef.current = false;
+    void ensureListener().catch((error) => {
+      console.error("Failed to listen for login progress:", error);
     });
-
     void refreshAccounts();
 
     return () => {
-      cancelled = true;
-      unlistenFn?.();
+      disposedRef.current = true;
+      listenerGenerationRef.current += 1;
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      listenerPromiseRef.current = null;
     };
-  }, [refreshAccounts]);
+  }, [ensureListener, refreshAccounts]);
 
   const startLogin = useCallback(
     async (config: LoginConfig): Promise<string> => {
       setLoading(true);
       try {
+        await ensureListener();
         return await invoke<string>("start_auto_login", { config });
       } finally {
         setLoading(false);
       }
     },
-    [],
+    [ensureListener],
   );
 
   const cancelLogin = useCallback(async (taskId: string) => {

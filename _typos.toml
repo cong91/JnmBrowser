@@ -1,5 +1,11 @@
 [files]
 extend-exclude = [
+    ".zcode/memory.db",
+    ".zcode/state/*",
+    "NUL",
+    "src-tauri/.zcode/memory.db",
+    "src-tauri/.zcode/state/*",
+    "src-tauri/nul",
     "src-tauri/src/camoufox/data/*.json",
     "src-tauri/src/camoufox/data/*.xml",
     "src/i18n/locales/*.json",

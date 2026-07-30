@@ -1,6 +1,6 @@
 [package]
 name = "JnmBrowser"
-version = "0.22.10"
+version = "0.22.11"
 description = "Simple Yet Powerful Anti-Detect Browser"
 authors = ["zhom@github"]
 edition = "2021"
@@ -22,23 +22,41 @@ path = "src/main.rs"
 
 [[bin]]
 name = "donut-proxy"
-path = "src/bin/proxy_server.rs"
+path = "src/sidecar/proxy_server.rs"
 
 [[bin]]
 name = "donut-daemon"
-path = "src/bin/donut_daemon.rs"
+path = "src/sidecar/donut_daemon.rs"
 
 [[bin]]
 name = "auto-reg-live"
-path = "src/bin/auto_reg_live.rs"
+path = "src/harness/auto_reg_live.rs"
+required-features = ["auto-reg-live"]
 
 [[bin]]
 name = "auto-login-live"
-path = "src/bin/auto_login_live.rs"
+path = "src/harness/auto_login_live.rs"
+required-features = ["auto-login-live"]
+
+[[bin]]
+name = "twofa-backfill-live"
+path = "src/harness/twofa_backfill_live.rs"
+required-features = ["twofa-backfill-live"]
 
 [[bin]]
 name = "probe-free-trial"
-path = "src/bin/probe_free_trial.rs"
+path = "src/harness/probe_free_trial.rs"
+required-features = ["probe-free-trial"]
+
+[[bin]]
+name = "download-chromium"
+path = "src/harness/download_chromium.rs"
+required-features = ["download-chromium"]
+
+[[bin]]
+name = "account-check-live"
+path = "src/harness/account_check_live.rs"
+required-features = ["account-checker-live"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -190,7 +208,9 @@ opt-level = 0
 split-debuginfo = "unpacked"
 
 [profile.release]
-codegen-units = 1
+# Keep thin LTO but allow parallel code generation. A single unit made the
+# JnmBrowser/link step take 4-11 minutes on a 28-thread / 32 GB machine.
+codegen-units = 16
 opt-level = 3
 lto = "thin"
 # Split debuginfo on macOS for faster linking (ignored on other platforms)
@@ -208,3 +228,11 @@ default = ["custom-protocol"]
 # this feature is used used for production builds where `devPath` points to the filesystem
 # DO NOT remove this
 custom-protocol = ["tauri/custom-protocol"]
+# Dev/harness binaries — not shipped in the installer. Keep them behind features
+# so `pnpm tauri build` compiles only the JnmBrowser application binary.
+auto-reg-live = []
+auto-login-live = []
+twofa-backfill-live = []
+account-checker-live = []
+probe-free-trial = []
+download-chromium = []

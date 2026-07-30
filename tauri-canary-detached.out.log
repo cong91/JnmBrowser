@@ -1,0 +1,677 @@
+
+> JnmBrowser@0.22.10 tauri C:\Users\mrc\Documents\projects\JnmBrowser
+> tauri "dev"
+
+
+> JnmBrowser@0.22.10 copy-proxy-binary C:\Users\mrc\Documents\projects\JnmBrowser
+> node src-tauri/copy-proxy-binary.mjs
+
+Copied donut-proxy.exe to C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\binaries\donut-proxy-x86_64-pc-windows-msvc.exe
+Copied donut-daemon.exe to C:\Users\mrc\Documents\projects\JnmBrowser\src-tauri\binaries\donut-daemon-x86_64-pc-windows-msvc.exe
+
+> JnmBrowser@0.22.10 dev C:\Users\mrc\Documents\projects\JnmBrowser
+> next dev --webpack -p 12341
+
+▲ Next.js 16.2.3 (webpack)
+- Local:         http://localhost:12341
+- Network:       http://10.5.0.2:12341
+✓ Ready in 4.8s
+
+[2026-07-24 17:03:09.649][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 0ccc1bb2-2a07-4bf2-bd5f-cabc1991f4e0
+[2026-07-24 17:03:09.651][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 2d6ff831-2b94-4097-b7c5-5daecc81944c
+[2026-07-24 17:03:09.651][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 38211efc-0e9b-403f-a8da-9b91aafc96b6
+[2026-07-24 17:03:09.651][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 3fa385ba-c236-4735-8dcd-456ac2258b65
+[2026-07-24 17:03:09.652][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 408017c2-ea81-4a4c-a5df-e684e8dd4a8b
+[2026-07-24 17:03:09.652][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 4192dbad-b353-4af3-a025-f14a3e648138
+[2026-07-24 17:03:09.652][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 5d83fb24-d4f5-43ed-97a8-d8c5d1bec848
+[2026-07-24 17:03:09.652][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 65b24316-d050-4d37-9509-8a73cdd9643b
+[2026-07-24 17:03:09.653][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd1ec8d-07a7-4634-a988-9c48fc9f3556
+[2026-07-24 17:03:09.653][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd8beaf-0a53-4aa0-9dfe-03d9cf3ab31c
+[2026-07-24 17:03:09.653][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8ff6709b-9000-4765-8ead-cce8983a350c
+[2026-07-24 17:03:09.653][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 91f48ed9-44c8-4040-8a15-d47fe2665e27
+[2026-07-24 17:03:09.654][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 969f8d40-f620-44a7-88e9-eaec0eb3b0ec
+[2026-07-24 17:03:09.654][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 979e50d2-989c-413c-9b79-22933432eb13
+[2026-07-24 17:03:09.654][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c16ddb01-1da2-44da-a902-6ffb78959ab2
+[2026-07-24 17:03:09.654][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c48d6a82-0ff6-4c13-9317-d0114343aa72
+[2026-07-24 17:03:09.654][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile f49096a5-9b59-49b3-a089-a76a4f0e71ce
+[2026-07-24 17:03:09.655][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile fce32569-2f37-4891-9f9c-b53403195d95
+[2026-07-24 17:03:10.044][donutbrowser_lib][INFO] Background browser version update service is disabled
+[2026-07-24 17:03:10.424][donutbrowser_lib][INFO] Startup browser auto-update check is disabled
+[2026-07-24 17:03:10.425][donutbrowser_lib][INFO] Background app auto-update service is disabled
+[2026-07-24 17:03:10.425][donutbrowser_lib::sync::scheduler][INFO] Starting initial sync for all enabled profiles...
+[2026-07-24 17:03:10.428][donutbrowser_lib][WARN] Sync not configured, skipping missing profile check: Sync server URL not configured
+[2026-07-24 17:03:10.428][donutbrowser_lib][INFO] Sync scheduler started
+[2026-07-24 17:03:10.439][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:03:10.439][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+○ Compiling / ...
+ GET / 200 in 16.6s (next.js: 15.3s, application-code: 1233ms)
+ GET / 200 in 52ms (next.js: 29ms, application-code: 23ms)
+ GET / 200 in 12ms (next.js: 2ms, application-code: 10ms)
+[2026-07-24 17:04:40.908][donutbrowser_lib::profile::manager][INFO] Attempting to create profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+[2026-07-24 17:04:40.915][donutbrowser_lib::profile::manager][INFO] Generating fingerprint for Chromium profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+ GET / 200 in 15ms (next.js: 3ms, application-code: 11ms)
+[2026-07-24 17:04:41.937][donutbrowser_lib::chromium_manager][INFO] Generated fingerprint-chromium config for OS: windows, fields: Some(["browserBrand", "browserVersion", "hardwareConcurrency", "language", "languages", "latitude", "longitude", "platform", "seed", "timezone"])
+[2026-07-24 17:04:41.938][donutbrowser_lib::profile::manager][INFO] Successfully generated fingerprint for Chromium profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+[2026-07-24 17:04:41.952][donutbrowser_lib::profile::manager][INFO] Profile 'twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019' created successfully with ID: 31e4ded2-3460-40c9-b687-244535228331
+[2026-07-24 17:04:41.953][donutbrowser_lib::browser_runner][INFO] Starting local proxy for Chromium profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019 (upstream: DIRECT)
+[2026-07-24 17:04:41.955][donutbrowser_lib::proxy_runner][INFO] Saved proxy config proxy_1784887481_3557676724 with profile_id: 31e4ded2-3460-40c9-b687-244535228331
+[2026-07-24 17:04:41.956][donutbrowser_lib::proxy_runner][INFO] Proxy worker stderr will be logged to: "C:\\Users\\mrc\\AppData\\Local\\Temp\\donut-proxy-proxy_1784887481_3557676724.log"
+[2026-07-24 17:04:43.155][donutbrowser_lib::browser_runner][INFO] Configured local proxy for Chromium: Some("http://127.0.0.1:64797")
+[2026-07-24 17:04:43.156][donutbrowser_lib::browser_runner][INFO] Generating random fingerprint for Chromium profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+[2026-07-24 17:04:43.566][donutbrowser_lib::chromium_manager][INFO] Generated fingerprint-chromium config for OS: windows, fields: Some(["browserBrand", "browserVersion", "hardwareConcurrency", "language", "languages", "latitude", "longitude", "platform", "seed", "timezone"])
+[2026-07-24 17:04:43.566][donutbrowser_lib::browser_runner][INFO] New fingerprint generated, length: 226 chars
+[2026-07-24 17:04:43.567][donutbrowser_lib::browser_runner][INFO] Updated profile chromium_config with new fingerprint for profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019, fingerprint length: 226
+[2026-07-24 17:04:43.569][donutbrowser_lib::ephemeral_dirs][INFO] Created ephemeral dir for profile 31e4ded2-3460-40c9-b687-244535228331: C:\Users\mrc\AppData\Local\Temp\donut-ephemeral\31e4ded2-3460-40c9-b687-244535228331
+[2026-07-24 17:04:43.570][donutbrowser_lib::browser_runner][INFO] Launching Chromium for profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+[2026-07-24 17:04:44.213][donutbrowser_lib::chromium_manager][INFO] Launching Chromium on CDP port 64802 (detached)
+[2026-07-24 17:04:44.734][donutbrowser_lib::chromium_manager][INFO] CDP ready on port 64802 after 0 attempts
+[2026-07-24 17:04:44.735][donutbrowser_lib::chromium_manager][INFO] Found 1 CDP targets
+[2026-07-24 17:04:44.735][donutbrowser_lib::chromium_manager][INFO] Found 1 page targets
+[2026-07-24 17:04:44.742][donutbrowser_lib::chromium_manager][INFO] fingerprint-chromium launch args were derived from stored fingerprint (226 chars)
+[2026-07-24 17:04:44.742][donutbrowser_lib::chromium_manager][INFO] Navigating to URL via CDP: about:blank
+[2026-07-24 17:04:47.798][donutbrowser_lib::browser_runner][INFO] Chromium launched successfully with PID: 222840
+[2026-07-24 17:04:47.798][donutbrowser_lib::browser_runner][INFO] Updated proxy PID mapping from temp (2000000000) to actual PID: 222840
+[2026-07-24 17:04:47.799][donutbrowser_lib::browser_runner][INFO] Saving profile twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019 with chromium_config fingerprint length: 226
+[2026-07-24 17:04:47.816][donutbrowser_lib::browser_runner][INFO] Successfully saved profile with process info: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+[2026-07-24 17:04:47.817][donutbrowser_lib::browser_runner][INFO] Emitting profile events for successful Chromium launch: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+[2026-07-24 17:04:47.817][donutbrowser_lib::browser_runner][INFO] Successfully emitted profile-running-changed event for Chromium twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019: running=true
+[2026-07-24 17:04:49.894][donutbrowser_lib::browser_runner][INFO] Attempting to kill Chromium process for profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019 (ID: 31e4ded2-3460-40c9-b687-244535228331)
+[2026-07-24 17:04:54.415][donutbrowser_lib::browser_runner][INFO] Found Chromium process: 8520ca08-6a6c-4fb3-b909-f8202c17d262 (PID: Some(222840))
+[2026-07-24 17:04:54.416][donutbrowser_lib::chromium_manager][INFO] Cleaning up Chromium instance 8520ca08-6a6c-4fb3-b909-f8202c17d262
+[2026-07-24 17:04:55.508][donutbrowser_lib::chromium_manager][INFO] Stopped Chromium instance 8520ca08-6a6c-4fb3-b909-f8202c17d262 (PID: 222840)
+[2026-07-24 17:04:56.205][donutbrowser_lib::browser_runner][INFO] Successfully stopped Chromium process: 8520ca08-6a6c-4fb3-b909-f8202c17d262 (PID: 222840) - verified process is dead
+[2026-07-24 17:04:56.214][donutbrowser_lib::browser_runner][INFO] Emitting profile events for successful Chromium kill: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019
+[2026-07-24 17:04:56.215][donutbrowser_lib::browser_runner][INFO] Successfully emitted profile-running-changed event for Chromium twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019: running=false
+[2026-07-24 17:04:56.269][donutbrowser_lib::ephemeral_dirs][INFO] Removed ephemeral dir for profile 31e4ded2-3460-40c9-b687-244535228331: C:\Users\mrc\AppData\Local\Temp\donut-ephemeral\31e4ded2-3460-40c9-b687-244535228331
+[2026-07-24 17:04:56.270][donutbrowser_lib::browser_runner][INFO] Chromium process cleanup completed for profile: twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019 (ID: 31e4ded2-3460-40c9-b687-244535228331)
+[2026-07-24 17:04:56.270][donutbrowser_lib::downloaded_browsers_registry][INFO] Starting browser version consolidation...
+[2026-07-24 17:04:56.278][donutbrowser_lib::downloaded_browsers_registry][INFO] Latest available version for chromium: 142.0.7444.175
+[2026-07-24 17:04:56.280][donutbrowser_lib::downloaded_browsers_registry][INFO] Browser version consolidation completed: 0 actions taken
+[2026-07-24 17:04:56.280][donutbrowser_lib::profile::manager][INFO] Attempting to delete profile with ID: 31e4ded2-3460-40c9-b687-244535228331
+[2026-07-24 17:04:56.286][donutbrowser_lib::profile::manager][INFO] Deleting profile directory: C:\Users\mrc\AppData\Local\JnmBrowser\profiles\31e4ded2-3460-40c9-b687-244535228331
+[2026-07-24 17:04:56.287][donutbrowser_lib::profile::manager][INFO] Profile directory deleted successfully
+[2026-07-24 17:04:56.287][donutbrowser_lib::profile::manager][INFO] Profile 'twofa-backfill-worker-77004eaf-4310-4ba4-946a-a9ff7087b019' (ID: 31e4ded2-3460-40c9-b687-244535228331) deleted successfully
+[2026-07-24 17:04:56.297][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:04:56.298][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+ GET / 200 in 38ms (next.js: 2ms, application-code: 36ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 12ms (next.js: 2ms, application-code: 10ms)
+ GET / 200 in 10ms (next.js: 1711µs, application-code: 8ms)
+ GET / 200 in 24ms (next.js: 6ms, application-code: 18ms)
+ GET / 200 in 23ms (next.js: 4ms, application-code: 19ms)
+ GET / 200 in 25ms (next.js: 5ms, application-code: 20ms)
+ GET / 200 in 24ms (next.js: 4ms, application-code: 20ms)
+ GET / 200 in 17ms (next.js: 4ms, application-code: 14ms)
+ GET / 200 in 70ms (next.js: 3ms, application-code: 67ms)
+ GET / 200 in 18ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 65ms (next.js: 3ms, application-code: 62ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 35ms (next.js: 1704µs, application-code: 34ms)
+ GET / 200 in 11ms (next.js: 1551µs, application-code: 9ms)
+ GET / 200 in 13ms (next.js: 1813µs, application-code: 11ms)
+ GET / 200 in 46ms (next.js: 1654µs, application-code: 45ms)
+ GET / 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET / 200 in 35ms (next.js: 1994µs, application-code: 33ms)
+ GET / 200 in 9ms (next.js: 1575µs, application-code: 8ms)
+ GET / 200 in 22ms (next.js: 1776µs, application-code: 20ms)
+ GET / 200 in 11ms (next.js: 1689µs, application-code: 9ms)
+ GET / 200 in 33ms (next.js: 1672µs, application-code: 31ms)
+ GET / 200 in 13ms (next.js: 1390µs, application-code: 11ms)
+[2026-07-24 17:11:34.597][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 0ccc1bb2-2a07-4bf2-bd5f-cabc1991f4e0
+[2026-07-24 17:11:34.599][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 2d6ff831-2b94-4097-b7c5-5daecc81944c
+[2026-07-24 17:11:34.599][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 38211efc-0e9b-403f-a8da-9b91aafc96b6
+[2026-07-24 17:11:34.599][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 3fa385ba-c236-4735-8dcd-456ac2258b65
+[2026-07-24 17:11:34.599][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 408017c2-ea81-4a4c-a5df-e684e8dd4a8b
+[2026-07-24 17:11:34.600][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 4192dbad-b353-4af3-a025-f14a3e648138
+[2026-07-24 17:11:34.600][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 5d83fb24-d4f5-43ed-97a8-d8c5d1bec848
+[2026-07-24 17:11:34.600][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 65b24316-d050-4d37-9509-8a73cdd9643b
+[2026-07-24 17:11:34.600][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd1ec8d-07a7-4634-a988-9c48fc9f3556
+[2026-07-24 17:11:34.600][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd8beaf-0a53-4aa0-9dfe-03d9cf3ab31c
+[2026-07-24 17:11:34.600][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8ff6709b-9000-4765-8ead-cce8983a350c
+[2026-07-24 17:11:34.600][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 91f48ed9-44c8-4040-8a15-d47fe2665e27
+[2026-07-24 17:11:34.601][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 969f8d40-f620-44a7-88e9-eaec0eb3b0ec
+[2026-07-24 17:11:34.601][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 979e50d2-989c-413c-9b79-22933432eb13
+[2026-07-24 17:11:34.601][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c16ddb01-1da2-44da-a902-6ffb78959ab2
+[2026-07-24 17:11:34.601][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c48d6a82-0ff6-4c13-9317-d0114343aa72
+[2026-07-24 17:11:34.602][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile f49096a5-9b59-49b3-a089-a76a4f0e71ce
+[2026-07-24 17:11:34.602][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile fce32569-2f37-4891-9f9c-b53403195d95
+[2026-07-24 17:11:34.964][donutbrowser_lib][INFO] Background browser version update service is disabled
+ GET / 200 in 55ms (next.js: 4ms, application-code: 50ms)
+[2026-07-24 17:11:35.128][donutbrowser_lib][INFO] Startup browser auto-update check is disabled
+[2026-07-24 17:11:35.128][donutbrowser_lib][INFO] Background app auto-update service is disabled
+[2026-07-24 17:11:35.128][donutbrowser_lib::sync::scheduler][INFO] Starting initial sync for all enabled profiles...
+[2026-07-24 17:11:35.131][donutbrowser_lib][WARN] Sync not configured, skipping missing profile check: Sync server URL not configured
+[2026-07-24 17:11:35.131][donutbrowser_lib][INFO] Sync scheduler started
+[2026-07-24 17:11:35.148][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:11:35.149][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+ GET / 200 in 15ms (next.js: 1859µs, application-code: 13ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 13ms)
+ GET / 200 in 13ms (next.js: 1877µs, application-code: 11ms)
+ GET / 200 in 17ms (next.js: 1555µs, application-code: 15ms)
+ GET / 200 in 15ms (next.js: 1453µs, application-code: 14ms)
+ GET / 200 in 12ms (next.js: 1831µs, application-code: 11ms)
+ GET / 200 in 12ms (next.js: 1626µs, application-code: 10ms)
+ GET / 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET / 200 in 11ms (next.js: 3ms, application-code: 8ms)
+ GET / 200 in 15ms (next.js: 3ms, application-code: 12ms)
+ GET / 200 in 19ms (next.js: 3ms, application-code: 16ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 27ms (next.js: 4ms, application-code: 23ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 24ms (next.js: 4ms, application-code: 20ms)
+ GET / 200 in 21ms (next.js: 3ms, application-code: 18ms)
+ GET / 200 in 24ms (next.js: 4ms, application-code: 20ms)
+ GET / 200 in 22ms (next.js: 3ms, application-code: 19ms)
+ GET / 200 in 20ms (next.js: 3ms, application-code: 18ms)
+ GET / 200 in 26ms (next.js: 3ms, application-code: 23ms)
+ GET / 200 in 18ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 20ms (next.js: 3ms, application-code: 17ms)
+ GET / 200 in 22ms (next.js: 3ms, application-code: 20ms)
+ GET / 200 in 22ms (next.js: 3ms, application-code: 20ms)
+ GET / 200 in 26ms (next.js: 4ms, application-code: 22ms)
+ GET / 200 in 19ms (next.js: 3ms, application-code: 16ms)
+ GET / 200 in 22ms (next.js: 3ms, application-code: 19ms)
+ GET / 200 in 26ms (next.js: 3ms, application-code: 24ms)
+ GET / 200 in 89ms (next.js: 3ms, application-code: 86ms)
+ GET / 200 in 87ms (next.js: 3ms, application-code: 84ms)
+ GET / 200 in 20ms (next.js: 3ms, application-code: 17ms)
+ GET / 200 in 115ms (next.js: 2ms, application-code: 113ms)
+ GET / 200 in 22ms (next.js: 3ms, application-code: 19ms)
+ GET / 200 in 21ms (next.js: 3ms, application-code: 18ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 70ms (next.js: 2ms, application-code: 68ms)
+ GET / 200 in 21ms (next.js: 2ms, application-code: 19ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 18ms (next.js: 2ms, application-code: 16ms)
+ GET / 200 in 20ms (next.js: 2ms, application-code: 17ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 18ms (next.js: 2ms, application-code: 16ms)
+ GET / 200 in 18ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 18ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 20ms (next.js: 3ms, application-code: 18ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 20ms (next.js: 3ms, application-code: 18ms)
+ GET / 200 in 25ms (next.js: 5ms, application-code: 20ms)
+ GET / 200 in 29ms (next.js: 5ms, application-code: 24ms)
+ GET / 200 in 21ms (next.js: 3ms, application-code: 17ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 22ms (next.js: 3ms, application-code: 19ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 14ms (next.js: 1503µs, application-code: 12ms)
+ GET / 200 in 35ms (next.js: 1476µs, application-code: 34ms)
+ GET / 200 in 11ms (next.js: 1816µs, application-code: 9ms)
+ GET / 200 in 10ms (next.js: 1649µs, application-code: 8ms)
+ GET / 200 in 14ms (next.js: 1465µs, application-code: 12ms)
+ GET / 200 in 13ms (next.js: 1475µs, application-code: 11ms)
+ GET / 200 in 15ms (next.js: 2ms, application-code: 13ms)
+ GET / 200 in 12ms (next.js: 1917µs, application-code: 10ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 11ms)
+ GET / 200 in 10ms (next.js: 1504µs, application-code: 9ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 1625µs, application-code: 13ms)
+ GET / 200 in 10ms (next.js: 1783µs, application-code: 8ms)
+ GET / 200 in 14ms (next.js: 1438µs, application-code: 13ms)
+ GET / 200 in 14ms (next.js: 1545µs, application-code: 12ms)
+ GET / 200 in 13ms (next.js: 1735µs, application-code: 11ms)
+ GET / 200 in 11ms (next.js: 1404µs, application-code: 9ms)
+ GET / 200 in 12ms (next.js: 1737µs, application-code: 10ms)
+ GET / 200 in 49ms (next.js: 2ms, application-code: 47ms)
+ GET / 200 in 15ms (next.js: 1567µs, application-code: 13ms)
+ GET / 200 in 10ms (next.js: 1478µs, application-code: 8ms)
+ GET / 200 in 11ms (next.js: 1661µs, application-code: 9ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 3ms, application-code: 10ms)
+ GET / 200 in 14ms (next.js: 1855µs, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 11ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 14ms (next.js: 1467µs, application-code: 13ms)
+ GET / 200 in 13ms (next.js: 1907µs, application-code: 12ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 13ms)
+ GET / 200 in 13ms (next.js: 1787µs, application-code: 11ms)
+ GET / 200 in 14ms (next.js: 1821µs, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 1888µs, application-code: 12ms)
+ GET / 200 in 10ms (next.js: 1573µs, application-code: 8ms)
+ GET / 200 in 14ms (next.js: 1909µs, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 1499µs, application-code: 12ms)
+ GET / 200 in 10ms (next.js: 1545µs, application-code: 8ms)
+ GET / 200 in 19ms (next.js: 3ms, application-code: 16ms)
+ GET / 200 in 35ms (next.js: 2ms, application-code: 32ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 13ms)
+ GET / 200 in 31ms (next.js: 2ms, application-code: 29ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 15ms (next.js: 2ms, application-code: 13ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 19ms (next.js: 3ms, application-code: 16ms)
+ GET / 200 in 19ms (next.js: 3ms, application-code: 16ms)
+ GET / 200 in 85ms (next.js: 3ms, application-code: 82ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 72ms (next.js: 3ms, application-code: 70ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 11ms (next.js: 1659µs, application-code: 10ms)
+ GET / 200 in 15ms (next.js: 2ms, application-code: 13ms)
+[2026-07-24 17:17:21.239][donutbrowser_lib::profile::manager][INFO] Attempting to create profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+[2026-07-24 17:17:21.249][donutbrowser_lib::profile::manager][INFO] Generating fingerprint for Chromium profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+ GET / 200 in 11ms (next.js: 1891µs, application-code: 10ms)
+[2026-07-24 17:17:21.808][donutbrowser_lib::chromium_manager][INFO] Generated fingerprint-chromium config for OS: windows, fields: Some(["browserBrand", "browserVersion", "hardwareConcurrency", "language", "languages", "latitude", "longitude", "platform", "seed", "timezone"])
+[2026-07-24 17:17:21.808][donutbrowser_lib::profile::manager][INFO] Successfully generated fingerprint for Chromium profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+[2026-07-24 17:17:21.821][donutbrowser_lib::profile::manager][INFO] Profile 'twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1' created successfully with ID: be9cc26c-b50b-46d5-b6af-f240288f3188
+[2026-07-24 17:17:21.824][donutbrowser_lib::browser_runner][INFO] Starting local proxy for Chromium profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1 (upstream: DIRECT)
+[2026-07-24 17:17:21.826][donutbrowser_lib::proxy_runner][INFO] Saved proxy config proxy_1784888241_1173979796 with profile_id: be9cc26c-b50b-46d5-b6af-f240288f3188
+[2026-07-24 17:17:21.828][donutbrowser_lib::proxy_runner][INFO] Proxy worker stderr will be logged to: "C:\\Users\\mrc\\AppData\\Local\\Temp\\donut-proxy-proxy_1784888241_1173979796.log"
+[2026-07-24 17:17:23.062][donutbrowser_lib::browser_runner][INFO] Configured local proxy for Chromium: Some("http://127.0.0.1:56905")
+[2026-07-24 17:17:23.063][donutbrowser_lib::browser_runner][INFO] Generating random fingerprint for Chromium profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+[2026-07-24 17:17:23.495][donutbrowser_lib::chromium_manager][INFO] Generated fingerprint-chromium config for OS: windows, fields: Some(["browserBrand", "browserVersion", "hardwareConcurrency", "language", "languages", "latitude", "longitude", "platform", "seed", "timezone"])
+[2026-07-24 17:17:23.495][donutbrowser_lib::browser_runner][INFO] New fingerprint generated, length: 226 chars
+[2026-07-24 17:17:23.496][donutbrowser_lib::browser_runner][INFO] Updated profile chromium_config with new fingerprint for profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1, fingerprint length: 226
+[2026-07-24 17:17:23.501][donutbrowser_lib::ephemeral_dirs][INFO] Created ephemeral dir for profile be9cc26c-b50b-46d5-b6af-f240288f3188: C:\Users\mrc\AppData\Local\Temp\donut-ephemeral\be9cc26c-b50b-46d5-b6af-f240288f3188
+[2026-07-24 17:17:23.502][donutbrowser_lib::browser_runner][INFO] Launching Chromium for profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+[2026-07-24 17:17:24.191][donutbrowser_lib::chromium_manager][INFO] Launching Chromium on CDP port 56910 (detached)
+[2026-07-24 17:17:24.703][donutbrowser_lib::chromium_manager][INFO] CDP ready on port 56910 after 0 attempts
+[2026-07-24 17:17:24.705][donutbrowser_lib::chromium_manager][INFO] Found 1 CDP targets
+[2026-07-24 17:17:24.706][donutbrowser_lib::chromium_manager][INFO] Found 1 page targets
+[2026-07-24 17:17:24.721][donutbrowser_lib::chromium_manager][INFO] fingerprint-chromium launch args were derived from stored fingerprint (226 chars)
+[2026-07-24 17:17:24.721][donutbrowser_lib::chromium_manager][INFO] Navigating to URL via CDP: about:blank
+[2026-07-24 17:17:25.658][donutbrowser_lib::browser_runner][INFO] Chromium launched successfully with PID: 27644
+[2026-07-24 17:17:25.659][donutbrowser_lib::browser_runner][INFO] Updated proxy PID mapping from temp (2000000000) to actual PID: 27644
+[2026-07-24 17:17:25.659][donutbrowser_lib::browser_runner][INFO] Saving profile twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1 with chromium_config fingerprint length: 226
+[2026-07-24 17:17:25.679][donutbrowser_lib::browser_runner][INFO] Successfully saved profile with process info: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+[2026-07-24 17:17:25.680][donutbrowser_lib::browser_runner][INFO] Emitting profile events for successful Chromium launch: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+[2026-07-24 17:17:25.681][donutbrowser_lib::browser_runner][INFO] Successfully emitted profile-running-changed event for Chromium twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1: running=true
+[2026-07-24 17:17:27.869][donutbrowser_lib::browser_runner][INFO] Attempting to kill Chromium process for profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1 (ID: be9cc26c-b50b-46d5-b6af-f240288f3188)
+[2026-07-24 17:17:30.038][donutbrowser_lib::browser_runner][INFO] Found Chromium process: ff25c000-1a93-4584-82b5-b0e69b7cfdbe (PID: Some(27644))
+[2026-07-24 17:17:30.039][donutbrowser_lib::chromium_manager][INFO] Cleaning up Chromium instance ff25c000-1a93-4584-82b5-b0e69b7cfdbe
+[2026-07-24 17:17:31.191][donutbrowser_lib::chromium_manager][INFO] Stopped Chromium instance ff25c000-1a93-4584-82b5-b0e69b7cfdbe (PID: 27644)
+[2026-07-24 17:17:31.906][donutbrowser_lib::browser_runner][INFO] Successfully stopped Chromium process: ff25c000-1a93-4584-82b5-b0e69b7cfdbe (PID: 27644) - verified process is dead
+[2026-07-24 17:17:31.918][donutbrowser_lib::browser_runner][INFO] Emitting profile events for successful Chromium kill: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1
+[2026-07-24 17:17:31.920][donutbrowser_lib::browser_runner][INFO] Successfully emitted profile-running-changed event for Chromium twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1: running=false
+[2026-07-24 17:17:31.962][donutbrowser_lib::ephemeral_dirs][INFO] Removed ephemeral dir for profile be9cc26c-b50b-46d5-b6af-f240288f3188: C:\Users\mrc\AppData\Local\Temp\donut-ephemeral\be9cc26c-b50b-46d5-b6af-f240288f3188
+[2026-07-24 17:17:31.962][donutbrowser_lib::browser_runner][INFO] Chromium process cleanup completed for profile: twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1 (ID: be9cc26c-b50b-46d5-b6af-f240288f3188)
+[2026-07-24 17:17:31.963][donutbrowser_lib::downloaded_browsers_registry][INFO] Starting browser version consolidation...
+[2026-07-24 17:17:31.970][donutbrowser_lib::downloaded_browsers_registry][INFO] Latest available version for chromium: 142.0.7444.175
+[2026-07-24 17:17:31.971][donutbrowser_lib::downloaded_browsers_registry][INFO] Browser version consolidation completed: 0 actions taken
+[2026-07-24 17:17:31.972][donutbrowser_lib::profile::manager][INFO] Attempting to delete profile with ID: be9cc26c-b50b-46d5-b6af-f240288f3188
+[2026-07-24 17:17:31.977][donutbrowser_lib::profile::manager][INFO] Deleting profile directory: C:\Users\mrc\AppData\Local\JnmBrowser\profiles\be9cc26c-b50b-46d5-b6af-f240288f3188
+[2026-07-24 17:17:31.978][donutbrowser_lib::profile::manager][INFO] Profile directory deleted successfully
+[2026-07-24 17:17:31.978][donutbrowser_lib::profile::manager][INFO] Profile 'twofa-backfill-worker-e03d7f4c-a2b5-4fab-a41f-84f9b0a083e1' (ID: be9cc26c-b50b-46d5-b6af-f240288f3188) deleted successfully
+[2026-07-24 17:17:31.989][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:17:31.989][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+ GET / 200 in 36ms (next.js: 1796µs, application-code: 34ms)
+ GET / 200 in 13ms (next.js: 1463µs, application-code: 11ms)
+ GET / 200 in 10ms (next.js: 1559µs, application-code: 9ms)
+ GET / 200 in 32ms (next.js: 1764µs, application-code: 30ms)
+ GET / 200 in 14ms (next.js: 1440µs, application-code: 13ms)
+ GET / 200 in 10ms (next.js: 1551µs, application-code: 8ms)
+ GET / 200 in 35ms (next.js: 1664µs, application-code: 33ms)
+ GET / 200 in 14ms (next.js: 1411µs, application-code: 12ms)
+ GET / 200 in 34ms (next.js: 1907µs, application-code: 32ms)
+ GET / 200 in 14ms (next.js: 1315µs, application-code: 12ms)
+ GET / 200 in 38ms (next.js: 1715µs, application-code: 36ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 12ms)
+[2026-07-24 17:22:06.861][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 0ccc1bb2-2a07-4bf2-bd5f-cabc1991f4e0
+[2026-07-24 17:22:06.863][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 2d6ff831-2b94-4097-b7c5-5daecc81944c
+[2026-07-24 17:22:06.863][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 38211efc-0e9b-403f-a8da-9b91aafc96b6
+[2026-07-24 17:22:06.864][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 3fa385ba-c236-4735-8dcd-456ac2258b65
+[2026-07-24 17:22:06.864][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 408017c2-ea81-4a4c-a5df-e684e8dd4a8b
+[2026-07-24 17:22:06.864][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 4192dbad-b353-4af3-a025-f14a3e648138
+[2026-07-24 17:22:06.864][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 5d83fb24-d4f5-43ed-97a8-d8c5d1bec848
+[2026-07-24 17:22:06.864][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 65b24316-d050-4d37-9509-8a73cdd9643b
+[2026-07-24 17:22:06.864][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd1ec8d-07a7-4634-a988-9c48fc9f3556
+[2026-07-24 17:22:06.865][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd8beaf-0a53-4aa0-9dfe-03d9cf3ab31c
+[2026-07-24 17:22:06.865][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8ff6709b-9000-4765-8ead-cce8983a350c
+[2026-07-24 17:22:06.865][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 91f48ed9-44c8-4040-8a15-d47fe2665e27
+[2026-07-24 17:22:06.865][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 969f8d40-f620-44a7-88e9-eaec0eb3b0ec
+[2026-07-24 17:22:06.865][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 979e50d2-989c-413c-9b79-22933432eb13
+[2026-07-24 17:22:06.866][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c16ddb01-1da2-44da-a902-6ffb78959ab2
+[2026-07-24 17:22:06.866][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c48d6a82-0ff6-4c13-9317-d0114343aa72
+[2026-07-24 17:22:06.866][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile f49096a5-9b59-49b3-a089-a76a4f0e71ce
+[2026-07-24 17:22:06.866][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile fce32569-2f37-4891-9f9c-b53403195d95
+[2026-07-24 17:22:07.257][donutbrowser_lib][INFO] Background browser version update service is disabled
+ GET / 200 in 86ms (next.js: 29ms, application-code: 57ms)
+[2026-07-24 17:22:07.475][donutbrowser_lib][INFO] Startup browser auto-update check is disabled
+[2026-07-24 17:22:07.475][donutbrowser_lib][INFO] Background app auto-update service is disabled
+[2026-07-24 17:22:07.475][donutbrowser_lib::sync::scheduler][INFO] Starting initial sync for all enabled profiles...
+[2026-07-24 17:22:07.478][donutbrowser_lib][WARN] Sync not configured, skipping missing profile check: Sync server URL not configured
+[2026-07-24 17:22:07.478][donutbrowser_lib][INFO] Sync scheduler started
+[2026-07-24 17:22:07.489][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:22:07.489][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+ GET / 200 in 18ms (next.js: 3ms, application-code: 15ms)
+ GET / 200 in 13ms (next.js: 3ms, application-code: 10ms)
+ GET / 200 in 11ms (next.js: 1988µs, application-code: 9ms)
+ GET / 200 in 11ms (next.js: 1717µs, application-code: 9ms)
+ GET / 200 in 10ms (next.js: 1443µs, application-code: 9ms)
+ GET / 200 in 14ms (next.js: 1368µs, application-code: 13ms)
+ GET / 200 in 12ms (next.js: 1741µs, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 1710µs, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 1439µs, application-code: 11ms)
+ GET / 200 in 12ms (next.js: 1717µs, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 10ms (next.js: 1593µs, application-code: 9ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 10ms)
+ GET / 200 in 15ms (next.js: 3ms, application-code: 12ms)
+ GET / 200 in 12ms (next.js: 1659µs, application-code: 11ms)
+ GET / 200 in 12ms (next.js: 1772µs, application-code: 10ms)
+ GET / 200 in 17ms (next.js: 4ms, application-code: 13ms)
+ GET / 200 in 13ms (next.js: 4ms, application-code: 10ms)
+ GET / 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET / 200 in 13ms (next.js: 3ms, application-code: 10ms)
+ GET / 200 in 12ms (next.js: 1923µs, application-code: 10ms)
+ GET / 200 in 35ms (next.js: 1872µs, application-code: 34ms)
+ GET / 200 in 16ms (next.js: 1987µs, application-code: 14ms)
+ GET / 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET / 200 in 14ms (next.js: 1572µs, application-code: 12ms)
+ GET / 200 in 44ms (next.js: 2ms, application-code: 42ms)
+ GET / 200 in 14ms (next.js: 1582µs, application-code: 13ms)
+ GET / 200 in 38ms (next.js: 2ms, application-code: 36ms)
+ GET / 200 in 15ms (next.js: 1494µs, application-code: 14ms)
+ GET / 200 in 97ms (next.js: 1902µs, application-code: 95ms)
+ GET / 200 in 10ms (next.js: 1579µs, application-code: 8ms)
+ GET / 200 in 37ms (next.js: 1666µs, application-code: 36ms)
+ GET / 200 in 10ms (next.js: 1852µs, application-code: 8ms)
+ GET / 200 in 13ms (next.js: 1481µs, application-code: 11ms)
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 12ms (next.js: 2ms, application-code: 10ms)
+ GET / 200 in 25ms (next.js: 1438µs, application-code: 23ms)
+ GET / 200 in 14ms (next.js: 1971µs, application-code: 12ms)
+ GET / 200 in 12ms (next.js: 1931µs, application-code: 10ms)
+ GET / 200 in 41ms (next.js: 2ms, application-code: 39ms)
+ GET / 200 in 13ms (next.js: 1568µs, application-code: 12ms)
+ GET / 200 in 46ms (next.js: 1690µs, application-code: 44ms)
+ GET / 200 in 11ms (next.js: 1902µs, application-code: 9ms)
+ GET / 200 in 15ms (next.js: 1687µs, application-code: 14ms)
+ GET / 200 in 47ms (next.js: 2ms, application-code: 44ms)
+ GET / 200 in 37ms (next.js: 2ms, application-code: 35ms)
+ GET / 200 in 37ms (next.js: 1883µs, application-code: 35ms)
+ GET / 200 in 13ms (next.js: 1628µs, application-code: 11ms)
+ GET / 200 in 15ms (next.js: 1637µs, application-code: 13ms)
+ GET / 200 in 15ms (next.js: 1999µs, application-code: 13ms)
+ GET / 200 in 16ms (next.js: 1724µs, application-code: 14ms)
+ GET / 200 in 42ms (next.js: 1878µs, application-code: 40ms)
+ GET / 200 in 15ms (next.js: 1476µs, application-code: 14ms)
+ GET / 200 in 14ms (next.js: 1569µs, application-code: 13ms)
+ GET / 200 in 25ms (next.js: 2ms, application-code: 22ms)
+ GET / 200 in 12ms (next.js: 1664µs, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 1589µs, application-code: 12ms)
+ GET / 200 in 13ms (next.js: 1769µs, application-code: 11ms)
+ GET / 200 in 10ms (next.js: 1498µs, application-code: 9ms)
+ GET / 200 in 38ms (next.js: 1547µs, application-code: 36ms)
+ GET / 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET / 200 in 16ms (next.js: 1558µs, application-code: 15ms)
+ GET / 200 in 11ms (next.js: 1633µs, application-code: 9ms)
+ GET / 200 in 12ms (next.js: 1668µs, application-code: 10ms)
+ GET / 200 in 15ms (next.js: 1560µs, application-code: 13ms)
+ GET / 200 in 14ms (next.js: 2ms, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 1573µs, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 1729µs, application-code: 11ms)
+ GET / 200 in 16ms (next.js: 1805µs, application-code: 14ms)
+ GET / 200 in 13ms (next.js: 1520µs, application-code: 11ms)
+ GET / 200 in 12ms (next.js: 3ms, application-code: 9ms)
+ GET / 200 in 10ms (next.js: 1749µs, application-code: 8ms)
+ GET / 200 in 15ms (next.js: 1554µs, application-code: 13ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 1396µs, application-code: 11ms)
+ GET / 200 in 10ms (next.js: 1680µs, application-code: 8ms)
+ GET / 200 in 39ms (next.js: 1671µs, application-code: 37ms)
+ GET / 200 in 10ms (next.js: 1735µs, application-code: 8ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 15ms (next.js: 1701µs, application-code: 13ms)
+ GET / 200 in 39ms (next.js: 2ms, application-code: 37ms)
+ GET / 200 in 11ms (next.js: 1966µs, application-code: 9ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 43ms (next.js: 1598µs, application-code: 42ms)
+ GET / 200 in 10ms (next.js: 1509µs, application-code: 9ms)
+ GET / 200 in 10ms (next.js: 1615µs, application-code: 8ms)
+ GET / 200 in 11ms (next.js: 1746µs, application-code: 9ms)
+ GET / 200 in 13ms (next.js: 1377µs, application-code: 12ms)
+ GET / 200 in 13ms (next.js: 1737µs, application-code: 11ms)
+ GET / 200 in 15ms (next.js: 1450µs, application-code: 14ms)
+ GET / 200 in 19ms (next.js: 1553µs, application-code: 18ms)
+ GET / 200 in 14ms (next.js: 1706µs, application-code: 12ms)
+ GET / 200 in 11ms (next.js: 1431µs, application-code: 10ms)
+ GET / 200 in 11ms (next.js: 1889µs, application-code: 9ms)
+ GET / 200 in 15ms (next.js: 3ms, application-code: 12ms)
+ GET / 200 in 12ms (next.js: 1558µs, application-code: 10ms)
+ GET / 200 in 21ms (next.js: 2ms, application-code: 19ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 15ms (next.js: 4ms, application-code: 11ms)
+ GET / 200 in 12ms (next.js: 1790µs, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 1702µs, application-code: 12ms)
+ GET / 200 in 10ms (next.js: 1513µs, application-code: 8ms)
+ GET / 200 in 14ms (next.js: 1438µs, application-code: 12ms)
+ GET / 200 in 55ms (next.js: 1730µs, application-code: 53ms)
+ GET / 200 in 13ms (next.js: 1587µs, application-code: 11ms)
+ GET / 200 in 16ms (next.js: 1722µs, application-code: 14ms)
+ GET / 200 in 12ms (next.js: 1494µs, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 3ms, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 1689µs, application-code: 12ms)
+ GET / 200 in 10ms (next.js: 1522µs, application-code: 8ms)
+ GET / 200 in 13ms (next.js: 1400µs, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 1696µs, application-code: 12ms)
+ GET / 200 in 13ms (next.js: 3ms, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 1772µs, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 1804µs, application-code: 11ms)
+ GET / 200 in 28ms (next.js: 1781µs, application-code: 26ms)
+ GET / 200 in 12ms (next.js: 1591µs, application-code: 11ms)
+ GET / 200 in 14ms (next.js: 1815µs, application-code: 12ms)
+ GET / 200 in 34ms (next.js: 2ms, application-code: 32ms)
+ GET / 200 in 13ms (next.js: 1438µs, application-code: 12ms)
+ GET / 200 in 12ms (next.js: 2ms, application-code: 10ms)
+ GET / 200 in 12ms (next.js: 1930µs, application-code: 10ms)
+[2026-07-24 17:26:56.868][donutbrowser_lib::profile::manager][INFO] Attempting to create profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+[2026-07-24 17:26:56.876][donutbrowser_lib::profile::manager][INFO] Generating fingerprint for Chromium profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+ GET / 200 in 12ms (next.js: 2ms, application-code: 10ms)
+[2026-07-24 17:26:57.457][donutbrowser_lib::chromium_manager][INFO] Generated fingerprint-chromium config for OS: windows, fields: Some(["browserBrand", "browserVersion", "hardwareConcurrency", "language", "languages", "latitude", "longitude", "platform", "seed", "timezone"])
+[2026-07-24 17:26:57.458][donutbrowser_lib::profile::manager][INFO] Successfully generated fingerprint for Chromium profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+[2026-07-24 17:26:57.470][donutbrowser_lib::profile::manager][INFO] Profile 'twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86' created successfully with ID: c3003d93-ec5e-4e84-a362-c4c20ff6f04c
+[2026-07-24 17:26:57.477][donutbrowser_lib::browser_runner][INFO] Starting local proxy for Chromium profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86 (upstream: DIRECT)
+[2026-07-24 17:26:57.480][donutbrowser_lib::proxy_runner][INFO] Saved proxy config proxy_1784888817_1300661966 with profile_id: c3003d93-ec5e-4e84-a362-c4c20ff6f04c
+[2026-07-24 17:26:57.484][donutbrowser_lib::proxy_runner][INFO] Proxy worker stderr will be logged to: "C:\\Users\\mrc\\AppData\\Local\\Temp\\donut-proxy-proxy_1784888817_1300661966.log"
+[2026-07-24 17:26:58.748][donutbrowser_lib::browser_runner][INFO] Configured local proxy for Chromium: Some("http://127.0.0.1:64423")
+[2026-07-24 17:26:58.749][donutbrowser_lib::browser_runner][INFO] Generating random fingerprint for Chromium profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+[2026-07-24 17:26:59.154][donutbrowser_lib::chromium_manager][INFO] Generated fingerprint-chromium config for OS: windows, fields: Some(["browserBrand", "browserVersion", "hardwareConcurrency", "language", "languages", "latitude", "longitude", "platform", "seed", "timezone"])
+[2026-07-24 17:26:59.155][donutbrowser_lib::browser_runner][INFO] New fingerprint generated, length: 226 chars
+[2026-07-24 17:26:59.155][donutbrowser_lib::browser_runner][INFO] Updated profile chromium_config with new fingerprint for profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86, fingerprint length: 226
+[2026-07-24 17:26:59.160][donutbrowser_lib::ephemeral_dirs][INFO] Created ephemeral dir for profile c3003d93-ec5e-4e84-a362-c4c20ff6f04c: C:\Users\mrc\AppData\Local\Temp\donut-ephemeral\c3003d93-ec5e-4e84-a362-c4c20ff6f04c
+[2026-07-24 17:26:59.160][donutbrowser_lib::browser_runner][INFO] Launching Chromium for profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+[2026-07-24 17:26:59.797][donutbrowser_lib::chromium_manager][INFO] Launching Chromium on CDP port 64428 (detached)
+[2026-07-24 17:27:00.324][donutbrowser_lib::chromium_manager][INFO] CDP ready on port 64428 after 0 attempts
+[2026-07-24 17:27:00.328][donutbrowser_lib::chromium_manager][INFO] Found 1 CDP targets
+[2026-07-24 17:27:00.328][donutbrowser_lib::chromium_manager][INFO] Found 1 page targets
+[2026-07-24 17:27:00.343][donutbrowser_lib::chromium_manager][INFO] fingerprint-chromium launch args were derived from stored fingerprint (226 chars)
+[2026-07-24 17:27:00.343][donutbrowser_lib::chromium_manager][INFO] Navigating to URL via CDP: about:blank
+[2026-07-24 17:27:04.438][donutbrowser_lib::browser_runner][INFO] Chromium launched successfully with PID: 221348
+[2026-07-24 17:27:04.439][donutbrowser_lib::browser_runner][INFO] Updated proxy PID mapping from temp (2000000000) to actual PID: 221348
+[2026-07-24 17:27:04.439][donutbrowser_lib::browser_runner][INFO] Saving profile twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86 with chromium_config fingerprint length: 226
+[2026-07-24 17:27:04.458][donutbrowser_lib::browser_runner][INFO] Successfully saved profile with process info: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+[2026-07-24 17:27:04.458][donutbrowser_lib::browser_runner][INFO] Emitting profile events for successful Chromium launch: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+[2026-07-24 17:27:04.460][donutbrowser_lib::browser_runner][INFO] Successfully emitted profile-running-changed event for Chromium twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86: running=true
+[2026-07-24 17:27:06.974][donutbrowser_lib::auto_service::openai::two_factor_backfill::engine][WARN] 2FA backfill task backfill-856e7df0-3065-40f6-bf65-5ec684629f61 account 24b0a26c-e14d-4b4d-a7fb-4085ae56c51c unknown auth surface: could not fill email input
+[2026-07-24 17:27:06.980][donutbrowser_lib::browser_runner][INFO] Attempting to kill Chromium process for profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86 (ID: c3003d93-ec5e-4e84-a362-c4c20ff6f04c)
+[2026-07-24 17:27:11.331][donutbrowser_lib::browser_runner][INFO] Found Chromium process: 80e8d4b8-2455-49ee-8eb2-463d817b0aa5 (PID: Some(221348))
+[2026-07-24 17:27:11.499][donutbrowser_lib::chromium_manager][INFO] Cleaning up Chromium instance 80e8d4b8-2455-49ee-8eb2-463d817b0aa5
+[2026-07-24 17:27:12.691][donutbrowser_lib::chromium_manager][INFO] Stopped Chromium instance 80e8d4b8-2455-49ee-8eb2-463d817b0aa5 (PID: 221348)
+[2026-07-24 17:27:13.414][donutbrowser_lib::browser_runner][INFO] Successfully stopped Chromium process: 80e8d4b8-2455-49ee-8eb2-463d817b0aa5 (PID: 221348) - verified process is dead
+[2026-07-24 17:27:13.430][donutbrowser_lib::browser_runner][INFO] Emitting profile events for successful Chromium kill: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86
+[2026-07-24 17:27:13.431][donutbrowser_lib::browser_runner][INFO] Successfully emitted profile-running-changed event for Chromium twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86: running=false
+[2026-07-24 17:27:13.485][donutbrowser_lib::ephemeral_dirs][INFO] Removed ephemeral dir for profile c3003d93-ec5e-4e84-a362-c4c20ff6f04c: C:\Users\mrc\AppData\Local\Temp\donut-ephemeral\c3003d93-ec5e-4e84-a362-c4c20ff6f04c
+[2026-07-24 17:27:13.486][donutbrowser_lib::browser_runner][INFO] Chromium process cleanup completed for profile: twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86 (ID: c3003d93-ec5e-4e84-a362-c4c20ff6f04c)
+[2026-07-24 17:27:13.486][donutbrowser_lib::downloaded_browsers_registry][INFO] Starting browser version consolidation...
+[2026-07-24 17:27:13.495][donutbrowser_lib::downloaded_browsers_registry][INFO] Latest available version for chromium: 142.0.7444.175
+[2026-07-24 17:27:13.497][donutbrowser_lib::downloaded_browsers_registry][INFO] Browser version consolidation completed: 0 actions taken
+[2026-07-24 17:27:13.498][donutbrowser_lib::profile::manager][INFO] Attempting to delete profile with ID: c3003d93-ec5e-4e84-a362-c4c20ff6f04c
+[2026-07-24 17:27:13.505][donutbrowser_lib::profile::manager][INFO] Deleting profile directory: C:\Users\mrc\AppData\Local\JnmBrowser\profiles\c3003d93-ec5e-4e84-a362-c4c20ff6f04c
+[2026-07-24 17:27:13.506][donutbrowser_lib::profile::manager][INFO] Profile directory deleted successfully
+[2026-07-24 17:27:13.506][donutbrowser_lib::profile::manager][INFO] Profile 'twofa-backfill-worker-78cdc731-aff1-4968-bb0d-3d8678548f86' (ID: c3003d93-ec5e-4e84-a362-c4c20ff6f04c) deleted successfully
+[2026-07-24 17:27:13.518][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:27:13.518][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+ GET / 200 in 12ms (next.js: 1974µs, application-code: 10ms)
+ GET / 200 in 37ms (next.js: 1646µs, application-code: 35ms)
+ GET / 200 in 10ms (next.js: 1518µs, application-code: 8ms)
+ GET / 200 in 39ms (next.js: 1782µs, application-code: 37ms)
+ GET / 200 in 22ms (next.js: 1453µs, application-code: 21ms)
+ GET / 200 in 38ms (next.js: 1898µs, application-code: 36ms)
+ GET / 200 in 10ms (next.js: 1426µs, application-code: 8ms)
+ GET / 200 in 14ms (next.js: 1861µs, application-code: 13ms)
+ GET / 200 in 44ms (next.js: 1724µs, application-code: 42ms)
+ GET / 200 in 12ms (next.js: 1553µs, application-code: 11ms)
+[2026-07-24 17:34:19.729][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 0ccc1bb2-2a07-4bf2-bd5f-cabc1991f4e0
+[2026-07-24 17:34:19.730][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 2d6ff831-2b94-4097-b7c5-5daecc81944c
+[2026-07-24 17:34:19.731][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 38211efc-0e9b-403f-a8da-9b91aafc96b6
+[2026-07-24 17:34:19.731][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 3fa385ba-c236-4735-8dcd-456ac2258b65
+[2026-07-24 17:34:19.731][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 408017c2-ea81-4a4c-a5df-e684e8dd4a8b
+[2026-07-24 17:34:19.731][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 4192dbad-b353-4af3-a025-f14a3e648138
+[2026-07-24 17:34:19.732][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 5d83fb24-d4f5-43ed-97a8-d8c5d1bec848
+[2026-07-24 17:34:19.732][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 65b24316-d050-4d37-9509-8a73cdd9643b
+[2026-07-24 17:34:19.732][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd1ec8d-07a7-4634-a988-9c48fc9f3556
+[2026-07-24 17:34:19.732][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd8beaf-0a53-4aa0-9dfe-03d9cf3ab31c
+[2026-07-24 17:34:19.733][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8ff6709b-9000-4765-8ead-cce8983a350c
+[2026-07-24 17:34:19.733][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 91f48ed9-44c8-4040-8a15-d47fe2665e27
+[2026-07-24 17:34:19.733][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 969f8d40-f620-44a7-88e9-eaec0eb3b0ec
+[2026-07-24 17:34:19.733][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 979e50d2-989c-413c-9b79-22933432eb13
+[2026-07-24 17:34:19.734][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c16ddb01-1da2-44da-a902-6ffb78959ab2
+[2026-07-24 17:34:19.734][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c48d6a82-0ff6-4c13-9317-d0114343aa72
+[2026-07-24 17:34:19.734][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile f49096a5-9b59-49b3-a089-a76a4f0e71ce
+[2026-07-24 17:34:19.735][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile fce32569-2f37-4891-9f9c-b53403195d95
+[2026-07-24 17:34:20.188][donutbrowser_lib][INFO] Background browser version update service is disabled
+ GET / 200 in 101ms (next.js: 32ms, application-code: 69ms)
+[2026-07-24 17:34:20.492][donutbrowser_lib][INFO] Startup browser auto-update check is disabled
+[2026-07-24 17:34:20.492][donutbrowser_lib][INFO] Background app auto-update service is disabled
+[2026-07-24 17:34:20.493][donutbrowser_lib::sync::scheduler][INFO] Starting initial sync for all enabled profiles...
+[2026-07-24 17:34:20.495][donutbrowser_lib][WARN] Sync not configured, skipping missing profile check: Sync server URL not configured
+[2026-07-24 17:34:20.495][donutbrowser_lib][INFO] Sync scheduler started
+[2026-07-24 17:34:20.513][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:34:20.514][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+ GET / 200 in 16ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 31ms (next.js: 3ms, application-code: 28ms)
+ GET / 200 in 12ms (next.js: 1579µs, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 1928µs, application-code: 11ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 11ms)
+ GET / 200 in 15ms (next.js: 1684µs, application-code: 13ms)
+ GET / 200 in 16ms (next.js: 1631µs, application-code: 15ms)
+ GET / 200 in 10ms (next.js: 1535µs, application-code: 9ms)
+ GET / 200 in 15ms (next.js: 3ms, application-code: 12ms)
+ GET / 200 in 11ms (next.js: 1457µs, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 1331µs, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 1785µs, application-code: 11ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 10ms)
+ GET / 200 in 13ms (next.js: 1617µs, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 1645µs, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 2ms, application-code: 12ms)
+ GET / 200 in 16ms (next.js: 4ms, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 4ms, application-code: 11ms)
+ GET / 200 in 18ms (next.js: 2ms, application-code: 16ms)
+ GET / 200 in 14ms (next.js: 1963µs, application-code: 12ms)
+ GET / 200 in 48ms (next.js: 2ms, application-code: 46ms)
+ GET / 200 in 16ms (next.js: 1623µs, application-code: 14ms)
+ GET / 200 in 15ms (next.js: 1648µs, application-code: 13ms)
+ GET / 200 in 12ms (next.js: 1658µs, application-code: 11ms)
+ GET / 200 in 12ms (next.js: 1618µs, application-code: 10ms)
+ GET / 200 in 14ms (next.js: 1701µs, application-code: 13ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 18ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 42ms (next.js: 1623µs, application-code: 40ms)
+ GET / 200 in 12ms (next.js: 2ms, application-code: 10ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 11ms)
+ GET / 200 in 14ms (next.js: 3ms, application-code: 12ms)
+ GET / 200 in 12ms (next.js: 1793µs, application-code: 10ms)
+ GET / 200 in 12ms (next.js: 1975µs, application-code: 10ms)
+ GET / 200 in 17ms (next.js: 1561µs, application-code: 16ms)
+ GET / 200 in 12ms (next.js: 1339µs, application-code: 11ms)
+ GET / 200 in 12ms (next.js: 1444µs, application-code: 11ms)
+ GET / 200 in 14ms (next.js: 2ms, application-code: 12ms)
+ GET / 200 in 41ms (next.js: 1795µs, application-code: 39ms)
+ GET / 200 in 13ms (next.js: 1487µs, application-code: 12ms)
+ GET / 200 in 13ms (next.js: 1568µs, application-code: 11ms)
+ GET / 200 in 11ms (next.js: 2ms, application-code: 9ms)
+ GET / 200 in 33ms (next.js: 1564µs, application-code: 31ms)
+ GET / 200 in 10ms (next.js: 1476µs, application-code: 9ms)
+ GET / 200 in 12ms (next.js: 1474µs, application-code: 11ms)
+ GET / 200 in 38ms (next.js: 2ms, application-code: 36ms)
+ GET / 200 in 11ms (next.js: 1386µs, application-code: 10ms)
+ GET / 200 in 36ms (next.js: 1653µs, application-code: 34ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 14ms)
+ GET / 200 in 57ms (next.js: 3ms, application-code: 55ms)
+ GET / 200 in 13ms (next.js: 1448µs, application-code: 12ms)
+ GET / 200 in 12ms (next.js: 2ms, application-code: 10ms)
+ GET / 200 in 14ms (next.js: 1479µs, application-code: 12ms)
+ GET / 200 in 12ms (next.js: 1483µs, application-code: 10ms)
+ GET / 200 in 15ms (next.js: 1706µs, application-code: 13ms)
+ GET / 200 in 16ms (next.js: 3ms, application-code: 13ms)
+ GET / 200 in 52ms (next.js: 3ms, application-code: 49ms)
+ GET / 200 in 10ms (next.js: 1887µs, application-code: 9ms)
+ GET / 200 in 16ms (next.js: 4ms, application-code: 12ms)
+ GET / 200 in 14ms (next.js: 1427µs, application-code: 12ms)
+ GET / 200 in 13ms (next.js: 2ms, application-code: 11ms)
+ GET / 200 in 14ms (next.js: 1728µs, application-code: 12ms)
+ GET / 200 in 11ms (next.js: 1653µs, application-code: 9ms)
+ GET / 200 in 25ms (next.js: 1665µs, application-code: 24ms)
+ GET / 200 in 15ms (next.js: 4ms, application-code: 11ms)
+ GET / 200 in 15ms (next.js: 1851µs, application-code: 13ms)
+ GET / 200 in 102ms (next.js: 4ms, application-code: 98ms)
+ GET / 200 in 21ms (next.js: 2ms, application-code: 19ms)
+[2026-07-24 17:41:40.288][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 0ccc1bb2-2a07-4bf2-bd5f-cabc1991f4e0
+[2026-07-24 17:41:40.290][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 2d6ff831-2b94-4097-b7c5-5daecc81944c
+[2026-07-24 17:41:40.291][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 38211efc-0e9b-403f-a8da-9b91aafc96b6
+[2026-07-24 17:41:40.292][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 3fa385ba-c236-4735-8dcd-456ac2258b65
+[2026-07-24 17:41:40.292][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 408017c2-ea81-4a4c-a5df-e684e8dd4a8b
+[2026-07-24 17:41:40.292][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 4192dbad-b353-4af3-a025-f14a3e648138
+[2026-07-24 17:41:40.292][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 5d83fb24-d4f5-43ed-97a8-d8c5d1bec848
+[2026-07-24 17:41:40.293][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 65b24316-d050-4d37-9509-8a73cdd9643b
+[2026-07-24 17:41:40.293][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd1ec8d-07a7-4634-a988-9c48fc9f3556
+[2026-07-24 17:41:40.293][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8dd8beaf-0a53-4aa0-9dfe-03d9cf3ab31c
+[2026-07-24 17:41:40.293][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 8ff6709b-9000-4765-8ead-cce8983a350c
+[2026-07-24 17:41:40.294][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 91f48ed9-44c8-4040-8a15-d47fe2665e27
+[2026-07-24 17:41:40.294][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 969f8d40-f620-44a7-88e9-eaec0eb3b0ec
+[2026-07-24 17:41:40.294][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile 979e50d2-989c-413c-9b79-22933432eb13
+[2026-07-24 17:41:40.294][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c16ddb01-1da2-44da-a902-6ffb78959ab2
+[2026-07-24 17:41:40.295][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile c48d6a82-0ff6-4c13-9317-d0114343aa72
+[2026-07-24 17:41:40.295][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile f49096a5-9b59-49b3-a089-a76a4f0e71ce
+[2026-07-24 17:41:40.295][donutbrowser_lib::ephemeral_dirs][INFO] Recovered ephemeral dir for profile fce32569-2f37-4891-9f9c-b53403195d95
+[2026-07-24 17:41:40.741][donutbrowser_lib][INFO] Background browser version update service is disabled
+ GET / 200 in 299ms (next.js: 58ms, application-code: 241ms)
+[2026-07-24 17:41:41.295][donutbrowser_lib][INFO] Startup browser auto-update check is disabled
+[2026-07-24 17:41:41.296][donutbrowser_lib][INFO] Background app auto-update service is disabled
+[2026-07-24 17:41:41.296][donutbrowser_lib::sync::scheduler][INFO] Starting initial sync for all enabled profiles...
+[2026-07-24 17:41:41.299][donutbrowser_lib][WARN] Sync not configured, skipping missing profile check: Sync server URL not configured
+[2026-07-24 17:41:41.299][donutbrowser_lib][INFO] Sync scheduler started
+[2026-07-24 17:41:41.320][donutbrowser_lib::downloaded_browsers_registry][INFO] Keeping: chromium 142.0.7444.175 (in use by profile)
+[2026-07-24 17:41:41.320][donutbrowser_lib::downloaded_browsers_registry][INFO] No unused binaries found to clean up
+ GET / 200 in 23ms (next.js: 3ms, application-code: 20ms)
+ GET / 200 in 27ms (next.js: 4ms, application-code: 23ms)
+ GET / 200 in 23ms (next.js: 3ms, application-code: 21ms)
+ GET / 200 in 19ms (next.js: 3ms, application-code: 16ms)
+ GET / 200 in 17ms (next.js: 3ms, application-code: 14ms)
+ GET / 200 in 18ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 21ms (next.js: 3ms, application-code: 18ms)
+ GET / 200 in 17ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 58ms (next.js: 3ms, application-code: 55ms)
+ GET / 200 in 113ms (next.js: 3ms, application-code: 110ms)
+ GET / 200 in 22ms (next.js: 2ms, application-code: 20ms)
+ GET / 200 in 39ms (next.js: 6ms, application-code: 33ms)
+ GET / 200 in 18ms (next.js: 2ms, application-code: 15ms)
+ GET / 200 in 24ms (next.js: 4ms, application-code: 20ms)
+ ELIFECYCLE  Command failed with exit code 4294967295.

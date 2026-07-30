@@ -5,10 +5,24 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuFolderOpen, LuRocket } from "react-icons/lu";
 import { toast } from "sonner";
+import {
+  type AutomationProfilePolicy,
+  automationErrorTranslationKey,
+  automationProfilePolicyPayload,
+  DEFAULT_AUTOMATION_PROFILE_POLICY,
+  registrationConcurrency,
+} from "@/components/automation-profile-policy";
+import { AutomationProfilePolicyFields } from "@/components/automation-profile-policy-fields";
 import { CdkInventoryTable } from "@/components/cdk-inventory-table";
 import { RegisteredAccountsTable } from "@/components/registered-accounts-table";
 import { RegistrationProgressCard } from "@/components/registration-progress-card";
+import {
+  isTerminalRegistrationProgress,
+  registrationProgressKey,
+  selectRegistrationProgressList,
+} from "@/components/registration-progress-selection";
 import { SmsProviderFields } from "@/components/sms-provider-fields";
+import { TwoFactorBackfillDialog } from "@/components/two-factor-backfill-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -66,6 +80,9 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
   const [proxyId, setProxyId] = useState("");
   const [vpnId, setVpnId] = useState("");
   const [browserType, setBrowserType] = useState("chromium");
+  const [profilePolicy, setProfilePolicy] = useState<AutomationProfilePolicy>({
+    ...DEFAULT_AUTOMATION_PROFILE_POLICY,
+  });
   const [maxRetries, setMaxRetries] = useState(3);
   const [accountsPerCdk, setAccountsPerCdk] = useState(1);
   const [concurrency, setConcurrency] = useState(1);
@@ -84,6 +101,12 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     "gmail.123452026.xyz",
   );
   const [activeTab, setActiveTab] = useState("register");
+  const [twoFactorBackfillOpen, setTwoFactorBackfillOpen] = useState(false);
+  const [twoFactorBackfillKeys, setTwoFactorBackfillKeys] = useState<string[]>(
+    [],
+  );
+  const [twoFactorBackfillRunning, setTwoFactorBackfillRunning] =
+    useState(false);
   /** When set, Start clamps accountsPerCdk to this remaining budget for the selected CDK. */
   const [topUpRemaining, setTopUpRemaining] = useState<number | null>(null);
 
@@ -103,7 +126,7 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
     { value: "Australia", labelKey: "registration.nordLocAustralia" },
   ] as const;
 
-  const progressList = Array.from(progressMap.values());
+  const progressList = selectRegistrationProgressList(progressMap);
 
   // Prefer WireGuard inventory created from Nord Access Token; CLI is backup only.
   useEffect(() => {
@@ -252,6 +275,19 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
 
   const parsedCdks = parseCdks(cdkText);
   const cdkCount = parsedCdks.length;
+  const selectedVpnMaxSessions = Math.min(
+    6,
+    Math.max(
+      1,
+      vpnConfigs.find((config) => config.id === vpnId)?.max_sessions ?? 6,
+    ),
+  );
+  const concurrencyLimit = networkMode === "vpn" ? selectedVpnMaxSessions : 8;
+  const displayedConcurrency = profilePolicy.profileId
+    ? 1
+    : networkMode === "nord"
+      ? 1
+      : Math.min(concurrencyLimit, Math.max(1, concurrency));
 
   /** Live remaining for a single known inventory CDK (prefer list over top-up snapshot). */
   const liveSingleRemaining = (() => {
@@ -338,59 +374,58 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
       }
     }
 
-    await startRegistration({
-      cdks,
-      browserType,
-      proxyId:
-        networkMode === "proxy" ? proxyId.trim() || undefined : undefined,
-      vpnId: networkMode === "vpn" ? vpnId.trim() || undefined : undefined,
-      maxRetries,
-      accountsPerCdk: accountsPerCdkForStart,
-      headless,
-      concurrency:
-        networkMode === "nord"
-          ? 1
-          : networkMode === "vpn"
-            ? Math.min(
-                6,
-                Math.max(
-                  1,
-                  vpnConfigs.find((v) => v.id === vpnId)?.max_sessions ?? 6,
-                ),
-              )
-            : Math.min(8, Math.max(1, concurrency)),
-      nordMaxSessions:
-        networkMode === "vpn"
-          ? Math.min(
-              6,
-              Math.max(
-                1,
-                vpnConfigs.find((v) => v.id === vpnId)?.max_sessions ?? 6,
-              ),
-            )
+    try {
+      await startRegistration({
+        cdks,
+        ...automationProfilePolicyPayload(profilePolicy),
+        browserType,
+        proxyId:
+          networkMode === "proxy" ? proxyId.trim() || undefined : undefined,
+        vpnId: networkMode === "vpn" ? vpnId.trim() || undefined : undefined,
+        maxRetries,
+        accountsPerCdk: accountsPerCdkForStart,
+        headless,
+        concurrency: registrationConcurrency(
+          profilePolicy.profileId,
+          networkMode === "nord" ? 1 : displayedConcurrency,
+        ),
+        nordMaxSessions:
+          networkMode === "vpn" ? selectedVpnMaxSessions : undefined,
+        networkMode,
+        rotateEveryN:
+          networkMode === "nord" || networkMode === "vpn" ? rotateEveryN : 0,
+        nordGroup:
+          networkMode === "nord" || networkMode === "vpn"
+            ? nordGroup.trim() || undefined
+            : undefined,
+        nordServerName:
+          networkMode === "nord"
+            ? nordServerName.trim() || undefined
+            : undefined,
+        emailProvider,
+        smsProvider: smsEnabled ? "viotp" : undefined,
+        smsServiceId: smsEnabled
+          ? Number(smsServiceId) || undefined
           : undefined,
-      networkMode,
-      rotateEveryN:
-        networkMode === "nord" || networkMode === "vpn" ? rotateEveryN : 0,
-      nordGroup:
-        networkMode === "nord" || networkMode === "vpn"
-          ? nordGroup.trim() || undefined
-          : undefined,
-      nordServerName:
-        networkMode === "nord" ? nordServerName.trim() || undefined : undefined,
-      emailProvider,
-      smsProvider: smsEnabled ? "viotp" : undefined,
-      smsServiceId: smsEnabled ? Number(smsServiceId) || undefined : undefined,
-      smsNetwork: smsEnabled ? smsNetwork.trim() || undefined : undefined,
-      smsCountry: smsEnabled ? smsCountry : undefined,
-      smsToken: smsEnabled ? smsTokenOverride.trim() || undefined : undefined,
-    });
-    setActiveTab("progress");
+        smsNetwork: smsEnabled ? smsNetwork.trim() || undefined : undefined,
+        smsCountry: smsEnabled ? smsCountry : undefined,
+        smsToken: smsEnabled ? smsTokenOverride.trim() || undefined : undefined,
+      });
+      setActiveTab("progress");
+    } catch (error) {
+      toast.error(t(automationErrorTranslationKey(error)));
+    }
   };
 
   const handleDelete = async (accountId: string) => {
     await deleteAccount(accountId);
     await refreshAccounts();
+  };
+
+  const handleActivateTwoFactor = (selectedKeys: string[]) => {
+    if (selectedKeys.length === 0 || twoFactorBackfillRunning) return;
+    setTwoFactorBackfillKeys(selectedKeys);
+    setTwoFactorBackfillOpen(true);
   };
 
   return (
@@ -583,8 +618,12 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="chromium">Chromium</SelectItem>
-                    <SelectItem value="camoufox">Camoufox</SelectItem>
+                    <SelectItem value="chromium">
+                      {t("browser.chromium")}
+                    </SelectItem>
+                    <SelectItem value="camoufox">
+                      {t("browser.camoufox")}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -622,6 +661,15 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               {t("registration.settingsHint")}
             </p>
 
+            <AutomationProfilePolicyFields
+              idPrefix="registration"
+              browserType={browserType}
+              value={profilePolicy}
+              onChange={setProfilePolicy}
+              disabled={loading}
+              active={open}
+            />
+
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               <div className="space-y-2">
                 <Label htmlFor="perCdk">
@@ -657,34 +705,28 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
                   id="concurrency"
                   type="number"
                   min={1}
-                  max={8}
-                  disabled={networkMode === "nord" || networkMode === "vpn"}
-                  value={
-                    networkMode === "nord"
-                      ? 1
-                      : networkMode === "vpn"
-                        ? Math.min(
-                            6,
-                            Math.max(
-                              1,
-                              vpnConfigs.find((v) => v.id === vpnId)
-                                ?.max_sessions ?? 6,
-                            ),
-                          )
-                        : concurrency
+                  max={concurrencyLimit}
+                  disabled={
+                    networkMode === "nord" || Boolean(profilePolicy.profileId)
                   }
+                  value={displayedConcurrency}
                   onChange={(e) =>
                     setConcurrency(
-                      Math.min(8, Math.max(1, Number(e.target.value) || 1)),
+                      Math.min(
+                        concurrencyLimit,
+                        Math.max(1, Number(e.target.value) || 1),
+                      ),
                     )
                   }
                 />
                 <p className="text-[11px] text-muted-foreground">
-                  {networkMode === "nord"
-                    ? t("registration.concurrencyNordHint")
-                    : networkMode === "vpn"
-                      ? t("registration.concurrencyVpnAutoHint")
-                      : t("registration.concurrencyHint")}
+                  {profilePolicy.profileId
+                    ? t("automationProfile.profileConcurrencyOne")
+                    : networkMode === "nord"
+                      ? t("registration.concurrencyNordHint")
+                      : networkMode === "vpn"
+                        ? t("registration.nordMaxSessionsHint")
+                        : t("registration.concurrencyHint")}
                 </p>
               </div>
 
@@ -998,10 +1040,12 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
             ) : (
               progressList.map((p) => (
                 <RegistrationProgressCard
-                  key={p.taskId}
+                  key={registrationProgressKey(p)}
                   progress={p}
                   onCancel={
-                    p.result ? undefined : () => cancelRegistration(p.taskId)
+                    isTerminalRegistrationProgress(p)
+                      ? undefined
+                      : () => cancelRegistration(p.taskId)
                   }
                 />
               ))
@@ -1017,6 +1061,8 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
               onDelete={handleDelete}
               onRefresh={refreshAccounts}
               onUpdateStatus={updateAccountStatus}
+              onActivateTwoFactor={handleActivateTwoFactor}
+              twoFactorBackfillRunning={twoFactorBackfillRunning}
             />
           </TabsContent>
 
@@ -1033,6 +1079,13 @@ export function AccountRegistrationDialog({ open, onOpenChange }: Props) {
           </TabsContent>
         </Tabs>
       </DialogContent>
+      <TwoFactorBackfillDialog
+        open={twoFactorBackfillOpen}
+        onOpenChange={setTwoFactorBackfillOpen}
+        selectedAccountKeys={twoFactorBackfillKeys}
+        onTerminal={refreshAccounts}
+        onRunningChange={setTwoFactorBackfillRunning}
+      />
     </Dialog>
   );
 }
